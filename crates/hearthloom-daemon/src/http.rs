@@ -686,6 +686,21 @@ mod write_actor_tests {
         let own = KeyGrants { own_device: true, ..capture };
         assert_eq!(write_actor(&key(&[], Some(own)), claimed()).actor, "human:device:watch");
     }
+
+    #[test]
+    fn test_the_phone_mints_only_scoped_keys() {
+        use super::{device_mints_scoped_key, KeyCreateBody};
+        let body = |v: serde_json::Value| serde_json::from_value::<KeyCreateBody>(v).unwrap();
+        let capture_key = body(serde_json::json!({"actor": "x", "name": "capture", "grants": {"capture": true, "own_device": true}}));
+        let admin_key = body(serde_json::json!({"actor": "x", "name": "evil", "scopes": ["admin"]}));
+        let phone = key(&["read", "ingest", "notify"], None);
+        assert!(device_mints_scoped_key(&phone, &capture_key));
+        assert!(!device_mints_scoped_key(&phone, &admin_key), "never an ordinary key");
+        // Keys that aren't the owner's never get the exception.
+        assert!(!device_mints_scoped_key(&key(&["read"], None), &capture_key));
+        let scoped = KeyGrants { capture: true, ..Default::default() };
+        assert!(!device_mints_scoped_key(&key(&[], Some(scoped)), &capture_key));
+    }
 }
 
 #[cfg(test)]
@@ -2553,6 +2568,15 @@ fn write_actor(auth: &AuthInfo, claimed: String) -> Actor {
     }
 }
 
+/// The owner's own device (the paired phone's key) may mint a SCOPED key
+/// — grants, no scopes: always narrower than itself — such as the phone's
+/// capture key. Every other key management needs `require_key_admin`.
+fn device_mints_scoped_key(auth: &AuthInfo, body: &KeyCreateBody) -> bool {
+    matches!(&auth.0, Some(c) if c.grants.is_none() && is_owner_key(&c.scopes, false))
+        && body.grants.is_some()
+        && body.scopes.is_empty()
+}
+
 /// Only the signed-in human (or an admin key) manages keys — a scoped or
 /// ordinary integration key must never mint, approve or inspect others.
 fn require_key_admin(auth: &AuthInfo) -> Result<(), ApiError> {
@@ -2568,7 +2592,9 @@ async fn keys_create(
     axum::Extension(auth): axum::Extension<AuthInfo>,
     Json(body): Json<KeyCreateBody>,
 ) -> Result<Json<Value>, ApiError> {
-    require_key_admin(&auth)?;
+    if !device_mints_scoped_key(&auth, &body) {
+        require_key_admin(&auth)?;
+    }
     if body.actor.trim().is_empty() {
         return Err(bad_request("actor is required on every write"));
     }

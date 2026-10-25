@@ -793,7 +793,9 @@ the design log 2026-07-14.
   admin key, install a plugin or relabel private records. A new route is
   owner-only for such keys until listed — list it under the narrowest
   scope; `test_every_listed_route_exists` keeps the table honest. Key
-  management also needs `require_key_admin`. A write by any key that
+  management also needs `require_key_admin` — except the paired phone
+  minting a SCOPED key (`device_mints_scoped_key`: grants, no scopes), as
+  the iOS app does for its capture key. A write by any key that
   isn't the owner's lands under `agent:key:<name>` (`write_actor`) —
   never the body's actor.
 - **THE BROWSER RULE (0.5.71).** CORS is granted only to bearer-key

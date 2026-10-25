@@ -8,6 +8,12 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+### Fixed
+- The paired phone can set up Quick Capture again: its key may mint a
+  SCOPED key (grants, no scopes — always narrower than itself), such as
+  the capture key, which 0.5.71's admin-only key management refused. Every
+  other key management still needs an admin key or a signed-in session.
+
 ## 0.5.71 — 2026-10-24 — first public release
 
 ### Security
