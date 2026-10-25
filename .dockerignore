@@ -1,0 +1,7 @@
+target
+.git
+*.md
+!README.md
+eval
+scripts
+docs

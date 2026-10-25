@@ -1,0 +1,28 @@
+[package]
+name = "hearthloom-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hearthloom"
+path = "src/main.rs"
+
+[dependencies]
+hearthloom-core = { workspace = true }
+hearthloom-adapters = { workspace = true }
+hearthloom-daemon = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+clap_complete = "4"
+sha2 = { workspace = true }
+base64 = { workspace = true }
+ed25519-dalek = "2"
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

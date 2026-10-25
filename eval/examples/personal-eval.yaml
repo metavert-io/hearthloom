@@ -1,0 +1,61 @@
+# Personal eval: questions about your own life with known answers, run
+# against your record's retrieval surfaces (no LLM tokens).
+#
+# This copy lives in your data home (~/.hearthloom/eval/), not in the
+# repository: your ground truth is personal data. `hearthloom eval` runs
+# it; `hearthloom eval --suite <name>` runs ~/.hearthloom/eval/<name>.yaml.
+#
+# Format:
+#   id:              short slug for the report line
+#   question:        the human phrasing (documentation; not sent anywhere)
+#   tool:            search | recall | entity | sql | vsearch
+#   args:            the tool's arguments
+#   expect_contains: strings that must appear in the response (case-
+#                    insensitive)
+#   skip:            reason — a template case waiting for your own facts;
+#                    reported, never run. Fill it in and delete the line.
+
+description: >
+  Hearthloom personal eval (example). Replace the skipped templates with
+  questions about your own life as sources get ingested.
+
+questions:
+  - id: sources-census
+    question: "Which sources does my record hold, and how much of each?"
+    tool: sql
+    args: { query: "SELECT source, COUNT(*) AS n FROM episodes GROUP BY source ORDER BY n DESC" }
+    expect_contains: ["source"]
+
+  - id: notes-census
+    question: "Do my notes show up, by where they came from?"
+    tool: sql
+    args: { query: "SELECT origin, COUNT(*) AS n FROM notes_index WHERE status != 'deleted' GROUP BY origin" }
+    expect_contains: ["origin"]
+
+  - id: recall-known-day
+    question: "What was I doing on a day I remember well?"
+    tool: recall
+    args: { on: "2026-01-01" }
+    expect_contains: ["a word you know appears that day"]
+    skip: "pick a day you remember and a word that must appear"
+
+  - id: search-project
+    question: "Does a project I work on show up in search?"
+    tool: search
+    args: { query: "your-project-name" }
+    expect_contains: ["your-project-name"]
+    skip: "name a project or repo you commit to"
+
+  - id: entity-self
+    question: "Does my own dossier exist with my email attached?"
+    tool: entity
+    args: { name: "Your Name" }
+    expect_contains: ["email"]
+    skip: "put your name as the record knows it"
+
+  - id: long-correspondent
+    question: "Does a long-time correspondent's dossier reach back through my mail?"
+    tool: entity
+    args: { name: "friend@example.com" }
+    expect_contains: ["episode"]
+    skip: "use the address of someone you have written to for years"

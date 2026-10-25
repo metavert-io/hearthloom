@@ -1,0 +1,54 @@
+[workspace]
+members = [
+    "crates/hearthloom-core",
+    "crates/hearthloom-adapters",
+    "crates/hearthloom-daemon",
+    "crates/hearthloom-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.5.71"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+hearthloom-core = { path = "crates/hearthloom-core" }
+hearthloom-adapters = { path = "crates/hearthloom-adapters" }
+hearthloom-daemon = { path = "crates/hearthloom-daemon" }
+
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+parking_lot = "0.12"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+clap = { version = "4", features = ["derive", "env"] }
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+# APM is OPT-IN: the SDK only activates when the operator supplies
+# SENTRY_DSN (sealed env / machine env), and nothing sends without the
+# user's Settings consent — see daemon apm.rs.
+sentry = { version = "0.49", features = ["tracing", "tower", "tower-http", "tower-axum-matched-path", "anyhow"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+# Registered via sqlite3_auto_extension before any connection opens
+# (store/mod.rs) — composes with rusqlite's `bundled` feature.
+sqlite-vec = "0.1.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+argon2 = "0.5"
+base64 = "0.22"
+chacha20poly1305 = "0.10"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+hmac = "0.12"
+tempfile = "3"
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+tokio = { version = "1", features = ["full"] }
+# 3.0 alpha deliberately: it's the first line with imap-proto Gmail extensions
+# (X-GM-LABELS / X-GM-MSGID parsing) — 2.4's imap-proto 0.10 chokes on them.
+imap = "3.0.0-alpha.15"
+tract-onnx = "0.21"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }

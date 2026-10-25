@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en" data-theme="night">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hearthloom</title>
+<link rel="stylesheet" href="/assets/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><path d='M50 14 c-9 -6 -20 -3 -23 6 c-11 -1 -17 9 -12 17 c-9 3 -10 15 -2 20 c-3 10 6 19 16 17 c4 6 15 6 21 1 c6 5 17 5 21 -1 c10 2 19 -7 16 -17 c8 -5 7 -17 -2 -20 c5 -8 -1 -18 -12 -17 c-3 -9 -14 -12 -23 -6 z' fill='%23e8833a' stroke='%23b4531d' stroke-width='2.5' stroke-linejoin='round'/><path d='M50 16 C46 30 54 34 50 46 C46 58 54 66 50 84' fill='none' stroke='%23b4531d' stroke-width='3' stroke-linecap='round'/><path d='M42 28 q-10 3 -8 12 q-9 2 -5 11 q-3 8 7 9' fill='none' stroke='%23ffe8c8' stroke-width='3' stroke-linecap='round'/><path d='M58 28 q10 3 8 12 q9 2 5 11 q3 8 -7 9' fill='none' stroke='%23ffe8c8' stroke-width='3' stroke-linecap='round'/></svg>">
+<script type="importmap">
+{ "imports": {
+    "three": "/assets/vendor/three.module.min.js",
+    "three/addons/controls/OrbitControls.js": "/assets/vendor/OrbitControls.js"
+} }
+</script>
+</head>
+<body>
+<header class="masthead">
+  <a class="wordmark" href="#/desk"><svg class="brand-brain" viewBox="0 0 100 100" aria-hidden="true"><path d="M50 14 c-9 -6 -20 -3 -23 6 c-11 -1 -17 9 -12 17 c-9 3 -10 15 -2 20 c-3 10 6 19 16 17 c4 6 15 6 21 1 c6 5 17 5 21 -1 c10 2 19 -7 16 -17 c8 -5 7 -17 -2 -20 c5 -8 -1 -18 -12 -17 c-3 -9 -14 -12 -23 -6 z" fill="#e8833a" stroke="#b4531d" stroke-width="2.5" stroke-linejoin="round"/><path d="M50 16 C46 30 54 34 50 46 C46 58 54 66 50 84" fill="none" stroke="#b4531d" stroke-width="3" stroke-linecap="round"/><path d="M42 28 q-10 3 -8 12 q-9 2 -5 11 q-3 8 7 9" fill="none" stroke="#ffe8c8" stroke-width="3" stroke-linecap="round"/><path d="M58 28 q10 3 8 12 q9 2 5 11 q3 8 -7 9" fill="none" stroke="#ffe8c8" stroke-width="3" stroke-linecap="round"/></svg><span class="wordmark-text">Hearthloom</span></a>
+  <button class="nav-toggle" id="nav-toggle" aria-haspopup="true" aria-expanded="false" aria-label="menu">☰</button>
+  <nav class="mainnav">
+    <a href="#/desk" data-nav="desk">Desk<span class="navbadge navbadge-n" id="desk-badge" hidden></span></a>
+    <a href="#/notes" data-nav="notes">Notes</a>
+    <a href="#/browse" data-nav="browse">Memories</a>
+    <a href="#/relationships" data-nav="relationships">Relationships</a>
+    <a href="#/today" data-nav="day">Day</a>
+    <a href="#/search" data-nav="search">Search</a>
+    <div class="navmenu" id="viz-menu">
+      <button class="navmenu-btn" id="viz-btn" aria-haspopup="true" aria-expanded="false">Visualize</button>
+      <div class="navmenu-drop" id="viz-drop">
+        <a href="#/loom" data-nav="loom">Loom <span class="navmenu-hint">the weave of the record</span></a>
+        <a href="#/orrery" data-nav="orrery">Orrery <span class="navmenu-hint">goals and what they catch</span></a>
+        <a href="#/constellation" data-nav="constellation">Constellation <span class="navmenu-hint">who orbits whom</span></a>
+        <a href="#/atlas" data-nav="atlas">Atlas <span class="navmenu-hint">where you were</span></a>
+        <a href="#/pulse" data-nav="pulse">Pulse <span class="navmenu-hint">any number, played</span></a>
+        <a href="#/biography" data-nav="biography">Biography <span class="navmenu-hint">the book of years</span></a>
+        <a href="#/ribbons" data-nav="ribbons">Ribbons <span class="navmenu-hint">what was true, when</span></a>
+      </div>
+    </div>
+    <a href="#/tend" data-nav="tend">Tend<span class="navbadge navbadge-n" id="tend-badge" hidden></span></a>
+  </nav>
+  <div class="mast-right">
+    <button class="vault-toggle" id="notif-bell" title="notifications">🔔<span class="navbadge navbadge-n" id="notif-badge" hidden></span></button>
+    <button class="vault-toggle" id="vault-toggle" title="the vault is locked">🔒</button>
+    <button class="btn ask-open" id="ask-open"><span class="ask-label">Ask </span>✦</button>
+    <button class="theme-toggle" id="theme-toggle" title="toggle theme" aria-label="toggle theme"></button>
+    <div class="hammenu" id="hammenu">
+      <button class="ham-btn" id="ham-btn" aria-haspopup="true" aria-expanded="false" aria-label="more">☰<span class="navbadge navbadge-n" id="ham-badge" hidden></span></button>
+      <div class="hammenu-drop" id="ham-drop">
+        <a href="#/analytics" class="ham-episodes">
+          <b id="chip-episodes">…</b>
+          <span class="navmenu-hint">what the record is made of →</span>
+        </a>
+        <a href="#/upgrade" id="ham-version" data-nav="upgrade">
+          <span id="ham-version-line" class="navmenu-hint">checking for updates…</span>
+        </a>
+        <a href="#/about" data-nav="about">About me <span class="navmenu-hint">what Hearthloom believes</span></a>
+        <a href="#/settings" data-nav="settings">Settings <span class="navmenu-hint">automations &amp; rhythm</span></a>
+        <a href="#/privacy" data-nav="privacy">Privacy <span class="navmenu-hint">vault &amp; rules</span></a>
+        <a href="#/integrations" data-nav="integrations">Integrations <span class="navmenu-hint" id="int-hint">AI, companions &amp; imports</span></a>
+        <a href="#/apikeys" data-nav="apikeys">API Keys <span class="navmenu-hint">tokens for integrations</span></a>
+        <a href="#/peering" data-nav="peering">Peering <span class="navmenu-hint">your always-on counterpart</span></a>
+        <a href="#/network" data-nav="network">Network <span class="navmenu-hint">brains that know each other</span></a>
+        <a href="#/monitor" data-nav="monitor">Monitoring <span class="navmenu-hint">health, logs &amp; vitals</span></a>
+        <a href="#/spend" data-nav="spend">Spend <span class="navmenu-hint">what the thinking costs</span></a>
+        <a href="#/agents" data-nav="agents">Agents <span class="navmenu-hint">who acts for you, and the rules</span></a>
+        <a href="#" id="nav-logout" hidden>Sign out <span class="navmenu-hint" id="nav-logout-user"></span></a>
+      </div>
+    </div>
+  </div>
+</header>
+
+<aside class="notes-panel" id="notes-panel" aria-label="Notes">
+  <div class="notes-panel-head">
+    <span class="eyebrow">notes</span>
+    <button class="ask-close" id="notes-panel-close" aria-label="close">×</button>
+  </div>
+  <div class="searchbar" style="padding:0 var(--s4)">
+    <input id="np-q" placeholder="search notes…">
+    <button class="btn" id="np-new">+ note</button>
+  </div>
+  <div class="meta" id="np-filter" style="padding:0 var(--s4)" hidden></div>
+  <div class="notes-panel-list" id="np-list"><div class="loading">…</div></div>
+  <div class="notes-panel-foot">
+    <a href="#/notes" class="meta">full view — dial, templates →</a>
+  </div>
+</aside>
+
+<main id="view" class="view"></main>
+
+<aside class="ask-panel" id="ask-panel" aria-label="Ask Hearthloom">
+  <div class="ask-history" id="ask-history">
+    <div class="ask-history-head">
+      <button class="ask-new" id="ask-new" title="start a fresh question">
+        <span class="ask-new-plus" aria-hidden="true">+</span> New question</button>
+      <input id="ask-search" placeholder="search past questions…">
+    </div>
+    <div class="ask-history-list" id="ask-history-list"></div>
+  </div>
+  <div class="ask-main">
+    <div class="ask-head">
+      <div>
+        <span class="eyebrow">deep query</span>
+        <h2>Ask Hearthloom</h2>
+      </div>
+      <button class="ask-seal-btn" id="ask-seal" hidden></button>
+      <label class="debug-toggle" title="show the engine's tool calls">
+        <input type="checkbox" id="ask-debug">
+        <span class="debug-track"><span class="debug-thumb"></span></span>
+        <span class="debug-label">debug</span>
+      </label>
+      <button class="ask-close" id="ask-close" aria-label="close">×</button>
+    </div>
+    <div class="ask-log" id="ask-log">
+      <div class="ask-hint">Ask anything your history can answer — it reasons
+        across commits, messages, mail, places, and articles, and cites its
+        evidence. <em>Each question spends LLM tokens.</em></div>
+    </div>
+    <div class="ask-inputrow">
+      <textarea id="ask-input" rows="2" placeholder="what was I wrestling with the week before…"></textarea>
+      <button class="btn" id="ask-send">ask</button>
+    </div>
+  </div>
+</aside>
+
+<footer class="colophon">
+  <span>the substrate is yours · one SQLite file · every answer cites its episodes</span>
+</footer>
+
+<div class="confirm-overlay" id="confirm-overlay" hidden>
+  <div class="confirm-card" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
+    <h3 id="confirm-title"></h3>
+    <p id="confirm-body"></p>
+    <input id="confirm-input" class="confirm-input" hidden>
+    <div class="confirm-actions">
+      <button class="btn" id="confirm-cancel">Cancel</button>
+      <button class="btn confirm-danger" id="confirm-ok"></button>
+    </div>
+  </div>
+</div>
+
+<script src="/assets/chart-svg.js"></script>
+<script type="module" src="/assets/app.js"></script>
+</body>
+</html>

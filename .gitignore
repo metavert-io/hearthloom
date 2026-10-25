@@ -1,0 +1,17 @@
+/target
+.env
+VIBECTL.md
+/inbox
+
+audit.md
+
+# ---- Local configuration (never published) ----
+# The maintainer's deploy settings and local notes for Claude Code.
+CLAUDE.local.md
+deploy.env
+fly.toml
+# Private plans, research and scratch work.
+local/
+NEXTSTEPS*.md
+# Personal eval suites belong in ~/.hearthloom/eval/ (see eval/README.md).
+eval/*.local.yaml

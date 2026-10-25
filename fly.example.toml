@@ -1,0 +1,28 @@
+# Hearthloom remote node — an always-on node on Fly.io. Copy to fly.toml
+# (gitignored), set `app`, then `fly launch --copy-config --no-deploy`.
+# Always-on by design (the peer's whole point): no auto-stop.
+app = "your-hearthloom-node"   # Fly app names are global: pick your own
+primary_region = "ewr"         # any Fly region
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  HEARTHLOOM_HOME = "/data/.hearthloom"
+  HEARTHLOOM_HOST = "0.0.0.0"
+  HEARTHLOOM_PORT = "43278"
+
+[mounts]
+  source = "hearthloom_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 43278
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"
