@@ -842,7 +842,7 @@ async function paintPlugins(host) {
               <span class="chip" style="float:right">${e.running ? "running there" : e.enabled ? "on there" : "off there"}</span></h3>
             <p class="imp-what">${esc(e.description || "")}</p>
             <p class="meta">installed on your other node \u2014 ${why(e)}.${
-              e.sync === "mirror" ? " Its data syncs here either way." : ""}</p>
+              e.sync === "mirror" ? " The memories it records sync here either way; its own stored data reaches only nodes where it's installed." : ""}</p>
           </div>`).join("");
     })()}
     ${available.length || reg ? `<div class="section-title" style="margin-top:var(--s3);font-size:0.95em">available from the hearth</div>
