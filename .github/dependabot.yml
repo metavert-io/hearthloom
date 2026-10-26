@@ -1,0 +1,13 @@
+# Dependabot security updates for every dependency ecosystem are switched on
+# in the repository settings and need no entry here. This file adds monthly
+# version updates for the GitHub Actions the workflows pin by commit SHA,
+# grouped into a single pull request.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      github-actions:
+        patterns: ["*"]
