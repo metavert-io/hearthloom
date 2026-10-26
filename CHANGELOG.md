@@ -8,6 +8,12 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+### Fixed
+- **Placing a downloaded export works on Linux nodes.** Keeping a copy of
+  an export the Downloads card found, or moving one across disks, ran
+  macOS's `ditto`, which Linux doesn't have. Other systems now copy with
+  `cp -R`.
+
 ## 0.5.73 — 2026-10-26
 
 Everything in 0.5.72 (which was tagged but never built into an image),

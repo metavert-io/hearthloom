@@ -232,17 +232,24 @@ pub fn install_archive_dir(
     Ok(dest)
 }
 
-/// rename when possible; ditto (ships with macOS, handles files AND
-/// dirs) across devices or when the original should be kept.
+/// rename when possible; a copy across devices or when the original
+/// should be kept — ditto on macOS, `cp -R` elsewhere (a Linux node has
+/// no ditto). Both handle files AND dirs and copy symlinks as links.
 fn move_or_copy(src: &Path, dest: &Path, keep_copy: bool) -> Result<()> {
     if !keep_copy && std::fs::rename(src, dest).is_ok() {
         return Ok(());
     }
-    let status = std::process::Command::new("ditto")
+    let (tool, flags): (&str, &[&str]) = if cfg!(target_os = "macos") {
+        ("ditto", &[])
+    } else {
+        ("cp", &["-R"])
+    };
+    let status = std::process::Command::new(tool)
+        .args(flags)
         .arg(src)
         .arg(dest)
         .status()
-        .context("running ditto")?;
+        .with_context(|| format!("running {tool}"))?;
     if !status.success() {
         return Err(anyhow!("copy failed ({status})"));
     }
