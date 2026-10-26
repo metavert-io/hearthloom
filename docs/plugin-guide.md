@@ -10,7 +10,7 @@ A practical guide for third-party developers. Everything here shipped in
 Hearthloom 0.5.11; the architecture rationale lives in
 `docs/plugins.md`. The reference plugin is
 [hpresence](https://github.com/metavert-io/hpresence) — a complete working
-example in ~300 lines with no SDK and one dependency.
+example in about 500 lines with no SDK and one dependency.
 
 ## The one idea that explains everything
 
@@ -50,8 +50,9 @@ zip upload) or with `hearthloom ember install <name>` from the
 **ember registry** you configured — either way they see exactly what you
 requested before granting anything. Registry-distributed embers are
 sha256- and Ed25519-verified against your published release signature
-(see your registry's protocol documentation; publish with
-`ember-sign`); side-loaded installs are labeled *"unreviewed — you
+(see your registry's protocol documentation: you sign each release
+with your own Ed25519 publisher key, kept outside the repo); side-loaded
+installs are labeled *"unreviewed — you
 trust its author with your machine."*
 
 ## The manifest (`hearthember.json`)
