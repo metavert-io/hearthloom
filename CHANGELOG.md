@@ -8,6 +8,8 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.72 — 2026-10-26
+
 Schema **v60** (additive: `movement_observation`, `vehicle_profile`,
 `trip_attribution`, `trip_day`). A peer on 0.5.71 ignores the new
 movements and vehicles legs; it catches up once it updates.
@@ -79,6 +81,9 @@ movements and vehicles legs; it catches up once it updates.
   SCOPED key (grants, no scopes — always narrower than itself), such as
   the capture key, which 0.5.71's admin-only key management refused. Every
   other key management still needs an admin key or a signed-in session.
+- An ember's card on a node where it isn't installed no longer says its
+  data syncs here either way: the memories it writes do, its own storage
+  doesn't.
 
 ## 0.5.71 — 2026-10-24 — first public release
 
