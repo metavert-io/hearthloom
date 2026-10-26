@@ -62,6 +62,7 @@ pub const DIR_CLASSES: &[(&str, DirClass)] = &[
     ("daemon.log", DirClass::Excluded("diagnostics, not record data")),
     (".env", DirClass::Excluded("secrets never export")),
     (".env.sealed", DirClass::Excluded("secrets never export")),
+    (".ember-secrets.key", DirClass::Excluded("the key ember secrets are sealed with — secrets never export")),
     ("hearthloom.db", DirClass::Excluded("live db — the zip carries a consistent snapshot instead")),
     ("hearthloom.db-wal", DirClass::Excluded("live db journal")),
     ("hearthloom.db-shm", DirClass::Excluded("live db journal")),
@@ -311,6 +312,12 @@ fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
             {
                 continue;
             }
+            // plugins/<name>/secrets/… = that ember's sealed secrets
+            // (OAuth tokens, signing keys) — never leave either; an
+            // ember re-establishes them after a restore.
+            if rel.starts_with("plugins/") && rel.split('/').nth(2) == Some("secrets") {
+                continue;
+            }
             out.push(rel);
         }
     }
@@ -393,6 +400,28 @@ pub fn stage_restore(state: &AppState, zip_path: &Path) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_walk_skips_ember_keys_and_secrets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for (rel, body) in [
+            ("plugins/demo/key", "pat"),
+            ("plugins/demo/secrets/client_secret.sealed", "sealed"),
+            ("plugins/demo/data/state.json", "{}"),
+            ("plugins/demo/pkg/hearthember.json", "{}"),
+        ] {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        }
+        let mut out = Vec::new();
+        walk(&root.join("plugins"), root, &mut out);
+        out.sort();
+        assert_eq!(out, vec!["plugins/demo/data/state.json", "plugins/demo/pkg/hearthember.json"]);
+        assert!(DIR_CLASSES.iter().any(|(n, c)| *n == hearthloom_core::secrets::NODE_SEAL_KEY_FILE
+            && matches!(c, DirClass::Excluded(_))));
+    }
 
     #[test]
     fn test_known_home_entries_are_classified() {

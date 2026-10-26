@@ -489,6 +489,7 @@ fn compute_stats(state: &AppState) -> anyhow::Result<serde_json::Value> {
             "propositions_pending": counts.propositions_pending,
             "opportunities_pending": counts.opportunities_pending,
             "lint_pending": counts.lint_pending,
+            "trips_pending": counts.trips_pending,
             "embedded": coverage.0,
             "chunks": coverage.1,
             "top_entities": top,

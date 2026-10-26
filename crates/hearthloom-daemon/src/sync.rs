@@ -1077,10 +1077,14 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
     // on the OTHER node need them too. Feature-detect degrade: 404 on
     // an older peer skips the leg, never fails the exchange.
     {
-        let legs: [(&str, &str, &str); 3] = [
+        let legs: [(&str, &str, &str); 5] = [
             ("locations", "peer_locations", "location observations"),
             ("contacts", "peer_contacts", "contact cards"),
             ("device_state", "peer_device_state", "device states"),
+            // v60 movement layer: travel spans (telemetry) + per-car
+            // settings and Tend answers (LWW) — both nodes reconcile trips
+            ("movements", "peer_movements", "movements"),
+            ("vehicles", "peer_vehicles", "vehicle settings"),
         ];
         for (path, wm, _label) in legs {
             let since = state
@@ -1090,6 +1094,8 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
             let batch = match path {
                 "locations" => state.store.observations_since(&since, 2000),
                 "contacts" => state.store.contacts_since(&since, 1000),
+                "movements" => state.store.movements_since(&since, 2000),
+                "vehicles" => state.store.vehicles_since(&since, 500),
                 _ => state.store.device_states_since(&since, 2000),
             };
             if let Ok(batch) = batch {
@@ -1125,6 +1131,8 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
                         let _ = match path {
                             "locations" => state.store.observations_apply(&batch),
                             "contacts" => state.store.contacts_apply(&batch),
+                            "movements" => state.store.movements_apply(&batch),
+                            "vehicles" => state.store.vehicles_apply(&batch),
                             _ => state.store.device_states_apply(&batch),
                         };
                         if next > since_pull {

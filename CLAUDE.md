@@ -78,7 +78,11 @@ workspace with `npm i playwright`) — screenshot + pageerror check.
 ## Layout
 
 - `crates/hearthloom-core` — schema (migrations via `PRAGMA user_version`,
-  **currently v59**: v59 reversible retirement (`retirements` synced,
+  **currently v60**: v60 the movement layer (`movement_observation`
+  with `subject` me|vehicle:<ember>:<id>, `vehicle_profile` +
+  `trip_attribution` synced LWW via /v1/sync/vehicles, movements via
+  /v1/sync/movements, node-local `trip_day`; daemon trips.rs decides
+  whose drive each car drive was — see the TRIPS invariant), v59 reversible retirement (`retirements` synced,
   `retirement_rows` the node-local undo record, `summary_inputs` synced,
   `entities.hidden_by`, `sources.retired_by` — see the RETIREMENT
   invariant), v58 `nodes` (synced node list; `agents::publish_self`
@@ -773,6 +777,27 @@ the design log 2026-07-14.
   and demotes the digest's headings below `## `.
 - **MCP version negotiation:** answer `initialize` with the version the
   client asked for when supported (`mcp.rs::negotiate_version`).
+- **TRIPS: A CAR'S DRIVE IS THE CAR'S UNTIL EVIDENCE SAYS YOU WERE IN
+  IT (v60, design log 2026-10-23).** Embers post only `vehicle:*`
+  movements (receiver-stamped); only `trips.rs` turns a drive into the
+  person's `trip`, and only those place the person (map points, Place
+  entities, `trips` location observations). Trip refs carry a FINGERPRINT
+  revision of the day's output and the pass re-asserts its minted set
+  (`assert_trip_day`) — never switch it to a counter revision (a peer's
+  stale revision would win). Re-open a day by setting `trip_day.dirty`,
+  never by deleting the ledger row.
+- **EMBERS ON HOSTED NODES (0.5.72, design log 2026-10-23).**
+  A hosted (cloud-kind) node installs ONLY packages
+  `registry_client::stage` verified in this process
+  (`is_verified_stage`) unless `HEARTHLOOM_ALLOW_UNREVIEWED_EMBERS=1` —
+  never add an install path that skips `install_from_dir`'s guard.
+  Ember secrets (`plugins/<name>/secrets/`, sealed by core
+  `secrets::seal_node`) never export (export.rs `walk` carve-out +
+  `.ember-secrets.key` Excluded) and never mirror (they live outside
+  `data/`); a UI token may set but never read one (`bound_sidecar`).
+  `publish` addresses stay under `/.well-known/` and are pre-auth +
+  killswitch-allowed by design. Ember programs run under launchd on a
+  Mac and under the daemon's own supervisor (`sidecar.rs`) elsewhere.
 - **THE FRIEND CEILING (0.5.63 — a fixed security hole, don't re-open
   it).** A key whose only scope is `friend` (what connecting a friend
   mints — it belongs to ANOTHER PERSON) reaches only
@@ -1141,6 +1166,11 @@ the design log 2026-07-08 post-mortem)
   behaviour AFTER bootstrapping, never on an open node. Check a port is
   free before using it (`lsof -iTCP:<port>`). In zsh never name a
   shell variable `GID`/`UID` (read-only specials).
+- **Throwaway daemons and embers:** on a Mac a test daemon that
+  installs an ember with a launch entry writes a REAL LaunchAgent
+  (`~/Library/LaunchAgents/com.hearthloom.plugin.<name>.plist`) unless
+  started with `HEARTHLOOM_SIDECAR_BACKEND=supervisor`. Always set it
+  for smoke tests; if you forget, `launchctl unload` + delete the plist.
 - `POST /v1/sql` takes `{"query": …}` (not `sql`); it is vault-shadowed.
 - Shell working directory persists between Bash calls — `cd` back to the
   repo; cargo/node may need to be added to

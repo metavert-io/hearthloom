@@ -38,6 +38,8 @@ pub mod registry_client;
 mod provisioner;
 mod rlm;
 mod scoped;
+mod sidecar;
+mod trips;
 mod sync;
 mod views;
 mod virtual_source;
@@ -297,13 +299,33 @@ pub async fn run(home: Home) -> Result<()> {
     tokio::spawn(bus::run_subscriber(state.clone()));
     // Observability: vitals + dependency probes every minute (v35).
     tokio::spawn(monitor::run_loop(state.clone()));
+    // Ember sidecars the daemon supervises itself (hosted/Linux nodes —
+    // launchd keeps its own units on a Mac): start the enabled ones.
+    {
+        let state = state.clone();
+        tokio::task::spawn_blocking(move || plugins::start_enabled_sidecars(&state));
+    }
     // Best-effort shutdown event (SIGTERM/ctrl-c; SIGKILL can't be seen —
     // its absence in the log IS the crash signal).
     {
         let state = state.clone();
         tokio::spawn(async move {
+            #[cfg(unix)]
+            {
+                let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("SIGTERM handler");
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            #[cfg(not(unix))]
             let _ = tokio::signal::ctrl_c().await;
             monitor::log(&state, "warn", "shutdown", "daemon stopping (signal)", None);
+            // Supervised embers get SIGTERM while the API still serves —
+            // their last flush (up to 5s each) needs it — so the wait runs
+            // on the blocking pool, never on a runtime worker.
+            let _ = tokio::task::spawn_blocking(sidecar::stop_all).await;
             std::process::exit(0);
         });
     }

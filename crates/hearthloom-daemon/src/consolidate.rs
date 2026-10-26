@@ -144,6 +144,18 @@ pub const AUTOMATIONS: &[Automation] = &[
         default_tier: Tier::Low,
     },
     Automation {
+        key: "trips_finalize",
+        label: "Trip reconcile",
+        detail: "Decides whose drive each of a car's drives was — yours \
+                 when your phone was in a vehicle at the time, someone \
+                 else's when it was elsewhere — and mints one episode per \
+                 drive, absorbing the phone's own trip. Asks on Tend only \
+                 when the evidence can't tell. Fully local.",
+        default_frequency: "daily",
+        llm: false,
+        default_tier: Tier::Low,
+    },
+    Automation {
         key: "visits_finalize",
         label: "Visit finalize",
         detail: "Clusters each closed day's location observations — \
@@ -370,6 +382,12 @@ pub async fn run_automation(state: &AppState, key: &str, actor: &Actor) -> anyho
                 tokio::task::spawn_blocking(move || crate::live_health::finalize_health_days(&st))
                     .await??;
             json!({ "days_finalized": days, "episodes_new": eps })
+        }
+        "trips_finalize" => {
+            let st = state.clone();
+            let (days, minted, absorbed) =
+                tokio::task::spawn_blocking(move || crate::trips::finalize_trips(&st)).await??;
+            json!({ "days": days, "trips_minted": minted, "phone_trips_absorbed": absorbed })
         }
         "visits_finalize" => {
             let st = state.clone();
@@ -808,6 +826,28 @@ pub async fn consolidate(state: &AppState) -> anyhow::Result<Value> {
         tracing::info!("photo day finalize: {photo_days} day(s) minted/refreshed");
     }
     clock.lap("photos_day_finalize");
+
+    // 3.97156 Trip reconcile (v60): decide whose drive each of a car's
+    // drives was and mint one episode per drive. BEFORE visits — your
+    // drives' endpoints become location observations visits cluster.
+    // Pure store+CPU, spawn_blocking'd whole (THE PASS CONTRACT).
+    if let Some(_g) = due_claim(state, "trips_finalize") {
+        let st = state.clone();
+        match tokio::task::spawn_blocking(move || crate::trips::finalize_trips(&st))
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|r| r)
+        {
+            Ok((days, minted, absorbed)) => {
+                automation_ran(&state.store, "trips_finalize");
+                if minted + absorbed > 0 {
+                    tracing::info!("trip reconcile: {days} day(s), {minted} minted, {absorbed} phone trips absorbed");
+                }
+            }
+            Err(e) => tracing::warn!("trip reconcile failed: {e:#}"),
+        }
+    }
+    clock.lap("trips_finalize");
 
     // 3.97157 Visit finalize (v51 Part A): cluster each closed day's
     // location observations — photo geotags, CLVisit dwells, calendar

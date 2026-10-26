@@ -207,9 +207,21 @@ impl Bus {
 /// events their grants cover — and every CURRENT topic is same-owner
 /// peering traffic, so friends receive nothing until federation topics
 /// (`task.shared`, …) arrive with federation itself.
-pub fn offered(claims: &hearthloom_core::store::ApiKeyClaims, _event: &BusEvent) -> bool {
-    claims.scopes.iter().any(|s| s == "peer" || s == "admin")
+pub fn offered(claims: &hearthloom_core::store::ApiKeyClaims, event: &BusEvent) -> bool {
+    if claims.scopes.iter().any(|s| s == "peer" || s == "admin") {
+        return true;
+    }
+    // Ember keys (`plugin:<name>`, and a page's `plugin-ui:<name>`) get
+    // the hint-only topics the ember guide promises — never the privacy
+    // or rename topics. Hints carry no data; every follow-up fetch
+    // re-checks the key's scopes.
+    (claims.name.starts_with("plugin:") || claims.name.starts_with("plugin-ui:"))
+        && PLUGIN_TOPICS.contains(&event.topic.as_str())
 }
+
+/// What an ember's key hears on /v1/bus/stream: topics published through
+/// `touch` (no refs attached) — never ones whose refs name episodes.
+pub const PLUGIN_TOPICS: &[&str] = &["plugin.oauth", "operational.changed"];
 
 /// Debounced publish for local writes: the first write in a window
 /// schedules one event; the burst rides along. Fire-and-forget — the
@@ -461,6 +473,25 @@ mod tests {
         (0..n)
             .map(|i| bus.insert("test", &format!("topic.{i}"), None, vec![]).id)
             .collect()
+    }
+
+    #[test]
+    fn test_embers_hear_only_hint_topics() {
+        let bus = Bus::default();
+        let claims = |name: &str, scopes: &[&str]| hearthloom_core::store::ApiKeyClaims {
+            id: "k".into(),
+            name: name.into(),
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            grants: None,
+        };
+        let oauth = bus.insert("n", "plugin.oauth", None, vec![]);
+        let privacy = bus.insert("n", "privacy.changed", None, vec![]);
+        let ember = claims("plugin:htesla", &["ingest"]);
+        let page = claims("plugin-ui:htesla", &["ingest"]);
+        assert!(offered(&ember, &oauth) && offered(&page, &oauth));
+        assert!(!offered(&ember, &privacy), "no privacy/rename topics for embers");
+        assert!(!offered(&claims("my-script", &["ingest"]), &oauth), "ordinary keys hear nothing");
+        assert!(offered(&claims("peer", &["peer"]), &privacy));
     }
 
     #[test]

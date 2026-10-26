@@ -48,6 +48,11 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/ingest/media", post(ingest_media))
         .route("/v1/ingest/scan", post(ingest_scan))
         .route("/v1/ingest/focus", post(ingest_focus))
+        .route("/v1/ingest/movement", post(ingest_movement))
+        .route("/v1/vehicles", get(vehicles_list))
+        .route("/v1/vehicles/{vehicle}", post(vehicle_settings_set))
+        .route("/v1/trips/questions", get(trip_questions))
+        .route("/v1/trips/questions/{key}", post(trip_question_answer))
         .route("/v1/ingest/status", get(ingest_status))
         .route("/v1/ingest/recent", get(ingest_recent))
         .route("/v1/sql", post(raw_sql))
@@ -139,6 +144,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/sync/telemetry", get(sync_telemetry_get).post(sync_telemetry_post))
         .route("/v1/sync/llm_usage", get(sync_llm_usage_get).post(sync_llm_usage_post))
         .route("/v1/sync/locations", get(sync_locations_get).post(sync_locations_post))
+        .route("/v1/sync/movements", get(sync_movements_get).post(sync_movements_post))
+        .route("/v1/sync/vehicles", get(sync_vehicles_get).post(sync_vehicles_post))
         .route("/v1/sync/contacts", get(sync_contacts_get).post(sync_contacts_post))
         .route(
             "/v1/sync/device_state",
@@ -204,6 +211,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/plugins/{name}/enable", post(plugins_toggle))
         .route("/v1/plugins/{name}/ui-token", post(plugin_ui_token))
         .route("/v1/plugins/{name}/config", get(plugin_config_get).post(plugin_config_set))
+        .route("/v1/plugins/{name}/oauth", get(plugin_oauth_get))
         .route("/v1/plugins/{name}", axum::routing::delete(plugins_uninstall))
         // plugins: self storage (plugin keys only — always allowed by the table)
         .route("/v1/plugins/self/kv", get(plugin_kv_list))
@@ -211,6 +219,13 @@ pub fn router(state: AppState) -> Router {
             "/v1/plugins/self/kv/{key}",
             get(plugin_kv_get).put(plugin_kv_put).delete(plugin_kv_delete),
         )
+        .route("/v1/plugins/self/secrets", get(plugin_secret_list))
+        .route(
+            "/v1/plugins/self/secrets/{key}",
+            get(plugin_secret_get).put(plugin_secret_put).delete(plugin_secret_delete),
+        )
+        .route("/v1/plugins/self/oauth/pending", post(plugin_oauth_pending))
+        .route("/v1/plugins/self/oauth/take", post(plugin_oauth_take))
         .route("/v1/plugins/self/files", get(plugin_file_list))
         .route(
             "/v1/plugins/self/files/{*path}",
@@ -229,6 +244,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/sync/plugins/file", get(sync_plugin_file_get))
         // plugins: sandboxed UI assets
         .route("/plugins/{name}/ui/{*path}", get(plugin_ui_asset))
+        // plugins: the OAuth redirect address an ember registers with a provider (pre-auth)
+        .route("/plugins/{name}/oauth/callback", get(plugin_oauth_callback))
+        // plugins: public files an ember declared in its manifest (pre-auth)
+        .route("/.well-known/{*path}", get(well_known_asset))
         .route("/v1/network/hello", get(network_hello))
         .route("/v1/network/search", get(network_search))
         .route("/v1/network/fetch", get(network_fetch))
@@ -579,6 +598,9 @@ const KEY_ROUTES: &[(&str, &str, &[&str])] = &[
     ("POST", "/v1/ingest/scan", &["ingest"]),
     ("POST", "/v1/ingest/focus", &["ingest"]),
     ("POST", "/v1/ingest/capture", &["ingest"]),
+    // v60: spans of travel (a non-ember source names itself; embers meet
+    // the plugin ceiling instead and may post only a vehicle's movement)
+    ("POST", "/v1/ingest/movement", &["ingest"]),
     ("POST", "/v1/propose", &["ingest"]),
     // notify — ring the bell.
     ("POST", "/v1/notifications", &["notify"]),
@@ -596,6 +618,10 @@ const KEY_ROUTES: &[(&str, &str, &[&str])] = &[
     ("POST", "/v1/sync/locations", &["peer"]),
     ("GET", "/v1/sync/contacts", &["peer"]),
     ("POST", "/v1/sync/contacts", &["peer"]),
+    ("GET", "/v1/sync/movements", &["peer"]),
+    ("POST", "/v1/sync/movements", &["peer"]),
+    ("GET", "/v1/sync/vehicles", &["peer"]),
+    ("POST", "/v1/sync/vehicles", &["peer"]),
     ("POST", "/v1/sync/declared", &["peer"]),
     ("GET", "/v1/sync/scopes", &["peer"]),
     ("POST", "/v1/sync/scopes", &["peer"]),
@@ -948,6 +974,9 @@ fn is_pre_auth_path(path: &str) -> bool {
         // plugin page shells: static chrome, same class as /assets/ —
         // their DATA still needs the scoped token the parent hands over
         || path.starts_with("/plugins/")
+        // public files embers declare (manifest `publish`): a third-party
+        // app's domain-verification key must answer without a session
+        || path.starts_with("/.well-known/")
         || path == "/v1/auth/login"
         || path == "/v1/auth/me"
         || path == "/v1/auth/bootstrap"
@@ -1104,7 +1133,7 @@ async fn auth_middleware(
             let require = std::env::var("HEARTHLOOM_REQUIRE_KEYS")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
-            let is_ui = path == "/" || path.starts_with("/assets/");
+            let is_ui = path == "/" || path.starts_with("/assets/") || path.starts_with("/.well-known/");
             if require && !is_ui {
                 return ApiError(
                     StatusCode::UNAUTHORIZED,
@@ -3286,6 +3315,190 @@ fn require_device_write(auth: &AuthInfo, actor: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/* ————— the movement layer (v60) ————— */
+
+#[derive(Deserialize)]
+struct VehicleIn {
+    /// An opaque, stable id for the car (not the VIN — it lands in
+    /// entity attributes).
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    descriptor: Option<Value>,
+}
+
+#[derive(Deserialize)]
+struct MovementIngestBatch {
+    actor: String,
+    /// Non-plugin callers name their source; an ember's is fixed to
+    /// `plugin:<name>` by its key.
+    #[serde(default)]
+    source: Option<String>,
+    /// "me" (default) or omitted when `vehicle` is given.
+    #[serde(default)]
+    subject: Option<String>,
+    #[serde(default)]
+    vehicle: Option<VehicleIn>,
+    items: Vec<hearthloom_core::store::MovementIn>,
+}
+
+fn clean_vehicle_id(id: &str) -> Option<String> {
+    let ok = !id.is_empty()
+        && id.len() <= 64
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    ok.then(|| id.to_string())
+}
+
+/// POST /v1/ingest/movement — spans of travel into the movement layer.
+/// An EMBER may post only a vehicle's movements (a car's drive is the
+/// car's until the trips pass decides you were in it); the subject is
+/// receiver-stamped `vehicle:<ember>:<id>` and the source `plugin:<ember>`.
+async fn ingest_movement(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(batch): Json<MovementIngestBatch>,
+) -> Result<Json<Value>, ApiError> {
+    require_device_write(&auth, &batch.actor)?;
+    if batch.items.len() > 5000 {
+        return Err(bad_request("at most 5000 movements per batch"));
+    }
+    let plugin = auth.0.as_ref().and_then(|c| crate::plugins::plugin_for_claims(&state, c));
+    let (source, subject, actor) = match &plugin {
+        Some(name) => {
+            let vehicle = batch
+                .vehicle
+                .as_ref()
+                .and_then(|v| clean_vehicle_id(&v.id))
+                .ok_or_else(|| bad_request("an ember posts a vehicle's movements: give vehicle.id ([A-Za-z0-9_-], ≤64)"))?;
+            if batch.subject.as_deref().is_some_and(|s| s != "vehicle") && batch.subject.is_some() {
+                return Err(bad_request("an ember can't post the person's own movement — only a vehicle's"));
+            }
+            (format!("plugin:{name}"), format!("vehicle:{name}:{vehicle}"), format!("plugin:{name}"))
+        }
+        None => {
+            let source = batch.source.clone().unwrap_or_default();
+            let reserved = ["ios-motion", "trips", "photos", "visits"];
+            if source.is_empty() || source.len() > 60 || reserved.contains(&source.as_str()) || source.starts_with("plugin:") {
+                return Err(bad_request("name your source (not ios-motion/trips/plugin:…)"));
+            }
+            let subject = match &batch.vehicle {
+                Some(v) => format!(
+                    "vehicle:{source}:{}",
+                    clean_vehicle_id(&v.id).ok_or_else(|| bad_request("vehicle.id must be [A-Za-z0-9_-], ≤64"))?
+                ),
+                None => "me".to_string(),
+            };
+            (source, subject, batch.actor.clone())
+        }
+    };
+    let st = state.clone();
+    let report = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+        if let Some(v) = &batch.vehicle {
+            st.store.vehicle_profile_ensure(
+                &subject,
+                v.name.as_deref().unwrap_or("").trim(),
+                &v.descriptor.clone().unwrap_or_else(|| json!({})),
+            )?;
+        }
+        let (accepted, duplicates) = st.store.movements_add(&source, &subject, &actor, &batch.items)?;
+        let span = day_span_ref(batch.items.iter().filter_map(|m| {
+            chrono::DateTime::parse_from_rfc3339(&m.start).ok().map(|d| d.format("%Y-%m-%d").to_string())
+        }));
+        st.store.ingest_log_append(&actor, &source, "movement_batch", accepted, span.as_deref())?;
+        Ok(json!({"accepted": accepted, "duplicates": duplicates, "subject": subject}))
+    })
+    .await
+    .map_err(anyhow::Error::from)?
+    .map_err(|e| bad_request(format!("{e:#}")))?;
+    Ok(Json(report))
+}
+
+async fn vehicles_list(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "see your cars")?;
+    Ok(Json(json!({
+        "vehicles": state.store.vehicle_profiles()?,
+        "questions_pending": state.store.trip_questions_pending_count()?,
+    })))
+}
+
+/// Re-run trip reconciliation now (answers and settings should show at
+/// once, not at tomorrow's pass). Best-effort, off the request.
+fn reconcile_trips_soon(state: &AppState) {
+    let st = state.clone();
+    tokio::spawn(async move {
+        let st2 = st.clone();
+        match tokio::task::spawn_blocking(move || crate::trips::finalize_trips(&st2)).await {
+            Ok(Ok(_)) => crate::bus::touch(&st, "operational.changed"),
+            Ok(Err(e)) => tracing::warn!("trip reconcile (after an edit) failed: {e:#}"),
+            Err(_) => {}
+        }
+    });
+}
+
+async fn vehicle_settings_set(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Path(vehicle): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "change a car's settings")?;
+    let mut p = state
+        .store
+        .vehicle_profile(&vehicle)?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("no vehicle {vehicle:?}")))?;
+    if let Some(v) = body.get("attribution").and_then(|v| v.as_str()) {
+        p.attribution = v.to_string();
+    }
+    if let Some(v) = body.get("aboard_driver").and_then(|v| v.as_str()) {
+        p.aboard_driver = v.to_string();
+    }
+    if let Some(v) = body.get("household").and_then(|v| v.as_array()) {
+        p.household = v.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+    }
+    if let Some(v) = body.get("others_scope").and_then(|v| v.as_str()) {
+        p.others_scope = v.to_string();
+    }
+    if let Some(v) = body.get("ask").and_then(|v| v.as_bool()) {
+        p.ask = v;
+    }
+    state.store.vehicle_profile_set(&p).map_err(|e| bad_request(format!("{e:#}")))?;
+    reconcile_trips_soon(&state);
+    Ok(Json(json!({"vehicle": state.store.vehicle_profile(&vehicle)?})))
+}
+
+async fn trip_questions(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "see questions about your trips")?;
+    Ok(Json(json!({"pending": state.store.trip_questions_pending()?})))
+}
+
+#[derive(Deserialize)]
+struct TripAnswerBody {
+    /// yes | no | dismiss
+    answer: String,
+}
+
+async fn trip_question_answer(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Path(key): Path<String>,
+    Json(body): Json<TripAnswerBody>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "answer for your trips")?;
+    state
+        .store
+        .trip_question_answer(&key, &body.answer)
+        .map_err(|e| bad_request(format!("{e:#}")))?;
+    reconcile_trips_soon(&state);
+    Ok(Json(json!({"key": key, "answer": body.answer})))
+}
+
 #[derive(Deserialize)]
 struct ContactsIngestBatch {
     actor: String,
@@ -3539,6 +3752,33 @@ async fn ingest_motion(
             .iter()
             .filter_map(|m| crate::live_ingest::motion_in_to_episode(m, &scope).ok())
             .collect();
+        // v60: the same segments join the movement layer as the PERSON's
+        // movement (subject me) — the trips pass reconciles them against
+        // a car's drives. Same key as the episode's source_ref, so the
+        // pass can find (and absorb) the phone's own trip episode.
+        let movements: Vec<hearthloom_core::store::MovementIn> = batch
+            .items
+            .iter()
+            .filter(|m| hearthloom_core::store::MOVEMENT_MODES.contains(&m.mode.as_str()))
+            .map(|m| hearthloom_core::store::MovementIn {
+                key: m.key.clone(),
+                mode: m.mode.clone(),
+                start: m.start.clone(),
+                end: m.end.clone(),
+                tz_offset_minutes: m.tz_offset_minutes,
+                start_lat: None,
+                start_lon: None,
+                end_lat: None,
+                end_lon: None,
+                start_place: None,
+                end_place: None,
+                distance_m: m.distance_m,
+                attrs: m.steps.map(|s| json!({"steps": s})),
+            })
+            .collect();
+        if let Err(e) = state.store.movements_add("ios-motion", "me", &batch.actor, &movements) {
+            tracing::warn!("motion → movement layer: {e:#}");
+        }
         let mut episodes_new = 0usize;
         for chunk in drafts.chunks(200) {
             let r = state.store.apply_batch(
@@ -4367,6 +4607,38 @@ async fn sync_llm_usage_post(
 /// v51 unified-location peer legs (telemetry pattern) — the phone posts
 /// observations to the tenant, the Mac photo scan lands on the laptop;
 /// visit clustering on either node needs the union.
+async fn sync_movements_get(
+    State(state): State<AppState>,
+    Query(params): Query<TelemetrySinceParams>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    require_scope(&auth, "peer")?;
+    Ok(Json(state.store.movements_since(&params.since, 2000)?))
+}
+async fn sync_movements_post(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(batch): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    require_scope(&auth, "peer")?;
+    Ok(Json(json!({"applied": state.store.movements_apply(&batch)?})))
+}
+async fn sync_vehicles_get(
+    State(state): State<AppState>,
+    Query(params): Query<TelemetrySinceParams>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    require_scope(&auth, "peer")?;
+    Ok(Json(state.store.vehicles_since(&params.since, 500)?))
+}
+async fn sync_vehicles_post(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(batch): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    require_scope(&auth, "peer")?;
+    Ok(Json(json!({"applied": state.store.vehicles_apply(&batch)?})))
+}
 async fn sync_locations_get(
     State(state): State<AppState>,
     Query(params): Query<TelemetrySinceParams>,
@@ -11194,6 +11466,7 @@ async fn plugins_inspect(
         "local_only": manifest.local_only,
         "has_sidecar": !manifest.launch.is_empty(),
         "has_ui": manifest.ui.is_some(),
+        "publishes": manifest.publish.iter().map(|p| p.path.clone()).collect::<Vec<_>>(),
     })))
 }
 
@@ -11248,6 +11521,7 @@ async fn plugins_upload(
         "name": manifest.name, "version": manifest.version,
         "requested_scopes": manifest.scopes,
         "description": manifest.description,
+        "publishes": manifest.publish.iter().map(|p| p.path.clone()).collect::<Vec<_>>(),
     })))
 }
 
@@ -11359,6 +11633,51 @@ async fn plugin_ui_asset(
         .into_response()
 }
 
+/// Serve a public file an enabled ember declared under `publish` (the
+/// address → a file in its own data store). Pre-auth by design and
+/// minimal by design: GET only, ≤64KB, no listing, 404 for anything
+/// not declared — the manifest is the whole allowlist.
+async fn well_known_asset(
+    State(state): State<AppState>,
+    Path(rest): Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let not_found = || (StatusCode::NOT_FOUND, "not found").into_response();
+    let path = format!("/.well-known/{rest}");
+    if !crate::plugins::valid_publish_path(&path) {
+        return not_found();
+    }
+    let st = state.clone();
+    let found = tokio::task::spawn_blocking(move || {
+        let (name, entry) = crate::plugins::publisher_of(&st, &path)?;
+        let rel = crate::plugins::safe_rel_path(&entry.file).ok()?.to_string();
+        let file = plugin_files_dir(&st, &name).join(rel);
+        let meta = std::fs::metadata(&file).ok()?;
+        if !meta.is_file() || meta.len() > crate::plugins::PUBLISH_MAX_BYTES {
+            return None;
+        }
+        Some((std::fs::read(&file).ok()?, entry.content_type))
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some((bytes, content_type)) = found else {
+        return not_found();
+    };
+    let mime = content_type
+        .filter(|t| !t.is_empty() && t.len() < 100 && !t.contains(['\r', '\n']))
+        .unwrap_or_else(|| "text/plain; charset=utf-8".into());
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, mime),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=300".to_string()),
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
 /* —— plugin self-storage: the ONLY way a plugin persists anything ——
    (law #4 — the daemon writes; the plugin never opens files or the db) */
 
@@ -11415,6 +11734,241 @@ async fn plugin_kv_delete(
     }
     let deleted = state.store.plugin_kv_delete(&plugin, &key)?;
     Ok(Json(json!({"key": key, "deleted": deleted})))
+}
+
+/* —— ember secrets (sealed; see plugins.rs) —— */
+
+/// Like bound_plugin, but only the SIDECAR's own key — never the 12h
+/// token a UI page holds. Reading a secret back is the binary's right.
+fn bound_sidecar(state: &AppState, auth: &AuthInfo) -> Result<String, ApiError> {
+    let plugin = bound_plugin(state, auth)?;
+    let is_ui_token = auth.0.as_ref().is_some_and(|c| c.name.starts_with("plugin-ui:"));
+    if is_ui_token {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "an ember's page can set its secrets but not read them back".into(),
+        ));
+    }
+    Ok(plugin)
+}
+
+async fn plugin_secret_list(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    let plugin = bound_plugin(&state, &auth)?;
+    let st = state.clone();
+    let list = tokio::task::spawn_blocking(move || crate::plugins::secret_list(&st, &plugin))
+        .await
+        .map_err(anyhow::Error::from)?;
+    Ok(Json(json!({
+        "secrets": list,
+        // master-key | node-key — the latter is sealed with a key on the
+        // same disk (no master key provisioned); pages should say so
+        "sealing": hearthloom_core::secrets::node_seal_source(),
+    })))
+}
+
+async fn plugin_secret_get(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Path(key): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let plugin = bound_sidecar(&state, &auth)?;
+    let st = state.clone();
+    let k = key.clone();
+    let value = tokio::task::spawn_blocking(move || crate::plugins::secret_get(&st, &plugin, &k))
+        .await
+        .map_err(anyhow::Error::from)??;
+    match value {
+        Some(bytes) => Ok(Json(json!({
+            "key": key,
+            "value": String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("secret isn't text"))?,
+        }))),
+        None => Err(ApiError(StatusCode::NOT_FOUND, format!("no secret {key:?}"))),
+    }
+}
+
+async fn plugin_secret_put(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Path(key): Path<String>,
+    body: String,
+) -> Result<Json<Value>, ApiError> {
+    let plugin = bound_plugin(&state, &auth)?;
+    if key.starts_with("__") {
+        return Err(bad_request("secret names starting with __ are written by the daemon"));
+    }
+    let st = state.clone();
+    let k = key.clone();
+    tokio::task::spawn_blocking(move || crate::plugins::secret_put(&st, &plugin, &k, body.as_bytes()))
+        .await
+        .map_err(anyhow::Error::from)?
+        .map_err(|e| bad_request(format!("{e:#}")))?;
+    Ok(Json(json!({"key": key, "set": true})))
+}
+
+async fn plugin_secret_delete(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Path(key): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let plugin = bound_plugin(&state, &auth)?;
+    let deleted = crate::plugins::secret_delete(&state, &plugin, &key);
+    Ok(Json(json!({"key": key, "deleted": deleted})))
+}
+
+/* —— the OAuth callback relay (see plugins.rs) —— */
+
+#[derive(Deserialize)]
+struct OAuthPendingBody {
+    state: String,
+    authorize_url: String,
+    #[serde(default)]
+    ttl_secs: Option<u64>,
+}
+
+async fn plugin_oauth_pending(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(body): Json<OAuthPendingBody>,
+) -> Result<Json<Value>, ApiError> {
+    let plugin = bound_plugin(&state, &auth)?;
+    crate::plugins::oauth_register(&plugin, &body.state, &body.authorize_url, body.ttl_secs.unwrap_or(900))
+        .map_err(|e| bad_request(format!("{e:#}")))?;
+    Ok(Json(json!({
+        "pending": true,
+        // where the provider must send the user back
+        "callback_path": format!("/plugins/{plugin}/oauth/callback"),
+    })))
+}
+
+/// The sidecar takes the code ONCE; it's deleted as it's read.
+async fn plugin_oauth_take(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    let plugin = bound_sidecar(&state, &auth)?;
+    let st = state.clone();
+    let taken = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<(String, String)>> {
+        let Some(code) = crate::plugins::secret_get(&st, &plugin, "__oauth_code")? else {
+            return Ok(None);
+        };
+        let st_val = crate::plugins::secret_get(&st, &plugin, "__oauth_state")?.unwrap_or_default();
+        crate::plugins::secret_delete(&st, &plugin, "__oauth_code");
+        crate::plugins::secret_delete(&st, &plugin, "__oauth_state");
+        Ok(Some((String::from_utf8(code)?, String::from_utf8(st_val)?)))
+    })
+    .await
+    .map_err(anyhow::Error::from)??;
+    match taken {
+        Some((code, st)) => Ok(Json(json!({"code": code, "state": st}))),
+        None => Err(ApiError(StatusCode::NOT_FOUND, "no sign-in code waiting".into())),
+    }
+}
+
+/// Session-side: the authorize URL the dashboard may open for an ember
+/// (plugin keys can't reach /v1/plugins/<name>/… — default-deny).
+async fn plugin_oauth_get(Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
+    match crate::plugins::oauth_authorize_url(&name) {
+        Some(url) => Ok(Json(json!({"authorize_url": url}))),
+        None => Err(ApiError(StatusCode::NOT_FOUND, "no sign-in pending".into())),
+    }
+}
+
+#[derive(Deserialize)]
+struct OAuthCallbackParams {
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    error_description: Option<String>,
+}
+
+fn oauth_page(status: StatusCode, title: &str, body: &str) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let html = format!(
+        r#"<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>{title}</title>
+<style>:root{{color-scheme:light dark;--bg:#faf7f2;--ink:#2a2420;--faint:#6b625b}}
+@media (prefers-color-scheme:dark){{:root{{--bg:#16130f;--ink:#efe7dc;--faint:#a39889}}}}
+body{{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 ui-serif,Georgia,serif;
+display:grid;place-items:center;min-height:100vh;padding:16px;box-sizing:border-box}}
+main{{max-width:30rem}}h1{{font-size:1.4rem;margin:0 0 .5rem}}p{{color:var(--faint);margin:0}}</style>
+</head><body><main><h1>{title}</h1><p>{body}</p></main></body></html>"#,
+        title = html_escape(title),
+        body = html_escape(body),
+    );
+    (
+        status,
+        [
+            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+            (axum::http::header::REFERRER_POLICY, "no-referrer"),
+        ],
+        html,
+    )
+        .into_response()
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+/// The provider sends the user back here. Pre-auth (it's a browser
+/// redirect from the provider), so the state check IS the gate: a code
+/// lands only when it answers the sign-in this ember registered.
+async fn plugin_oauth_callback(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(params): Query<OAuthCallbackParams>,
+) -> axum::response::Response {
+    let enabled = matches!(state.store.plugin(&name), Ok(Some(row)) if row.enabled);
+    if !enabled {
+        return oauth_page(StatusCode::NOT_FOUND, "Nothing to sign in to", "That ember isn't installed here.");
+    }
+    if let Some(err) = params.error {
+        let why = params.error_description.unwrap_or(err);
+        return oauth_page(
+            StatusCode::BAD_REQUEST,
+            "Sign-in didn't finish",
+            &format!("The provider said: {why}. Go back to Hearthloom and try again."),
+        );
+    }
+    let (Some(code), Some(st)) = (params.code, params.state) else {
+        return oauth_page(StatusCode::BAD_REQUEST, "Sign-in didn't finish", "The provider sent no code back.");
+    };
+    if code.len() > 4096 || !crate::plugins::oauth_consume(&name, &st) {
+        return oauth_page(
+            StatusCode::BAD_REQUEST,
+            "This sign-in link has expired",
+            "Start signing in again from the ember's page in Hearthloom (on this node's dashboard).",
+        );
+    }
+    let st2 = state.clone();
+    let n = name.clone();
+    let saved = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        crate::plugins::secret_put(&st2, &n, "__oauth_code", code.as_bytes())?;
+        crate::plugins::secret_put(&st2, &n, "__oauth_state", st.as_bytes())?;
+        Ok(())
+    })
+    .await;
+    if !matches!(saved, Ok(Ok(()))) {
+        return oauth_page(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Sign-in didn't finish",
+            "Hearthloom couldn't store the sign-in. Try again.",
+        );
+    }
+    crate::bus::touch(&state, "plugin.oauth");
+    oauth_page(
+        StatusCode::OK,
+        "Signed in",
+        &format!("{name} can finish connecting now. You can close this tab and go back to Hearthloom."),
+    )
 }
 
 fn plugin_files_dir(state: &AppState, plugin: &str) -> std::path::PathBuf {
@@ -11685,6 +12239,7 @@ async fn plugins_registry_stage(
         "reviewed": staged.reviewed,
         "placement": staged.placement,
         "requires_host": staged.requires_host,
+        "publishes": staged.publishes,
     })))
 }
 

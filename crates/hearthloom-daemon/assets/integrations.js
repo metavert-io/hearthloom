@@ -763,6 +763,82 @@ function foundRow(f) {
    NO central index and NO signing here — distribution is the provisioner's
    job later; every install is from a folder or zip the user chose and
    is labeled accordingly. ————— */
+/// Cars an ember reports drives for (v60): who's in them. Owning a car
+/// doesn't make every drive yours — these settings, plus your phone's
+/// evidence, decide whose drive each one was. Hidden until a car exists.
+async function paintVehicles(host) {
+  if (!host) return;
+  const res = await api("/v1/vehicles").catch(() => null);
+  const cars = res?.vehicles || [];
+  if (!cars.length) { host.innerHTML = ""; return; }
+  const opt = (v, label, cur) => `<option value="${escAttr(v)}"${v === cur ? " selected" : ""}>${esc(label)}</option>`;
+  host.innerHTML = `
+    <div class="section-title" style="margin-top:var(--s4)">your cars
+      <span class="meta" style="font-weight:400">— whose drive was it?</span></div>
+    ${cars.map((c) => {
+      const driverKind = c.aboard_driver === "me" || c.aboard_driver === "unknown" ? c.aboard_driver : "person";
+      return `
+      <div class="card" data-vehicle="${escAttr(c.vehicle)}">
+        <p><b>${esc(c.name || "your car")}</b>
+          ${c.descriptor?.model && c.descriptor.model !== c.name
+            ? `<span class="meta">${esc(c.descriptor.model)}</span>` : ""}</p>
+        <p class="meta">A drive becomes yours when your phone was in a vehicle at the same time; when your
+          phone was somewhere else, it's someone else's. If you don't run the phone app, the setting below decides.</p>
+        <div class="veh-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:var(--s2)">
+          <label class="meta">whose drives are these?
+            <select class="veh-attr" style="width:100%">
+              ${opt("phone", "decide from my phone (recommended)", c.attribution)}
+              ${opt("always_me", "always mine", c.attribution)}
+              ${opt("never_me", "never mine (someone else's car)", c.attribution)}
+            </select></label>
+          <label class="meta">when I'm in the car, who drives?
+            <select class="veh-driver-kind" style="width:100%">
+              ${opt("me", "I do", driverKind)}
+              ${opt("person", "someone else…", driverKind)}
+              ${opt("unknown", "it varies", driverKind)}
+            </select>
+            <input class="veh-driver-name" placeholder="their name" style="width:100%;margin-top:4px"
+              value="${driverKind === "person" ? escAttr(c.aboard_driver) : ""}" ${driverKind === "person" ? "" : "hidden"}></label>
+          <label class="meta">other people who drive it
+            <input class="veh-household" placeholder="names, comma-separated" style="width:100%"
+              value="${escAttr((c.household || []).join(", "))}"></label>
+          <label class="meta">drives that aren't yours are filed as
+            <select class="veh-scope" style="width:100%">
+              ${["family", "personal", "private", "work", "health"].map((sc) => opt(sc, sc, c.others_scope)).join("")}
+            </select></label>
+        </div>
+        <label class="meta" style="display:block;margin-top:var(--s2)">
+          <input type="checkbox" class="veh-ask" ${c.ask ? "checked" : ""}>
+          ask me on Tend when it can't tell (at most 3 a week)</label>
+        <div class="tend-actions"><button class="btn veh-save">save</button>
+          <span class="meta veh-msg"></span></div>
+      </div>`;
+    }).join("")}`;
+  host.querySelectorAll("[data-vehicle]").forEach((card) => {
+    const kind = card.querySelector(".veh-driver-kind");
+    const name = card.querySelector(".veh-driver-name");
+    kind.onchange = () => { name.hidden = kind.value !== "person"; if (!name.hidden) name.focus(); };
+    card.querySelector(".veh-save").onclick = async () => {
+      const msg = card.querySelector(".veh-msg");
+      const driver = kind.value === "person" ? name.value.trim() : kind.value;
+      if (!driver) { msg.textContent = "who drives? add a name"; return; }
+      msg.textContent = "saving…";
+      try {
+        await apiPost(`/v1/vehicles/${encodeURIComponent(card.dataset.vehicle)}`, {
+          attribution: card.querySelector(".veh-attr").value,
+          aboard_driver: driver,
+          household: card.querySelector(".veh-household").value.split(",").map((x) => x.trim()).filter(Boolean),
+          others_scope: card.querySelector(".veh-scope").value,
+          ask: card.querySelector(".veh-ask").checked,
+        });
+        msg.textContent = "✓ saved — past drives are being re-checked";
+      } catch (e) {
+        msg.textContent = e.message;
+      }
+    };
+  });
+}
+
 async function paintPlugins(host) {
   const [data, reg, peer] = await Promise.all([
     api("/v1/plugins").catch(() => null),
@@ -898,6 +974,10 @@ async function paintPlugins(host) {
         ${info.publisher ? `by ${esc(info.publisher)}` : ""} ${
         info.reviewed ? "\u00b7 \u2713 reviewed by the registry" : "\u00b7 <b>unreviewed</b>"}</p>
       <p class="meta">it will be able to: ${scopeChips(scopes)}</p>
+      ${(info.publishes || []).length ? `<p class="meta">it will publish ${
+        info.publishes.length === 1 ? "this file" : "these files"} openly at your address (anyone can read ${
+        info.publishes.length === 1 ? "it" : "them"}): ${
+        info.publishes.map((p) => `<code>${esc(p)}</code>`).join(", ")}</p>` : ""}
       <div class="tend-actions">
         <button class="btn" id="plg-approve">allow &amp; add</button>
         <button class="btn btn-quiet" id="plg-cancel">cancel</button>
@@ -1430,8 +1510,10 @@ export async function mount(view, helpers) {
       .map((e, i) => importCard(e, i, tiers, found, node, imports)).join("")}</div>
     <div class="section-title" style="margin-top:var(--s5)">4 · embers
       <span class="meta" style="font-weight:400">— small companions that add new powers to your hearth</span></div>
-    <div id="int-plugins"><div class="loading">…</div></div>`;
+    <div id="int-plugins"><div class="loading">…</div></div>
+    <div id="int-vehicles"></div>`;
   paintPlugins(view.querySelector("#int-plugins")).catch(() => {});
+  paintVehicles(view.querySelector("#int-vehicles")).catch(() => {});
   // Buttons FIRST, companion paints in the background: a slow (or
   // wedged-mount) HearthFS status call must never leave run-now/upload
   // dead — that exact chain froze the page on 2026-07-17.

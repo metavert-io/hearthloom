@@ -49,6 +49,7 @@ mod llm_usage;
 mod observations;
 mod contacts;
 mod device_state;
+mod movements;
 mod retire;
 
 pub use browse::{
@@ -63,6 +64,7 @@ pub use photo::{keys_hash as photo_keys_hash, PhotoPointIn, StoredPhotoPoint};
 pub use observations::{ObservationIn, StoredObservation};
 pub use contacts::{ContactCardIn, PendingContact};
 pub use device_state::DeviceStateIn;
+pub use movements::{MovementIn, StoredMovement, VehicleProfile, ATTRIBUTION_MODES, MOVEMENT_MODES, SCOPES as MOVEMENT_SCOPES};
 pub use sharing::{EffectiveGrant, DEFAULT_FRIEND, SHAREABLE_KINDS, SHARE_CLASSES};
 pub use groups::{FriendAccess, GroupRow, GROUP_PREFIX};
 pub use agents::{decide, decide_all, AgentIn, AgentRow, AgentTaskRow, Decision, Policy, ACTION_CLASSES, HARNESSES, PRESETS};
@@ -280,7 +282,7 @@ impl Drop for ReadScopeGuard {
     }
 }
 
-const SCHEMA_VERSION: i64 = 59;
+const SCHEMA_VERSION: i64 = 60;
 
 const SCHEMA_V1: &str = "
     -- L2: append-only ground truth. Raw content lives on disk at
@@ -1978,6 +1980,75 @@ impl Store {
             conn.execute_batch(&relay_stamp_sql("retirements", "synced_at", "updated_at", ""))?;
             conn.execute_batch(&relay_stamp_sql("summary_inputs", "synced_at", "ts", ""))?;
         }
+        if version < 60 {
+            // v60: THE MOVEMENT LAYER (Tesla ember, design log 2026-10-23).
+            //   movement_observation — every source's spans of travel, with
+            //     `subject`: 'me' (the phone) or 'vehicle:<ember>:<id>' (a
+            //     car's own drive record). Append-only, UNIQUE(source,
+            //     source_ref); synced on the telemetry-leg pattern.
+            //   vehicle_profile — per-car attribution settings (synced LWW).
+            //   trip_attribution — the Tend "were you in the car?" answers
+            //     (synced LWW).
+            //   trip_day — the reconciliation ledger: input fingerprint +
+            //     minted ids + a dirty flag (node-local — each node
+            //     reconciles the synced inputs itself).
+            conn.execute_batch(
+                "CREATE TABLE movement_observation (
+                     id TEXT PRIMARY KEY,
+                     source TEXT NOT NULL,
+                     source_ref TEXT NOT NULL,
+                     subject TEXT NOT NULL,
+                     mode TEXT NOT NULL,
+                     t_start TEXT NOT NULL,
+                     t_end TEXT NOT NULL,
+                     tz_offset_minutes INTEGER NOT NULL DEFAULT 0,
+                     start_lat REAL, start_lon REAL, end_lat REAL, end_lon REAL,
+                     start_place TEXT, end_place TEXT,
+                     distance_m REAL,
+                     attrs TEXT NOT NULL DEFAULT '{}',
+                     day TEXT NOT NULL,
+                     actor TEXT NOT NULL DEFAULT '',
+                     ingest_time TEXT NOT NULL,
+                     UNIQUE(source, source_ref)
+                 );
+                 CREATE INDEX idx_movement_observation_day ON movement_observation(day);
+                 CREATE INDEX idx_movement_observation_subject ON movement_observation(subject, t_start);
+                 CREATE TABLE vehicle_profile (
+                     vehicle TEXT PRIMARY KEY,
+                     name TEXT NOT NULL,
+                     descriptor TEXT NOT NULL DEFAULT '{}',
+                     attribution TEXT NOT NULL DEFAULT 'phone',
+                     aboard_driver TEXT NOT NULL DEFAULT 'me',
+                     household TEXT NOT NULL DEFAULT '[]',
+                     others_scope TEXT NOT NULL DEFAULT 'family',
+                     ask INTEGER NOT NULL DEFAULT 1,
+                     updated_at TEXT NOT NULL
+                 );
+                 CREATE TABLE trip_attribution (
+                     key TEXT PRIMARY KEY,
+                     vehicle TEXT NOT NULL,
+                     day TEXT NOT NULL,
+                     summary TEXT NOT NULL DEFAULT '',
+                     status TEXT NOT NULL DEFAULT 'pending',
+                     answer TEXT,
+                     asked_at TEXT,
+                     answered_at TEXT,
+                     updated_at TEXT NOT NULL
+                 );
+                 CREATE INDEX idx_trip_attribution_status ON trip_attribution(status);
+                 CREATE TABLE trip_day (
+                     day TEXT PRIMARY KEY,
+                     obs_count INTEGER NOT NULL,
+                     fingerprint TEXT NOT NULL,
+                     minted TEXT NOT NULL DEFAULT '[]',
+                     dirty INTEGER NOT NULL DEFAULT 0,
+                     minted_at TEXT NOT NULL
+                 );",
+            )?;
+            conn.execute_batch(&relay_stamp_sql("movement_observation", "synced_at", "ingest_time", ""))?;
+            conn.execute_batch(&relay_stamp_sql("vehicle_profile", "synced_at", "updated_at", ""))?;
+            conn.execute_batch(&relay_stamp_sql("trip_attribution", "synced_at", "updated_at", ""))?;
+        }
         if version < SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -2338,6 +2409,8 @@ impl Store {
             // Lint inputs exclude private at the source (cloud-pass
             // rule), so the count needs no guard.
             lint_pending: count("lint_findings WHERE resolution IS NULL")?,
+            // v60: "were you in the car?" yes/no questions
+            trips_pending: count("trip_attribution WHERE status = 'pending'")?,
         })
     }
 }
@@ -2353,6 +2426,8 @@ pub struct StoreCounts {
     pub propositions_pending: i64,
     pub opportunities_pending: i64,
     pub lint_pending: i64,
+    #[serde(default)]
+    pub trips_pending: i64,
 }
 
 /// Append a mutation inside an existing connection/transaction. Returns

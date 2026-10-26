@@ -143,6 +143,89 @@ pub fn unseal(key: &Key, sealed: &[u8]) -> Result<Vec<u8>> {
         .map_err(|_| anyhow!("unseal failed — wrong master key?"))
 }
 
+/* ————— node-sealed small secrets (ember secrets, 2026-10-23) —————
+   Sealed with the master key when this node has one. A node without
+   one (a hosted node whose operator hasn't provisioned
+   HEARTHLOOM_MASTER_KEY) seals with a per-node key file at the home
+   root instead — never exported, 0600 — and says so (`node_seal_source`)
+   so the UI can warn. That is weaker than a key held off the data
+   disk, and is labeled as such rather than pretending. */
+
+const SEAL_MAGIC_NODE: &[u8] = b"HLSEALN\n";
+pub const NODE_SEAL_KEY_FILE: &str = ".ember-secrets.key";
+
+fn node_file_key(home_root: &Path, create: bool) -> Result<Key> {
+    let path = home_root.join(NODE_SEAL_KEY_FILE);
+    if let Ok(material) = std::fs::read_to_string(&path) {
+        if !material.trim().is_empty() {
+            return Ok(derive_key(&material));
+        }
+    }
+    if !create {
+        bail!("this node's seal key is missing ({})", path.display());
+    }
+    let mut raw = [0u8; 32];
+    use chacha20poly1305::aead::rand_core::RngCore;
+    OsRng.fill_bytes(&mut raw);
+    let material: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+    std::fs::create_dir_all(home_root)?;
+    {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        use std::io::Write;
+        match opts.open(&path) {
+            Ok(mut f) => f.write_all(material.as_bytes())?,
+            // lost a race with another writer: use theirs
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return node_file_key(home_root, false)
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(derive_key(&material))
+}
+
+/// Which key seals node secrets here: "master-key" or "node-key".
+pub fn node_seal_source() -> &'static str {
+    if master_key().is_some() {
+        "master-key"
+    } else {
+        "node-key"
+    }
+}
+
+/// Seal a small secret for THIS node (master key, else the node key).
+pub fn seal_node(home_root: &Path, plaintext: &[u8]) -> Result<Vec<u8>> {
+    seal_node_with(home_root, plaintext, master_key().map(|(k, _)| k))
+}
+
+fn seal_node_with(home_root: &Path, plaintext: &[u8], master: Option<Key>) -> Result<Vec<u8>> {
+    if let Some(key) = master {
+        return seal(&key, plaintext);
+    }
+    let key = node_file_key(home_root, true)?;
+    let mut out = seal(&key, plaintext)?;
+    out.splice(..SEAL_MAGIC.len(), SEAL_MAGIC_NODE.iter().copied());
+    Ok(out)
+}
+
+/// Open a secret sealed by `seal_node` (either key, by its magic).
+pub fn unseal_node(home_root: &Path, sealed: &[u8]) -> Result<Vec<u8>> {
+    if let Some(body) = sealed.strip_prefix(SEAL_MAGIC_NODE) {
+        let key = node_file_key(home_root, false)?;
+        let mut container = SEAL_MAGIC.to_vec();
+        container.extend_from_slice(body);
+        return unseal(&key, &container);
+    }
+    let (key, _) = master_key().ok_or_else(|| anyhow!("sealed with the master key, which this node doesn't have"))?;
+    unseal(&key, sealed)
+}
+
 /// Best-effort shred: overwrite with zeros, sync, unlink. (APFS may
 /// still keep copy-on-write blocks; the point is that casual copies of
 /// the data directory stop carrying the plaintext.)
@@ -406,5 +489,35 @@ mod tests {
         assert_eq!(red.matches("[redacted-secret]").count(), 3);
         assert!(red.contains("hl_ok stays"));
         assert_eq!(redact_secrets("no secrets here"), "no secrets here");
+    }
+
+    #[test]
+    fn test_node_seal_roundtrip_both_keys() {
+        let home = std::env::temp_dir().join(format!("hl-seal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        // node-key path (no master key)
+        let sealed = seal_node_with(&home, b"ta-secret.abc", None).unwrap();
+        assert!(sealed.starts_with(SEAL_MAGIC_NODE));
+        assert!(!sealed.windows(13).any(|w| w == b"ta-secret.abc"), "no plaintext at rest");
+        assert_eq!(unseal_node(&home, &sealed).unwrap(), b"ta-secret.abc");
+        let key_file = home.join(NODE_SEAL_KEY_FILE);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&key_file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        // a second seal reuses the same key
+        let again = seal_node_with(&home, b"x", None).unwrap();
+        assert_eq!(unseal_node(&home, &again).unwrap(), b"x");
+        // master-key path carries the ordinary magic
+        let master = derive_key("test-master");
+        let m = seal_node_with(&home, b"y", Some(master)).unwrap();
+        assert!(m.starts_with(SEAL_MAGIC));
+        assert_eq!(unseal(&master, &m).unwrap(), b"y");
+        // losing the node key loses node-sealed secrets (by design)
+        std::fs::remove_file(&key_file).unwrap();
+        assert!(unseal_node(&home, &sealed).is_err());
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

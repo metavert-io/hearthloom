@@ -87,10 +87,21 @@ Field notes:
   granted. Plugins may request only `read`, `ingest`, `notify`.
   Infrastructure scopes (`admin`, `peer`, `friend`, `write`, `mcp`) are
   never grantable to plugins.
-- `launch` — optional, per-platform relative path to an executable. No
-  entry = no sidecar (a pure-UI plugin, or a program the user runs some
-  other way). Only `darwin` launches today; cloud nodes run no plugin
-  sidecars in v1.
+- `launch` — optional, relative path to an executable per platform.
+  Keys are an exact Rust target triple (`aarch64-apple-darwin`,
+  `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, …) or an OS
+  name (`darwin`, `linux`); the triple wins, so one package can carry a
+  binary per architecture. No entry for this machine = no sidecar here
+  (a pure-UI plugin, or a program the user runs some other way).
+- `publish` — optional public files: `[{"path": "/.well-known/…",
+  "file": "<path in your data store>", "type": "<content-type>"}]`. The
+  daemon serves that file from your file store (`PUT
+  /v1/plugins/self/files/…`) at that address WITHOUT authentication —
+  for domain-verification files a third-party service fetches (a
+  carmaker's public-key check, `security.txt`). Only under
+  `/.well-known/`, ≤64KB, GET only, one ember per address (a second
+  claimant is refused at install), and the grant screen shows the user
+  every address you'll publish. Never publish anything secret.
 - `sync` — `"local-only"` (default) or `"mirror"`: mirror replicates
   your KV and data files to the user's paired always-on node (see
   Replication).
@@ -110,9 +121,14 @@ Field notes:
    (replaced wholesale on upgrade — keep no state there).
 4. The key's plaintext is written once to
    `~/.hearthloom/plugins/<name>/key` (mode 0600).
-5. If you have a `launch.darwin`, a launchd agent
-   (`com.hearthloom.plugin.<name>`) is written and loaded with
-   `RunAtLoad` + `KeepAlive` and these environment variables:
+5. If you have a `launch` entry for this machine, your program starts.
+   On a Mac a launchd agent (`com.hearthloom.plugin.<name>`) is written
+   and loaded with `RunAtLoad` + `KeepAlive`; everywhere else (hosted
+   Linux nodes) the daemon supervises it itself — restarted with
+   backoff (1s doubling to 60s) when it exits, stopped with SIGTERM then
+   SIGKILL after 5s, started again whenever the daemon boots. Either way
+   it gets these environment variables (working directory: your ember's
+   folder):
 
 ```
 HEARTHLOOM_URL              http://127.0.0.1:43278
@@ -149,7 +165,7 @@ Always available to any plugin key (no scope needed):
 | `GET /v1/plugins/self/kv` | list your keys |
 | `GET/PUT/DELETE /v1/plugins/self/files/{path}` | your file store (≤32MB/file, clean relative paths, no dotfiles) |
 | `GET /v1/plugins/self/files` | recursive listing with size + mtime |
-| `GET /v1/bus/stream` | SSE event hints (`operational.changed`, `episode.created`-class topics) — react instead of polling; hints carry no data, your follow-up fetches re-check scope |
+| `GET /v1/bus/stream` | SSE event hints — embers hear `operational.changed` and `plugin.oauth`; react instead of polling; hints carry no data, your follow-up fetches re-check scope |
 
 With `ingest`:
 
@@ -158,6 +174,68 @@ With `ingest`:
 | `POST /v1/ingest` | write episodes (see below) |
 | `POST /v1/sources/virtual` | register a virtual source (data stays at origin, queryable) |
 | `POST /v1/sources/virtual/{name}/promote` | materialize virtual items on demand |
+
+### Secrets (always available)
+
+| route | purpose |
+|---|---|
+| `GET /v1/plugins/self/secrets` | names + when each was set (never values), and `sealing`: `master-key` or `node-key` |
+| `PUT /v1/plugins/self/secrets/{key}` | set one (body = the text, ≤64KB; names are 1–64 of `[a-z0-9_.-]`) |
+| `GET /v1/plugins/self/secrets/{key}` | read one back — **your program's key only**; your UI page's token gets 403 |
+| `DELETE /v1/plugins/self/secrets/{key}` | remove one |
+
+Secrets are sealed at rest, never exported and never copied to the
+user's other node — after a restore, re-establish them (sign in again,
+generate a new key). `sealing: node-key` means this node has no master
+key and the seal key sits on the same disk; say so in your UI. Names
+starting `__` are written by the daemon (sign-in codes).
+
+### Sign-in with another service (OAuth)
+
+Your ember has no public address of its own; the daemon lends one:
+`https://<the user's node>/plugins/<name>/oauth/callback`. Register it
+as the redirect URI with the provider, then:
+
+1. `POST /v1/plugins/self/oauth/pending {"state", "authorize_url",
+   "ttl_secs"?}` — state is 16–256 random printable characters; the URL
+   must be https and carry the same `state`. (Your page or your program
+   may call it.)
+2. From your page: `parent.postMessage({type: "hearthloom-oauth"}, "*")`.
+   The dashboard opens the URL the daemon holds for you (never a URL from
+   the message) in a new tab, or shows a link if the browser blocks it.
+3. The provider sends the user back; the daemon checks the state
+   (single use, expiring), seals the code, and touches the bus topic
+   `plugin.oauth`.
+4. Your program: `POST /v1/plugins/self/oauth/take` → `{"code",
+   "state"}` once (404 when nothing is waiting); exchange it yourself
+   with your client secret.
+
+Pending sign-ins live in the memory of the node the redirect address
+points at — tell users to sign in from that node's dashboard.
+
+### Movement (with `ingest`)
+
+`POST /v1/ingest/movement` — a vehicle's spans of travel into the
+movement layer:
+
+```json
+{"actor": "plugin:my-ember",
+ "vehicle": {"id": "opaque-stable-id", "name": "Model Y", "descriptor": {"make": "Tesla"}},
+ "items": [{"key": "drive:2026-10-20T12:10:00Z", "mode": "drive",
+            "start": "2026-10-20T12:10:00Z", "end": "2026-10-20T12:32:00Z",
+            "tz_offset_minutes": -240,
+            "start_lat": 42.36, "start_lon": -71.06, "end_lat": 42.37, "end_lon": -71.11,
+            "start_place": "Home", "end_place": "Harvard Square", "distance_m": 6100,
+            "attrs": {"energy_kwh": 0.9, "outside_temp_c": 12, "guest_mode": false,
+                      "media": [{"title": "So What", "artist": "Miles Davis"}]}}]}
+```
+
+The daemon stamps the subject `vehicle:<your ember>:<id>` — you can't
+post the person's own movement. Use an opaque id, not a VIN (it lands in
+entity attributes). Post a drive once it's complete; `(source, key)` is
+idempotent. Hearthloom then decides whose drive it was (the person's
+phone, the car's settings, a yes/no on Tend) and mints the episode —
+don't mint drive episodes yourself.
 
 With `notify`: `POST /v1/notifications` — your origin is forced to
 `plugin:<your-key-name>`; you cannot impersonate the system or another
@@ -305,9 +383,9 @@ The node handles this for you:
   directory. Everything goes through the API (your `pkg/` dir is
   replaced on upgrade; your data dir is written by the daemon on your
   behalf).
-- Storage caps: 256KB per KV value, 32MB per file. Secrets in plugin
-  storage are exported with the user's record — sealed plugin secrets
-  are a planned addition; until then, prefer short-lived credentials.
+- Storage caps: 256KB per KV value, 32MB per file, 64KB per secret.
+  KV and files are exported with the user's record — anything secret
+  belongs in `/v1/plugins/self/secrets`, never in KV or files.
 - Wire discipline: the API only ever *adds* fields. Ignore fields you
   don't recognize; feature-detect endpoints (a 404/405 means an older
   node — degrade, don't die).

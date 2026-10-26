@@ -8,6 +8,72 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+Schema **v60** (additive: `movement_observation`, `vehicle_profile`,
+`trip_attribution`, `trip_day`). A peer on 0.5.71 ignores the new
+movements and vehicles legs; it catches up once it updates.
+
+### Added — your car's drives, and whose they were
+- **A movement layer.** Spans of travel from every source land in one
+  place: your phone's motion segments, and a car's own drives (sent by an
+  ember such as the Tesla one). Embers can post only a vehicle's
+  movements, never yours.
+- **Whose drive was it?** Owning a car doesn't make every drive yours. A
+  new daily pass looks at each of a car's drives: if your phone was in a
+  vehicle at the same time, it becomes your trip, with the car's distance,
+  energy and route and your phone's own trip folded into it; if your phone
+  was on foot or somewhere else, it's someone else's drive, filed under
+  the car's scope for other people's drives (family by default) and kept
+  off your map and visits. When it can't tell, it asks you on Tend ("Were
+  you in the Model Y on Tue Oct 20, 08:10–08:32?"), at most three times a
+  week per car.
+- **Your cars** (Integrations, under embers): per car, decide from your
+  phone, or treat it as always yours or never yours; say who drives when
+  you're aboard and who else drives it; choose how other people's drives
+  are filed. Saving re-checks past drives at once. Guest Mode drives are
+  never yours.
+- Where you parked feeds visits: your own drives' start and end points
+  join the location observations visits are built from.
+
+### Added — embers can run on hosted nodes
+- **Hosted (Linux) nodes now run ember processes.** Until now an ember's
+  program only started through macOS launchd, so an ember meant for the
+  always-on node ran nowhere. The daemon now starts, restarts (with
+  backoff) and stops ember programs itself wherever there is no launchd,
+  and starts them again when it boots. Packages can carry one binary per
+  platform (`launch` keyed by target, e.g. `x86_64-unknown-linux-gnu`).
+- **Public files for embers.** An ember can declare a file it publishes
+  at a fixed address under `/.well-known/` (for example the public key a
+  carmaker's API checks before it will talk to your node). The install
+  screen shows what will be published; only one ember can hold an
+  address; nothing outside what an ember declared is served.
+- **Encrypted ember secrets.** Embers get a sealed secret store for things
+  like sign-in tokens and signing keys. The ember's program can read a
+  secret back; its settings page can only set or remove one. Secrets are
+  never exported and never copied to your other node. On a node without
+  a master key they are sealed with a key file kept on that node (and
+  the ember is told so it can say so).
+- **Sign-in for embers.** An ember that connects to another service can
+  ask you to sign in: the dashboard opens the service's sign-in page and
+  the service returns to your node, which hands the ember a one-time
+  code. The return address is `/plugins/<ember>/oauth/callback`.
+
+### Fixed
+- **Embers never heard the event stream.** The guide promised embers
+  hints on `/v1/bus/stream`, but the filter passed events only to peer
+  and admin keys. Embers now hear `plugin.oauth` and
+  `operational.changed` (hints only, no data).
+- **Upgrading an ember left the old program running** on nodes where the
+  daemon supervises it; an upgrade now stops it before swapping the
+  package and starts the new one. Turning an ember off now stops its
+  program before switching off its key, so its last writes land. The
+  daemon also stops its embers gracefully on SIGTERM as well as SIGINT,
+  while still answering them, so their final flush isn't lost.
+- **A hosted node could install unreviewed embers.** Uploading a package
+  (or pointing at a folder) skipped the reviewed-and-approved checks that
+  installing from the registry applies on hosted nodes. Hosted nodes now
+  install only packages the registry verified, unless the node's operator
+  sets `HEARTHLOOM_ALLOW_UNREVIEWED_EMBERS=1`.
+
 ### Fixed
 - The paired phone can set up Quick Capture again: its key may mint a
   SCOPED key (grants, no scopes — always narrower than itself), such as

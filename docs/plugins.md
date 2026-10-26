@@ -45,9 +45,17 @@ distribution deliberately deferred. What shipped, beyond this design:
   third-party path): the presence sampler, `ingest`-only, mirror-sync'd
   KV, all four UI hooks, zero-SDK hand-rolled HTTP client.
 
-Deferred: a central index with signing and browse (Tier 3);
-sealed plugin-KV secrets (first OAuth plugin brings it); linux/systemd
-sidecar launch (cloud nodes run no local sidecars in v1).
+Shipped in 0.5.72 for the first ember that must run on an always-on
+node (a Tesla data ember): the daemon supervises ember programs where
+there is no launchd (hosted Linux nodes), `launch` keys by target
+triple, `publish` (pre-auth public files under /.well-known/), sealed
+ember secrets, and the OAuth callback relay. Hosted nodes install only
+registry-verified packages (the upload path used to skip that check).
+
+Deferred: a central index with signing and browse (Tier 3); moving Mac
+embers off launchd onto the daemon's supervisor (one code path); a
+master key provisioned on hosted nodes (until then they seal ember
+secrets with a node key file).
 
 The original design follows — still the contract for everything above.
 

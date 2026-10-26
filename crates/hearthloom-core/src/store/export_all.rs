@@ -68,6 +68,13 @@ pub const TABLE_CLASSES: &[(&str, TableClass)] = &[
     ("visit_day", TableClass::Exported),
     ("contact_card", TableClass::Exported),
     ("device_state", TableClass::Exported),
+    // v60 movement layer: every source's travel spans, per-car
+    // attribution settings, the Tend answers, and the reconciliation
+    // ledger (visit_day precedent).
+    ("movement_observation", TableClass::Exported),
+    ("vehicle_profile", TableClass::Exported),
+    ("trip_attribution", TableClass::Exported),
+    ("trip_day", TableClass::Exported),
     ("identities", TableClass::Exported),
     ("quarantine", TableClass::Exported),
     ("sources", TableClass::Exported),

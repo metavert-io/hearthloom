@@ -286,7 +286,7 @@ async function refreshChips() {
       (window.__version ? ` · v${window.__version}` : "");
     const tendCount = stats.review_pending + stats.quarantine_pending +
       (stats.propositions_pending || 0) + (stats.opportunities_pending || 0) +
-      (stats.lint_pending || 0);
+      (stats.lint_pending || 0) + (stats.trips_pending || 0);
     const tendBadge = document.getElementById("tend-badge");
     tendBadge.textContent = tendCount > 99 ? "99+" : (tendCount || "");
     tendBadge.hidden = !tendCount;
@@ -668,6 +668,30 @@ async function renderPluginPage(arg) {
   };
   window.addEventListener("message", onHeight);
   window.addEventListener("hashchange", () => window.removeEventListener("message", onHeight), { once: true });
+  // OAuth sign-in: the sandbox has no popups, so the page asks the shell
+  // to open the provider's sign-in. The shell opens ONLY the address the
+  // daemon holds for this ember (what its pending sign-in registered) —
+  // never a URL out of the message.
+  const onOAuth = async (ev) => {
+    if (ev.source !== frame.contentWindow || ev.data?.type !== "hearthloom-oauth") return;
+    let url = null;
+    try { url = (await api(`/v1/plugins/${encodeURIComponent(name)}/oauth`)).authorize_url; } catch { /* none pending */ }
+    if (!url || !/^https:\/\//.test(url)) return;
+    const win = window.open(url, "_blank", "noopener");
+    if (!win) {
+      // blocked: offer the same address as a plain link above the frame
+      let bar = document.getElementById("plugin-oauth-bar");
+      if (!bar) {
+        bar = document.createElement("p");
+        bar.id = "plugin-oauth-bar";
+        bar.className = "meta";
+        frame.before(bar);
+      }
+      bar.innerHTML = `Your browser blocked the sign-in window. <a href="${esc(url)}" target="_blank" rel="noopener">Open the sign-in page →</a>`;
+    }
+  };
+  window.addEventListener("message", onOAuth);
+  window.addEventListener("hashchange", () => window.removeEventListener("message", onOAuth), { once: true });
 
   // 1 · Wait until the page can actually be served. Right after a daemon
   // restart (or while it is busy) the request fails; loading the frame
@@ -2336,6 +2360,7 @@ async function renderTend() {
     <h1 class="pagehead">Tend the fire</h1>
     <p class="subhead">Everything the brain wants a human yes/no on. This is the only
       gardening Hearthloom will ever ask of you.</p>
+    <div id="tend-trips"></div>
     <div id="tend-reviews"></div>
     <div id="tend-quarantine"></div>
     <div id="tend-lint"></div>
@@ -2348,6 +2373,41 @@ async function renderTend() {
     api("/v1/selfmodel"), api("/v1/opportunities"),
     api("/v1/lint").catch(() => ({ findings: [] })),
   ]);
+
+  // "Were you in the car?" — a car's drive the evidence couldn't settle
+  // (v60). Yes/no only; the car's settings decide who drove.
+  const tripsEl = document.getElementById("tend-trips");
+  const paintTrips = async () => {
+    const res = await api("/v1/trips/questions").catch(() => ({ pending: [] }));
+    const qs = res.pending || [];
+    if (!qs.length) { tripsEl.innerHTML = ""; return; }
+    tripsEl.innerHTML = `
+      <div class="section-title">were you in the car? <span class="statchip">${qs.length}</span></div>
+      ${qs.map((q) => `
+        <div class="card tend-card" data-trip="${esc(q.key)}">
+          <p>${esc(q.summary)}</p>
+          <div class="tend-actions">
+            <button class="btn" data-ans="yes">yes</button>
+            <button class="btn" data-ans="no">no</button>
+            <button class="btn btn-quiet" data-ans="dismiss">don't ask about this one</button>
+          </div>
+        </div>`).join("")}`;
+    tripsEl.querySelectorAll("[data-trip] [data-ans]").forEach((btn) => {
+      btn.onclick = async () => {
+        const card = btn.closest("[data-trip]");
+        card.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+        try {
+          await apiPost(`/v1/trips/questions/${encodeURIComponent(card.dataset.trip)}`, { answer: btn.dataset.ans });
+          card.remove();
+          if (!tripsEl.querySelector("[data-trip]")) tripsEl.innerHTML = "";
+        } catch (e) {
+          card.querySelectorAll("button").forEach((b) => { b.disabled = false; });
+          card.insertAdjacentHTML("beforeend", `<p class="meta">${esc(e.message)}</p>`);
+        }
+      };
+    });
+  };
+  paintTrips();
 
   const reviewsEl = document.getElementById("tend-reviews");
   const allPending = reviews.pending || [];

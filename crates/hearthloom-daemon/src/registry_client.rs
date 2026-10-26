@@ -75,6 +75,32 @@ fn is_cloud() -> bool {
     crate::monitor::node_kind() == "cloud"
 }
 
+/// Staging dirs THIS process verified (signature + countersignature on
+/// a hosted node). A hosted node installs only from these — a marker
+/// file inside the staged package would be forgeable by the zip
+/// itself, an in-memory set is not. Lost on restart: re-stage.
+fn verified_stages() -> &'static std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>> {
+    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+pub fn is_verified_stage(path: &std::path::Path) -> bool {
+    let Ok(canon) = path.canonicalize() else { return false };
+    verified_stages().lock().unwrap().contains(&canon)
+}
+
+/// May a package that did NOT come through the registry install here?
+/// Yes on a user's own machine; on a hosted node only when its operator
+/// opted in (`HEARTHLOOM_ALLOW_UNREVIEWED_EMBERS=1` — a DIY cloud node
+/// may run anything; a hearthlaunch tenant never sets it).
+pub fn unreviewed_install_allowed() -> bool {
+    !is_cloud()
+        || std::env::var("HEARTHLOOM_ALLOW_UNREVIEWED_EMBERS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+}
+
 /// Proxy the registry index for the dashboard gallery. Auto-appends
 /// `context=cloud` on cloud nodes; 60s cache keyed by (root, q).
 pub async fn index(root: Option<String>, q: &str) -> Result<Value> {
@@ -116,6 +142,8 @@ pub struct Staged {
     pub reviewed: bool,
     pub placement: String,
     pub requires_host: Option<String>,
+    /// Public addresses the ember will serve (manifest `publish`).
+    pub publishes: Vec<String>,
 }
 
 /// Download + verify + extract to .staging. The caller (dashboard/CLI)
@@ -262,7 +290,11 @@ pub async fn stage(
     if is_cloud() && placement == "local" {
         bail!("{name} reads the user's own machine (placement: local) — it can't run on a hosted instance");
     }
-    Ok(Staged { path, name: name.into(), version, scopes, publisher, reviewed, placement, requires_host })
+    if let Ok(canon) = path.canonicalize() {
+        verified_stages().lock().unwrap().insert(canon);
+    }
+    let publishes = manifest.publish.iter().map(|p| p.path.clone()).collect();
+    Ok(Staged { path, name: name.into(), version, scopes, publisher, reviewed, placement, requires_host, publishes })
 }
 
 pub fn release_payload(

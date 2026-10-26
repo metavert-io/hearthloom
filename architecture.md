@@ -217,8 +217,23 @@ the record.
   trace), `llm_usage` (one row per LLM call), `ingest_log`, `syslog`,
   `health_points`, `notifications`.
 - Device feeds: `health_sample`, `photo_point` and `photo_day`,
-  `location_observation` and `visit_day`, `device_state`. Raw samples
-  land here and a finalize pass turns each closed day into episodes.
+  `location_observation` and `visit_day`, `device_state`,
+  `movement_observation` and `trip_day`. Raw samples land here and a
+  finalize pass turns each closed day into episodes.
+- The movement layer (v60): `movement_observation` holds spans of
+  travel with a `subject` — `me` (the phone's motion segments) or
+  `vehicle:<ember>:<id>` (a car's own drives, posted by an ember). A
+  car's drive is the car's until the trips pass decides the person was
+  in it: their phone in a vehicle at the same time makes it theirs
+  (`trip`, absorbing the phone's own trip episode); their phone on foot
+  or a dwell far away makes it someone else's (`vehicle_drive`, filed
+  under the car's scope for others, never on the person's map). The car
+  exposes no driver identity, so `vehicle_profile` (per-car settings:
+  decide by phone / always me / never me, who drives when you're
+  aboard, household drivers) and `trip_attribution` (a yes/no on Tend
+  when the evidence can't tell) fill the gap. Trip refs carry a
+  fingerprint of the day's output, so both nodes mint the same episodes,
+  and the pass re-asserts its set if a peer's stale revision lands.
 - Access: `users`, `sessions`, `api_keys`, `grants`, `shared_items`.
 - `consolidation_state`: a key-value table for watermarks and settings.
 
@@ -289,7 +304,8 @@ headings, and expand fresh goal matches into cascades.
 
 Further passes are user-configurable automations, each with its own
 cadence, tier and on/off switch: daily digest, chapters, friend
-activity, Gmail pull, the three day-finalize passes (photos, health,
+activity, Gmail pull, the day-finalize passes (photos, health, trip
+reconcile, visits — trips first, since your drives' endpoints feed
 visits), semantic pairs, opportunity scan, relationship briefs, lint,
 topic pages and the weekly review.
 
@@ -563,7 +579,12 @@ and `/brain`, with the `friend` scope.
 - **Plugins ("embers")**: sidecar processes with scoped tokens behind a
   default-deny route ceiling. Their storage is mediated by the daemon,
   and their UI runs in sandboxed iframes, never in the dashboard origin.
-  A registry distributes signed packages.
+  A registry distributes signed packages. On a Mac launchd runs their
+  programs; elsewhere (hosted nodes) the daemon supervises them. An
+  ember can publish files under `/.well-known/`, keep sealed secrets
+  (never exported or mirrored), and borrow the node's address for an
+  OAuth sign-in (`/plugins/<name>/oauth/callback`). Hosted nodes
+  install only registry-verified packages.
 - **Notifications**: a queue of hints with a link allowlist, exchanged
   both ways between peers.
 - **Full export**: one zip that can rebuild a node (database snapshot,

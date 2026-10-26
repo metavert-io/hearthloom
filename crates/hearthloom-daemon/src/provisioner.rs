@@ -155,6 +155,9 @@ pub fn killswitch_allows(path: &str, method: &axum::http::Method) -> bool {
         || path == "/v1/vault"
         || path.starts_with("/assets/")
         || path == "/health"
+        // ember public files (a vehicle maker's key check must keep
+        // passing through a grace period, or pairing breaks)
+        || path.starts_with("/.well-known/")
         || path == "/v1/auth/login"
         || path == "/v1/auth/logout"
         || path == "/v1/auth/me"

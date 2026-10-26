@@ -20,7 +20,9 @@ use crate::time::now_utc;
 /// new revisioned source must be added here; never add one whose
 /// `source_ref` comes from outside (mail Message-IDs, calendar UIDs,
 /// URLs, anything a third party can choose).
-pub const REVISIONED_SOURCES: &[&str] = &["photos", "visits", "contacts"];
+/// `trips` (v60): refs are minted by the daemon's own reconciliation
+/// pass (`trip:<day>:<idx>#r<fingerprint>`), never chosen by a sender.
+pub const REVISIONED_SOURCES: &[&str] = &["photos", "visits", "contacts", "trips"];
 
 /// The record's own sources: the revisioned ones (a `#r<n>` ref hides the
 /// real record), the consolidation passes (the digest, chapters), the

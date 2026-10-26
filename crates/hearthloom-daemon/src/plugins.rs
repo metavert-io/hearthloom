@@ -86,7 +86,46 @@ pub struct Manifest {
     /// UI contributions — see ui_contributions().
     #[serde(default)]
     pub ui: Option<Value>,
+    /// Public files: [{path, file, type?}] — a file from the ember's
+    /// own data store served WITHOUT auth at a fixed address under
+    /// /.well-known/ (a third-party app's domain-verification key, the
+    /// Tesla Fleet API case). Shown on the grant screen; one ember per
+    /// path. See serve_well_known().
+    #[serde(default)]
+    pub publish: Vec<PublishEntry>,
     // "signature" is reserved (additive) for a registry's countersignature.
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct PublishEntry {
+    /// The public address, e.g. "/.well-known/appspecific/x.pem".
+    pub path: String,
+    /// Relative path inside the ember's data store (/v1/plugins/self/files).
+    pub file: String,
+    /// Content-Type; default text/plain.
+    #[serde(default, rename = "type")]
+    pub content_type: Option<String>,
+}
+
+/// Public files are tiny by nature (keys, verification tokens).
+pub const PUBLISH_MAX_BYTES: u64 = 64 * 1024;
+
+/// A clean public address under /.well-known/: [A-Za-z0-9._-] segments,
+/// no dot-segments, bounded length.
+pub fn valid_publish_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/.well-known/") else {
+        return false;
+    };
+    path.len() <= 200
+        && !rest.is_empty()
+        && rest.split('/').all(|seg| {
+            !seg.is_empty()
+                && seg != "."
+                && seg != ".."
+                && seg
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        })
 }
 
 impl Manifest {
@@ -155,6 +194,18 @@ impl Manifest {
         if let Some(sync) = &self.sync {
             if !matches!(sync.as_str(), "mirror" | "local-only") {
                 bail!("sync must be \"mirror\" or \"local-only\"");
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        for p in &self.publish {
+            if !valid_publish_path(&p.path) {
+                bail!("publish paths must be clean addresses under /.well-known/ (got {:?})", p.path);
+            }
+            if safe_rel_path(&p.file).is_err() {
+                bail!("publish file {:?} must be a clean path in the ember's data store", p.file);
+            }
+            if !seen.insert(p.path.as_str()) {
+                bail!("{:?} is published twice", p.path);
             }
         }
         Ok(())
@@ -301,19 +352,53 @@ fn launchd_plist_path(name: &str) -> PathBuf {
         .join(format!("{}.plist", launchd_label(name)))
 }
 
-/// Write + load the launchd unit for a plugin with a darwin launch
-/// entry. No-op elsewhere (cloud nodes run no local sidecars in v1).
-fn launchd_install(state: &AppState, manifest: &Manifest) -> Result<()> {
-    if !cfg!(target_os = "macos") {
-        return Ok(());
-    }
-    let Some(rel) = manifest.launch.get("darwin") else {
+/* ————— running an ember's sidecar: launchd on a Mac, the daemon's own
+   supervisor (sidecar.rs) everywhere else ————— */
+
+/// The `launch` entry for THIS machine: the exact target triple first
+/// (`x86_64-unknown-linux-gnu` — a package can carry one binary per
+/// architecture), then the OS key (`darwin` / `linux`).
+pub fn launch_entry(manifest: &Manifest) -> Option<&String> {
+    let os_key = match std::env::consts::OS {
+        "macos" => "darwin",
+        other => other,
+    };
+    manifest
+        .launch
+        .get(host_target())
+        .or_else(|| manifest.launch.get(os_key))
+}
+
+/// launchd owns sidecars on a Mac; the daemon supervises them
+/// everywhere else. `HEARTHLOOM_SIDECAR_BACKEND=supervisor` forces the
+/// supervisor on a Mac (testing the hosted path locally).
+fn use_launchd() -> bool {
+    cfg!(target_os = "macos")
+        && std::env::var("HEARTHLOOM_SIDECAR_BACKEND").map(|v| v != "supervisor").unwrap_or(true)
+}
+
+fn sidecar_env(state: &AppState, name: &str) -> Vec<(String, String)> {
+    let port = std::env::var("HEARTHLOOM_PORT").unwrap_or_else(|_| "43278".into());
+    vec![
+        ("HEARTHLOOM_URL".into(), format!("http://127.0.0.1:{port}")),
+        (
+            "HEARTHLOOM_PLUGIN_KEY_FILE".into(),
+            plugin_dir(state, name).join("key").display().to_string(),
+        ),
+        ("HEARTHLOOM_PLUGIN_NAME".into(), name.to_string()),
+    ]
+}
+
+/// Start an ember's sidecar on this machine (no-op when its package
+/// has no binary for this platform).
+pub fn sidecar_start(state: &AppState, manifest: &Manifest) -> Result<()> {
+    let Some(rel) = launch_entry(manifest) else {
         return Ok(());
     };
     let name = &manifest.name;
     let bin = plugin_dir(state, name).join("pkg").join(rel);
     if !bin.exists() {
-        bail!("manifest launch.darwin points at {rel:?}, which isn't in the package");
+        bail!("manifest launch entry points at {rel:?}, which isn't in the package");
     }
     // The binary must be executable — zips don't always preserve mode.
     #[cfg(unix)]
@@ -321,6 +406,57 @@ fn launchd_install(state: &AppState, manifest: &Manifest) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755));
     }
+    if use_launchd() {
+        return launchd_install(state, name, &bin);
+    }
+    crate::sidecar::start(crate::sidecar::Spec {
+        name: name.clone(),
+        bin,
+        env: sidecar_env(state, name),
+        log: plugin_dir(state, name).join("plugin.log"),
+        cwd: plugin_dir(state, name),
+    })
+}
+
+pub fn sidecar_stop(name: &str) {
+    if use_launchd() {
+        launchd_remove(name);
+    } else {
+        crate::sidecar::stop(name);
+    }
+}
+
+/// Is the sidecar running right now (launchd-loaded or supervised)?
+pub fn sidecar_running(name: &str) -> bool {
+    if use_launchd() {
+        launchd_loaded(name)
+    } else {
+        crate::sidecar::running(name)
+    }
+}
+
+/// Boot: supervised sidecars don't survive a daemon restart the way
+/// launchd units do, so start every enabled one that belongs here (the
+/// runner lease still decides for mirror-sync'd embers).
+pub fn start_enabled_sidecars(state: &AppState) {
+    if use_launchd() {
+        return;
+    }
+    let Ok(rows) = state.store.list_plugins() else { return };
+    for row in rows.into_iter().filter(|r| r.enabled) {
+        let Ok(manifest) = serde_json::from_value::<Manifest>(row.manifest) else {
+            continue;
+        };
+        if manifest.placement_allows_here() && lease_allows_launch(state, &manifest) {
+            if let Err(e) = sidecar_start(state, &manifest) {
+                tracing::warn!("ember {}: couldn't start its sidecar: {e:#}", manifest.name);
+            }
+        }
+    }
+}
+
+/// Write + load the launchd unit for a plugin's sidecar binary.
+fn launchd_install(state: &AppState, name: &str, bin: &Path) -> Result<()> {
     let plist = launchd_plist_path(name);
     if let Some(parent) = plist.parent() {
         std::fs::create_dir_all(parent)?;
@@ -387,7 +523,7 @@ fn launchd_remove(name: &str) {
 }
 
 /// Is the sidecar loaded in launchd right now?
-pub fn sidecar_running(name: &str) -> bool {
+fn launchd_loaded(name: &str) -> bool {
     if !cfg!(target_os = "macos") {
         return false;
     }
@@ -396,6 +532,44 @@ pub fn sidecar_running(name: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// Which ENABLED ember publishes this public address, and its entry.
+/// Paths are exclusive (install refuses a second claimant), so the
+/// first match is the only one.
+pub fn publisher_of(state: &AppState, path: &str) -> Option<(String, PublishEntry)> {
+    for row in state.store.list_plugins().ok()? {
+        if !row.enabled {
+            continue;
+        }
+        let Ok(manifest) = serde_json::from_value::<Manifest>(row.manifest) else {
+            continue;
+        };
+        if let Some(entry) = manifest.publish.into_iter().find(|p| p.path == path) {
+            return Some((row.name, entry));
+        }
+    }
+    None
+}
+
+/// Refuse an install whose public addresses another installed ember
+/// already holds (enabled or not — a disabled claimant gets its path
+/// back when re-enabled).
+fn check_publish_free(state: &AppState, manifest: &Manifest) -> Result<()> {
+    for row in state.store.list_plugins()? {
+        if row.name == manifest.name {
+            continue;
+        }
+        let Ok(other) = serde_json::from_value::<Manifest>(row.manifest) else {
+            continue;
+        };
+        for p in &manifest.publish {
+            if other.publish.iter().any(|o| o.path == p.path) {
+                bail!("{} already publishes {} — only one ember may hold a public address", row.name, p.path);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Install (or upgrade) from a package directory. Blocking: call from
@@ -407,6 +581,18 @@ pub fn install_from_dir(
     granted_scopes: Option<Vec<String>>,
 ) -> Result<(hearthloom_core::store::PluginRow, Option<String>)> {
     let manifest = load_manifest(src)?;
+    // A hosted node installs only what the registry verified in this
+    // process (stage → install). The zip-upload and local-path routes
+    // used to skip the cloud-eligible + countersignature checks that
+    // registry staging enforces.
+    if !crate::registry_client::unreviewed_install_allowed()
+        && !crate::registry_client::is_verified_stage(src)
+    {
+        bail!(
+            "hosted instances install only reviewed embers from the registry — {} wasn't staged through it",
+            manifest.name
+        );
+    }
     if let Some(req) = manifest.host_requirement() {
         let current = env!("CARGO_PKG_VERSION");
         if !version_satisfies(current, &req) {
@@ -416,6 +602,7 @@ pub fn install_from_dir(
             );
         }
     }
+    check_publish_free(state, &manifest)?;
     let granted = granted_scopes.unwrap_or_else(|| manifest.scopes.clone());
     for scope in &granted {
         if !PLUGIN_ALLOWED_SCOPES.contains(&scope.as_str()) {
@@ -428,6 +615,7 @@ pub fn install_from_dir(
     // Upgrade keeps the existing key (the sidecar's key file stays
     // valid); fresh install mints one.
     let existing = state.store.plugin(&name)?;
+    let existing_row_present = existing.is_some();
     let (api_key_id, secret) = match existing {
         Some(row) => (row.api_key_id, None),
         None => {
@@ -442,8 +630,14 @@ pub fn install_from_dir(
     };
 
     // Package lands under plugins/<name>/pkg (replaced whole on upgrade).
+    // An upgrade stops the running program first — never swap a binary
+    // under a live process, and the start below then runs the new one
+    // (the supervisor's start is a no-op for an ember it already runs).
     let dir = plugin_dir(state, &name);
     let pkg = dir.join("pkg");
+    if existing_row_present {
+        sidecar_stop(&name);
+    }
     if pkg.exists() {
         std::fs::remove_dir_all(&pkg)?;
     }
@@ -484,7 +678,7 @@ pub fn install_from_dir(
         bail!("{name} reads the user's own machine (placement: local) — it can't run on a hosted instance");
     }
     if manifest.placement_allows_here() && lease_allows_launch(state, &manifest) {
-        launchd_install(state, &manifest)?;
+        sidecar_start(state, &manifest)?;
     }
     Ok((row, secret))
 }
@@ -497,7 +691,7 @@ pub fn uninstall(state: &AppState, name: &str) -> Result<PathBuf> {
         .store
         .plugin(name)?
         .ok_or_else(|| anyhow!("no installed plugin {name:?}"))?;
-    launchd_remove(name);
+    sidecar_stop(name);
     let actor = Actor::new("human:dashboard");
     let _ = state.store.revoke_api_key(&actor, &row.api_key_id);
     revoke_ui_tokens(state, name);
@@ -510,16 +704,21 @@ pub fn set_enabled(state: &AppState, name: &str, enabled: bool) -> Result<()> {
         .store
         .plugin(name)?
         .ok_or_else(|| anyhow!("no installed plugin {name:?}"))?;
+    if !enabled {
+        // Stop FIRST: the program gets SIGTERM while its key still
+        // works, so its last flush lands (a disabled ember's key is
+        // refused — plugin_for_key binds enabled rows only).
+        sidecar_stop(name);
+    }
     state
         .store
         .set_plugin_enabled(&Actor::new("human:dashboard"), name, enabled)?;
     if enabled {
         let manifest: Manifest = serde_json::from_value(row.manifest)?;
         if manifest.placement_allows_here() && lease_allows_launch(state, &manifest) {
-            launchd_install(state, &manifest)?;
+            sidecar_start(state, &manifest)?;
         }
     } else {
-        launchd_remove(name);
         revoke_ui_tokens(state, name);
     }
     Ok(())
@@ -570,6 +769,9 @@ pub fn plugin_route_allowed(path: &str, method: &str, scopes: &[String]) -> bool
     if has("ingest")
         && method == "POST"
         && (path == "/v1/ingest"
+            // a vehicle's drives into the movement layer (the handler
+            // refuses the person's own movement from an ember)
+            || path == "/v1/ingest/movement"
             || path == "/v1/sources/virtual"
             || (path.starts_with("/v1/sources/virtual/") && path.ends_with("/promote")))
     {
@@ -586,6 +788,8 @@ pub fn plugin_route_allowed(path: &str, method: &str, scopes: &[String]) -> bool
             "/v1/auth", "/v1/keys", "/v1/export", "/v1/users", "/v1/vault",
             "/v1/plugins", "/v1/sync", "/v1/peer", "/v1/provisioner",
             "/v1/privacy", "/v1/integrations", "/v1/monitor", "/v1/agents",
+            // who drives your car, and the questions about it, are yours
+            "/v1/vehicles", "/v1/trips",
         ];
         return path.starts_with("/v1/") && !DENIED.iter().any(|d| path.starts_with(d));
     }
@@ -697,6 +901,170 @@ pub fn safe_rel_path(rel: &str) -> Result<&str> {
     Ok(rel)
 }
 
+/* ————— ember secrets: sealed at rest, never exported, never mirrored —————
+   plugins/<name>/secrets/<key>.sealed, sealed by core secrets::seal_node
+   (master key, else this node's key file). The SIDECAR reads values
+   back; the ember's UI page can set/list/delete but never read (a page
+   is a less-trusted surface than the binary the user installed). */
+
+pub const SECRET_MAX_BYTES: usize = 64 * 1024;
+
+fn secrets_dir(state: &AppState, name: &str) -> PathBuf {
+    plugin_dir(state, name).join("secrets")
+}
+
+/// Secret names: 1-64 of [a-z0-9_.-], no leading dot. `__`-prefixed
+/// names are daemon-written (the OAuth callback); embers read them.
+pub fn valid_secret_name(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 64
+        && !key.starts_with('.')
+        && key
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '.' | '-'))
+}
+
+pub fn secret_put(state: &AppState, name: &str, key: &str, value: &[u8]) -> Result<()> {
+    if !valid_secret_name(key) {
+        bail!("secret names are 1-64 chars of [a-z0-9_.-]");
+    }
+    if value.len() > SECRET_MAX_BYTES {
+        bail!("secrets cap at 64KB");
+    }
+    let sealed = hearthloom_core::secrets::seal_node(state.home.root(), value)?;
+    let dir = secrets_dir(state, name);
+    std::fs::create_dir_all(&dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    // write-then-rename: a crash never leaves half a sealed file
+    let tmp = dir.join(format!(".{key}.tmp"));
+    std::fs::write(&tmp, &sealed)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(&tmp, dir.join(format!("{key}.sealed")))?;
+    Ok(())
+}
+
+pub fn secret_get(state: &AppState, name: &str, key: &str) -> Result<Option<Vec<u8>>> {
+    if !valid_secret_name(key) {
+        return Ok(None);
+    }
+    let path = secrets_dir(state, name).join(format!("{key}.sealed"));
+    let Ok(sealed) = std::fs::read(&path) else {
+        return Ok(None);
+    };
+    Ok(Some(hearthloom_core::secrets::unseal_node(state.home.root(), &sealed)?))
+}
+
+pub fn secret_delete(state: &AppState, name: &str, key: &str) -> bool {
+    valid_secret_name(key)
+        && std::fs::remove_file(secrets_dir(state, name).join(format!("{key}.sealed"))).is_ok()
+}
+
+/// Names + when each was set — never values.
+pub fn secret_list(state: &AppState, name: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(secrets_dir(state, name)) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        let Some(key) = file.strip_suffix(".sealed") else { continue };
+        let set_at = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map(|t| chrono::DateTime::<chrono::Utc>::from(t).format("%Y-%m-%dT%H:%M:%SZ").to_string());
+        out.push(json!({"key": key, "set_at": set_at}));
+    }
+    out.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
+    out
+}
+
+/* ————— the OAuth callback relay —————
+   A third-party sign-in needs a public HTTPS redirect address; an
+   ember has none of its own (it's a process behind the daemon). So the
+   daemon answers `/plugins/<name>/oauth/callback` for it:
+   1. the ember registers a PENDING sign-in {state, authorize_url} via
+      /v1/plugins/self/oauth/pending (its page or its sidecar);
+   2. the dashboard opens exactly that authorize_url (an ember page is
+      a sandboxed iframe without popups — it asks the shell, and the
+      shell opens only the URL the daemon holds);
+   3. the provider redirects back with ?code&state; the daemon checks
+      the state (single use, expiring), seals the code as the ember's
+      `__oauth_code` secret, and touches the bus;
+   4. the sidecar takes the code ONCE (/v1/plugins/self/oauth/take)
+      and exchanges it with its client secret.
+   Pending sign-ins live in memory on the node the redirect address
+   points at — start sign-in from that node's dashboard. */
+
+pub struct PendingOAuth {
+    pub state: String,
+    pub authorize_url: String,
+    pub expires: std::time::Instant,
+}
+
+fn oauth_pending() -> &'static std::sync::Mutex<std::collections::HashMap<String, PendingOAuth>> {
+    static MAP: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, PendingOAuth>>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Register (or replace) an ember's pending sign-in.
+pub fn oauth_register(name: &str, state: &str, authorize_url: &str, ttl_secs: u64) -> Result<()> {
+    if state.len() < 16 || state.len() > 256 || !state.chars().all(|c| c.is_ascii_graphic()) {
+        bail!("state must be 16-256 printable characters (use a random value)");
+    }
+    let url = reqwest::Url::parse(authorize_url).map_err(|_| anyhow!("authorize_url isn't a URL"))?;
+    if url.scheme() != "https" || url.host_str().is_none() {
+        bail!("authorize_url must be an https address");
+    }
+    if !url.query_pairs().any(|(k, v)| k == "state" && v == state) {
+        bail!("authorize_url must carry the same state parameter");
+    }
+    let ttl = ttl_secs.clamp(60, 3600);
+    oauth_pending().lock().unwrap().insert(
+        name.to_string(),
+        PendingOAuth {
+            state: state.to_string(),
+            authorize_url: authorize_url.to_string(),
+            expires: std::time::Instant::now() + std::time::Duration::from_secs(ttl),
+        },
+    );
+    Ok(())
+}
+
+/// The authorize URL the dashboard may open for this ember, if a
+/// sign-in is pending and fresh.
+pub fn oauth_authorize_url(name: &str) -> Option<String> {
+    let map = oauth_pending().lock().unwrap();
+    map.get(name)
+        .filter(|p| p.expires > std::time::Instant::now())
+        .map(|p| p.authorize_url.clone())
+}
+
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// Consume the pending sign-in when `state` matches (single use).
+pub fn oauth_consume(name: &str, state: &str) -> bool {
+    let mut map = oauth_pending().lock().unwrap();
+    let ok = map
+        .get(name)
+        .is_some_and(|p| p.expires > std::time::Instant::now() && ct_eq(p.state.as_bytes(), state.as_bytes()));
+    if ok {
+        map.remove(name);
+    }
+    ok
+}
+
 /* ————— the single-runner lease (peered setups) —————
    A mirror-sync'd ember with a sidecar must run in ONE place across a
    pair — two samplers double-ingest and fight over state. The lease
@@ -775,9 +1143,7 @@ pub fn runner_tick(state: &AppState) {
         if !needs_lease(&manifest, &row.sync) {
             continue;
         }
-        let can_run_here = manifest.placement_allows_here()
-            && cfg!(target_os = "macos")
-            && manifest.launch.contains_key("darwin");
+        let can_run_here = manifest.placement_allows_here() && launch_entry(&manifest).is_some();
         let me = node_id();
         let lease = lease_of(state, &row.name);
         let foreign_fresh = matches!(&lease, Some((node, ts)) if *node != me && lease_fresh(ts));
@@ -789,7 +1155,7 @@ pub fn runner_tick(state: &AppState) {
                     row.name,
                     lease.as_ref().map(|(n, _)| n.as_str()).unwrap_or("peer")
                 );
-                launchd_remove(&row.name);
+                sidecar_stop(&row.name);
             }
             continue;
         }
@@ -803,7 +1169,7 @@ pub fn runner_tick(state: &AppState) {
             &json!({"node": me, "ts": hearthloom_core::time::now_utc()}).to_string(),
         );
         if !running {
-            let _ = launchd_install(state, &manifest);
+            let _ = sidecar_start(state, &manifest);
         }
     }
 }
@@ -865,6 +1231,10 @@ mod tests {
         assert!(plugin_route_allowed("/v1/ingest", "POST", &ing));
         assert!(plugin_route_allowed("/v1/sources/virtual", "POST", &ing));
         assert!(plugin_route_allowed("/v1/sources/virtual/x/promote", "POST", &ing));
+        assert!(plugin_route_allowed("/v1/ingest/movement", "POST", &ing));
+        assert!(!plugin_route_allowed("/v1/ingest/location", "POST", &ing), "the person's location stays core's");
+        assert!(!plugin_route_allowed("/v1/vehicles", "GET", &scopes(&["read"])));
+        assert!(!plugin_route_allowed("/v1/trips/questions", "GET", &scopes(&["read"])));
         assert!(!plugin_route_allowed("/v1/search", "GET", &ing));
         assert!(!plugin_route_allowed("/v1/notifications", "POST", &ing));
         // read: broad GET minus the denied prefixes
@@ -877,6 +1247,93 @@ mod tests {
         assert!(!plugin_route_allowed("/v1/plugins", "GET", &rd));
         assert!(!plugin_route_allowed("/v1/search", "POST", &rd));
         assert!(!plugin_route_allowed("/v1/ingest", "POST", &rd));
+    }
+
+    #[test]
+    fn test_publish_paths() {
+        assert!(valid_publish_path("/.well-known/appspecific/com.tesla.3p.public-key.pem"));
+        assert!(valid_publish_path("/.well-known/security.txt"));
+        for bad in [
+            "/.well-known/", "/.well-known/../x", "/.well-known/a//b", "/assets/x",
+            "/.well-known/a b", "/.well-known/./x", "/.well-known/%2e%2e/x",
+        ] {
+            assert!(!valid_publish_path(bad), "{bad:?} should be refused");
+        }
+        let m = |publish: Value| -> Manifest {
+            serde_json::from_value(json!({"protocol": 1, "name": "x", "version": "1", "publish": publish})).unwrap()
+        };
+        m(json!([{"path": "/.well-known/appspecific/k.pem", "file": "pub/k.pem"}])).validate().unwrap();
+        assert!(m(json!([{"path": "/robots.txt", "file": "r"}])).validate().is_err(), "outside .well-known");
+        assert!(m(json!([{"path": "/.well-known/k", "file": "../key"}])).validate().is_err(), "file escapes data");
+        assert!(m(json!([
+            {"path": "/.well-known/k", "file": "a"}, {"path": "/.well-known/k", "file": "b"}
+        ])).validate().is_err(), "a path twice");
+    }
+
+    #[test]
+    fn test_launch_entry_prefers_exact_target() {
+        let os_key = if cfg!(target_os = "macos") { "darwin" } else { std::env::consts::OS };
+        let m: Manifest = serde_json::from_value(json!({
+            "protocol": 1, "name": "x", "version": "1",
+            "launch": {os_key: "bin/generic", host_target(): "bin/exact"}
+        })).unwrap();
+        assert_eq!(launch_entry(&m).map(String::as_str), Some("bin/exact"));
+        let m: Manifest = serde_json::from_value(json!({
+            "protocol": 1, "name": "x", "version": "1", "launch": {os_key: "bin/generic"}
+        })).unwrap();
+        assert_eq!(launch_entry(&m).map(String::as_str), Some("bin/generic"));
+        let m: Manifest = serde_json::from_value(json!({
+            "protocol": 1, "name": "x", "version": "1", "launch": {"plan9": "bin/p"}
+        })).unwrap();
+        assert!(launch_entry(&m).is_none(), "no binary for this platform = no sidecar");
+    }
+
+    #[test]
+    fn test_oauth_state_is_single_use_and_checked() {
+        let name = format!("oauth-{}", uuid::Uuid::new_v4().simple());
+        let st = "s3cr3t-state-0123456789";
+        let url = format!("https://auth.example.com/authorize?client_id=c&state={st}");
+        assert!(oauth_register(&name, st, "http://auth.example.com/a?state=s3cr3t-state-0123456789", 900).is_err(), "https only");
+        assert!(oauth_register(&name, st, "https://auth.example.com/a?state=other", 900).is_err(), "state must match");
+        assert!(oauth_register(&name, "short", "https://a.example.com/?state=short", 900).is_err(), "weak state");
+        oauth_register(&name, st, &url, 900).unwrap();
+        assert_eq!(oauth_authorize_url(&name).as_deref(), Some(url.as_str()));
+        assert!(!oauth_consume(&name, "s3cr3t-state-0123456780"), "wrong state");
+        assert!(oauth_consume(&name, st));
+        assert!(!oauth_consume(&name, st), "single use");
+        assert!(oauth_authorize_url(&name).is_none());
+    }
+
+    #[test]
+    fn test_secrets_roundtrip_sealed_at_rest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::paths::Home::at(tmp.path());
+        home.init().unwrap();
+        let state = AppState {
+            store: std::sync::Arc::new(hearthloom_core::store::Store::open(&home.db_path()).unwrap()),
+            home,
+            embedder: None,
+            llm: None,
+            auth_locked: Default::default(),
+            bus: Default::default(),
+            killswitch: Default::default(),
+            running: Default::default(),
+        };
+        secret_put(&state, "demo", "client_secret", b"ta-secret.0123456789").unwrap();
+        let raw = std::fs::read(plugin_dir(&state, "demo").join("secrets/client_secret.sealed")).unwrap();
+        assert!(!raw.windows(9).any(|w| w == b"ta-secret"), "no plaintext on disk");
+        assert_eq!(secret_get(&state, "demo", "client_secret").unwrap().unwrap(), b"ta-secret.0123456789");
+        assert!(secret_get(&state, "demo", "missing").unwrap().is_none());
+        assert!(secret_get(&state, "other", "client_secret").unwrap().is_none(), "per-ember namespaces");
+        assert!(secret_put(&state, "demo", "../escape", b"x").is_err());
+        assert!(secret_put(&state, "demo", ".hidden", b"x").is_err());
+        assert!(secret_put(&state, "demo", "big", &vec![b'x'; SECRET_MAX_BYTES + 1]).is_err());
+        let listed = secret_list(&state, "demo");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["key"], "client_secret");
+        assert!(listed[0].get("value").is_none(), "listing never carries values");
+        assert!(secret_delete(&state, "demo", "client_secret"));
+        assert!(secret_get(&state, "demo", "client_secret").unwrap().is_none());
     }
 
     #[test]
