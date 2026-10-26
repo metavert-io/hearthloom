@@ -22,6 +22,13 @@ cargo clippy --workspace --all-targets
 cargo test --workspace
 ```
 
+GitHub Actions runs the same three on Linux (how hosted nodes run) and
+macOS for every push to `main` and every pull request
+(`.github/workflows/ci.yml`; clippy warnings don't fail it), with CodeQL
+and a gitleaks secret scan alongside: check `gh run list` after pushing.
+Because of the Linux job, a shell-out to a macOS-only tool (`ditto`,
+`launchctl`, `osascript`…) needs a fallback or a `cfg` gate.
+
 Deploying: `cargo build --release && install -m 755 target/release/hearthloom
 ~/.local/bin/hearthloom && launchctl kickstart -k "gui/$(id -u)/com.hearthloom.daemon"`.
 The daemon runs under launchd on the developer's machine — deploy after changes or
