@@ -8,7 +8,18 @@ pin release tags, never a branch.
 
 ## Unreleased
 
-## 0.5.72 — 2026-10-26
+## 0.5.73 — 2026-10-26
+
+Everything in 0.5.72 (which was tagged but never built into an image),
+plus:
+
+### Fixed
+- **Container builds work again.** The image build skipped the `eval/`
+  folder, but the CLI embeds the example eval suites from
+  `eval/examples/`, so building the image failed. `eval/examples/` is now
+  part of the build.
+
+## 0.5.72 — 2026-10-26 (tagged, image never built)
 
 Schema **v60** (additive: `movement_observation`, `vehicle_profile`,
 `trip_attribution`, `trip_day`). A peer on 0.5.71 ignores the new

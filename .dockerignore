@@ -2,6 +2,7 @@ target
 .git
 *.md
 !README.md
-eval
+eval/*
+!eval/examples/
 scripts
 docs
