@@ -123,8 +123,11 @@ pub const TABLE_CLASSES: &[(&str, TableClass)] = &[
     ("api_keys", TableClass::Excluded("key hashes/scopes — secrets never export")),
     ("key_requests", TableClass::Excluded("pending access requests + one-shot issued secrets — never export")),
     ("chunk_embeddings", TableClass::Excluded("rebuildable vectors; hundreds of MB of floats")),
-    // all-episodes: a reason string, not a query
-    ("chunks", TableClass::Excluded("derived text chunks — rebuilt from episodes")),
+    (
+        "chunks",
+        // all-episodes: a reason string, not a query
+        TableClass::Excluded("derived text chunks — rebuilt from episodes"),
+    ),
     // v49: the sqlite-vec ANN index — derived from chunks.embedding,
     // dual-written + consolidation-backfilled; rebuilds on any node.
     ("vec_chunks", TableClass::Excluded("rebuildable ANN index over chunk embeddings")),

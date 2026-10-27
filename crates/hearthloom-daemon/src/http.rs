@@ -743,8 +743,32 @@ mod key_ceiling_tests {
         let source = include_str!("http.rs");
         let body = source.split("pub fn router(").nth(1).unwrap().split("\n}\n").next().unwrap();
         let mut out = Vec::new();
-        for line in body.lines().filter(|l| l.trim_start().starts_with(".route(\"")) {
-            let rest = line.split_once(".route(\"").unwrap().1;
+        for (at, _) in body.match_indices(".route(") {
+            // A real call has only indentation before it on its line, so a
+            // commented-out route doesn't count.
+            let line_start = body[..at].rfind('\n').map_or(0, |i| i + 1);
+            if !body[line_start..at].trim().is_empty() {
+                continue;
+            }
+            // The call's own text runs to the parenthesis that closes
+            // `.route(`: rustfmt wraps a long call over several lines.
+            let call = &body[at + ".route(".len()..];
+            let mut depth = 1usize;
+            let end = call
+                .char_indices()
+                .find(|&(_, c)| {
+                    match c {
+                        '(' => depth += 1,
+                        ')' => depth -= 1,
+                        _ => {}
+                    }
+                    depth == 0
+                })
+                .map(|(i, _)| i)
+                .unwrap();
+            let Some(rest) = call[..end].trim_start().strip_prefix('"') else {
+                continue;
+            };
             let (template, handlers) = rest.split_once('"').unwrap();
             for method in ["get", "post", "put", "patch", "delete"] {
                 let token = format!("{method}(");
