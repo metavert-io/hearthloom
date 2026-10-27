@@ -30,7 +30,14 @@ fn key_file_path(base_url: &str) -> std::path::PathBuf {
 pub fn stored_key(base_url: &str) -> Option<String> {
     if cfg!(target_os = "macos") {
         let out = std::process::Command::new("/usr/bin/security")
-            .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", base_url, "-w"])
+            .args([
+                "find-generic-password",
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-a",
+                base_url,
+                "-w",
+            ])
             .output()
             .ok()?;
         if out.status.success() {
@@ -52,11 +59,23 @@ fn store_key(base_url: &str, key: &str) -> Result<()> {
     if cfg!(target_os = "macos") {
         // -U updates in place on re-login
         let out = std::process::Command::new("/usr/bin/security")
-            .args(["add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", base_url, "-w", key])
+            .args([
+                "add-generic-password",
+                "-U",
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-a",
+                base_url,
+                "-w",
+                key,
+            ])
             .output()
             .context("running security add-generic-password")?;
         if !out.status.success() {
-            bail!("keychain store failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+            bail!(
+                "keychain store failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
         }
         Ok(())
     } else {
@@ -74,7 +93,13 @@ fn store_key(base_url: &str, key: &str) -> Result<()> {
 fn forget_key(base_url: &str) {
     if cfg!(target_os = "macos") {
         let _ = std::process::Command::new("/usr/bin/security")
-            .args(["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", base_url])
+            .args([
+                "delete-generic-password",
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-a",
+                base_url,
+            ])
             .output();
     } else {
         let _ = std::fs::remove_file(key_file_path(base_url));
@@ -123,7 +148,12 @@ pub async fn auth_login(base_url: &str, email: Option<String>) -> Result<()> {
         .with_context(|| format!("couldn't reach {base_url}"))?;
     if !res.status().is_success() {
         let msg: Value = res.json().await.unwrap_or_default();
-        bail!("{}", msg.get("error").and_then(|e| e.as_str()).unwrap_or("sign-in refused"));
+        bail!(
+            "{}",
+            msg.get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("sign-in refused")
+        );
     }
     let cookie = res
         .headers()
@@ -165,13 +195,17 @@ pub async fn auth_login(base_url: &str, email: Option<String>) -> Result<()> {
 }
 
 pub async fn auth_status(client: &Client) -> Result<()> {
-    let has_key = stored_key(client.base_url()).is_some()
-        || std::env::var("HEARTHLOOM_API_KEY").is_ok();
+    let has_key =
+        stored_key(client.base_url()).is_some() || std::env::var("HEARTHLOOM_API_KEY").is_ok();
     match client.get("/v1/stats", &[]).await {
         Ok(_) => println!(
             "✓ {} answers and accepts this shell's credentials ({})",
             client.base_url(),
-            if has_key { "stored key" } else { "open posture — no key needed" },
+            if has_key {
+                "stored key"
+            } else {
+                "open posture — no key needed"
+            },
         ),
         Err(e) => println!("✗ {}: {e}", client.base_url()),
     }
@@ -180,7 +214,9 @@ pub async fn auth_status(client: &Client) -> Result<()> {
 
 pub async fn auth_logout(client: &Client) -> Result<()> {
     // best effort: revoke server-side, then forget locally either way
-    let _ = client.post("/v1/keys/self-revoke", &json!({"actor": ACTOR})).await;
+    let _ = client
+        .post("/v1/keys/self-revoke", &json!({"actor": ACTOR}))
+        .await;
     forget_key(client.base_url());
     println!("✓ key forgotten locally (and revoked on the node if it was reachable)");
     Ok(())
@@ -195,29 +231,49 @@ pub async fn status(client: &Client, as_json: bool) -> Result<()> {
     let imports = client.get("/v1/integrations/imports", &[]).await.ok();
     let peer = client.get("/v1/peer", &[]).await.ok();
     if as_json {
-        println!("{}", serde_json::to_string_pretty(&json!({
-            "health": health, "stats": stats, "vault": vault,
-            "imports": imports, "peer": peer,
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "health": health, "stats": stats, "vault": vault,
+                "imports": imports, "peer": peer,
+            }))?
+        );
         return Ok(());
     }
     let g = |v: &Option<Value>, path: &[&str]| -> Value {
-        let mut cur = match v { Some(v) => v.clone(), None => return Value::Null };
+        let mut cur = match v {
+            Some(v) => v.clone(),
+            None => return Value::Null,
+        };
         for p in path {
             cur = cur.get(p).cloned().unwrap_or(Value::Null);
         }
         cur
     };
-    println!("hearthloom {} at {}", health.get("version").and_then(|v| v.as_str()).unwrap_or("?"), client.base_url());
+    println!(
+        "hearthloom {} at {}",
+        health
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?"),
+        client.base_url()
+    );
     if let Some(s) = &stats {
         println!(
             "  record   {} episodes · {} entities · {} edges",
-            g(&stats, &["episodes"]), s.get("entities").unwrap_or(&Value::Null), g(&stats, &["edges"])
+            g(&stats, &["episodes"]),
+            s.get("entities").unwrap_or(&Value::Null),
+            g(&stats, &["edges"])
         );
-        let tend = ["review_pending", "quarantine_pending", "propositions_pending", "opportunities_pending"]
-            .iter()
-            .map(|k| s.get(*k).and_then(|v| v.as_i64()).unwrap_or(0))
-            .sum::<i64>();
+        let tend = [
+            "review_pending",
+            "quarantine_pending",
+            "propositions_pending",
+            "opportunities_pending",
+        ]
+        .iter()
+        .map(|k| s.get(*k).and_then(|v| v.as_i64()).unwrap_or(0))
+        .sum::<i64>();
         if tend > 0 {
             println!("  tend     {tend} waiting for you");
         }
@@ -226,29 +282,63 @@ pub async fn status(client: &Client, as_json: bool) -> Result<()> {
     }
     let locked = g(&vault, &["locked"]);
     if !locked.is_null() {
-        println!("  vault    {}", if locked == json!(true) { "locked" } else { "UNLOCKED" });
+        println!(
+            "  vault    {}",
+            if locked == json!(true) {
+                "locked"
+            } else {
+                "UNLOCKED"
+            }
+        );
     }
     if let Some(imp) = &imports {
-        let delegated = imp.get("llm_delegated").and_then(|v| v.as_bool()).unwrap_or(false);
-        let here = imp.get("llm_here").and_then(|v| v.as_bool()).unwrap_or(false);
-        let blocked = imp.get("llm_blocked").and_then(|v| v.as_bool()).unwrap_or(false);
+        let delegated = imp
+            .get("llm_delegated")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let here = imp
+            .get("llm_here")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let blocked = imp
+            .get("llm_blocked")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let pending: i64 = imp
             .get("interpreting")
             .and_then(|v| v.as_object())
-            .map(|m| m.values().filter_map(|e| e.get("pending").and_then(|p| p.as_i64())).sum())
+            .map(|m| {
+                m.values()
+                    .filter_map(|e| e.get("pending").and_then(|p| p.as_i64()))
+                    .sum()
+            })
             .unwrap_or(0);
-        let llm = if blocked { "PAUSED (provider needs attention)".to_string() }
-            else if delegated { "delegated to the always-on peer".to_string() }
-            else if here { "active on this node".to_string() }
-            else { "no provider".to_string() };
-        println!("  thinking {llm}{}", if pending > 0 { format!(" · {pending} to interpret") } else { String::new() });
+        let llm = if blocked {
+            "PAUSED (provider needs attention)".to_string()
+        } else if delegated {
+            "delegated to the always-on peer".to_string()
+        } else if here {
+            "active on this node".to_string()
+        } else {
+            "no provider".to_string()
+        };
+        println!(
+            "  thinking {llm}{}",
+            if pending > 0 {
+                format!(" · {pending} to interpret")
+            } else {
+                String::new()
+            }
+        );
     }
     if let Some(p) = &peer {
         if !p.get("url").map(Value::is_null).unwrap_or(true) {
             println!(
                 "  peer     {} · last sync {}",
                 g(&peer, &["url"]).as_str().unwrap_or("?"),
-                g(&peer, &["last_outcome", "ts"]).as_str().unwrap_or("never"),
+                g(&peer, &["last_outcome", "ts"])
+                    .as_str()
+                    .unwrap_or("never"),
             );
         }
     }
@@ -266,7 +356,9 @@ pub async fn doctor(client: &Client) -> Result<()> {
     println!("hearthloom doctor — encoding every wedge we've ever debugged:");
 
     // 1. how many daemons? (the orphan-daemon trap)
-    let ps = std::process::Command::new("pgrep").args(["-fl", "hearthloom daemon"]).output()?;
+    let ps = std::process::Command::new("pgrep")
+        .args(["-fl", "hearthloom daemon"])
+        .output()?;
     let lines: Vec<String> = String::from_utf8_lossy(&ps.stdout)
         .lines()
         .map(String::from)
@@ -292,12 +384,21 @@ pub async fn doctor(client: &Client) -> Result<()> {
             .output()?;
         let text = String::from_utf8_lossy(&out.stdout).to_string();
         if !out.status.success() {
-            warn("launchd agent com.hearthloom.daemon isn't loaded (scripts/install.sh installs it)".into());
-        } else if let Some(line) = text.lines().find(|l| l.trim_start().starts_with("program =")) {
+            warn(
+                "launchd agent com.hearthloom.daemon isn't loaded (scripts/install.sh installs it)"
+                    .into(),
+            );
+        } else if let Some(line) = text
+            .lines()
+            .find(|l| l.trim_start().starts_with("program ="))
+        {
             if line.contains(".local/bin/hearthloom") {
                 println!("  ✓ launchd runs the installed CLI binary");
             } else {
-                warn(format!("launchd runs {} — deploys to ~/.local/bin won't take", line.trim()));
+                warn(format!(
+                    "launchd runs {} — deploys to ~/.local/bin won't take",
+                    line.trim()
+                ));
             }
         }
     }
@@ -308,7 +409,10 @@ pub async fn doctor(client: &Client) -> Result<()> {
             let daemon_v = h.get("version").and_then(|v| v.as_str()).unwrap_or("?");
             let cli_v = env!("CARGO_PKG_VERSION");
             if daemon_v == cli_v {
-                println!("  ✓ daemon answers at {} (v{daemon_v}, matches this CLI)", client.base_url());
+                println!(
+                    "  ✓ daemon answers at {} (v{daemon_v}, matches this CLI)",
+                    client.base_url()
+                );
             } else {
                 warn(format!("daemon is v{daemon_v} but this CLI is v{cli_v} — kickstart the daemon after deploys"));
             }
@@ -319,8 +423,10 @@ pub async fn doctor(client: &Client) -> Result<()> {
     // 4. auth reaches past the door
     match client.get("/v1/stats", &[]).await {
         Ok(_) => println!("  ✓ credentials work (or the node is open-posture)"),
-        Err(e) if e.to_string().contains("401") =>
-            warn("the node requires sign-in and this shell has no key — run `hearthloom auth login`".into()),
+        Err(e) if e.to_string().contains("401") => warn(
+            "the node requires sign-in and this shell has no key — run `hearthloom auth login`"
+                .into(),
+        ),
         Err(_) => {}
     }
 
@@ -356,7 +462,10 @@ pub async fn doctor(client: &Client) -> Result<()> {
     if findings == 0 {
         println!("all clear.");
     } else {
-        println!("{findings} finding{}.", if findings == 1 { "" } else { "s" });
+        println!(
+            "{findings} finding{}.",
+            if findings == 1 { "" } else { "s" }
+        );
     }
     Ok(())
 }
@@ -365,9 +474,15 @@ pub async fn doctor(client: &Client) -> Result<()> {
 
 pub async fn key_mint(client: &Client, name: &str, scopes: &[String]) -> Result<()> {
     let res = client
-        .post("/v1/keys", &json!({"actor": ACTOR, "name": name, "scopes": scopes}))
+        .post(
+            "/v1/keys",
+            &json!({"actor": ACTOR, "name": name, "scopes": scopes}),
+        )
         .await?;
-    println!("{}", res.get("secret").and_then(|s| s.as_str()).unwrap_or("?"));
+    println!(
+        "{}",
+        res.get("secret").and_then(|s| s.as_str()).unwrap_or("?")
+    );
     eprintln!("(shown once — store it now)");
     Ok(())
 }
@@ -378,14 +493,31 @@ pub async fn key_list(client: &Client, as_json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&res)?);
         return Ok(());
     }
-    for k in res.get("keys").and_then(|v| v.as_array()).unwrap_or(&vec![]) {
+    for k in res
+        .get("keys")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&vec![])
+    {
         println!(
             "{}  {}  [{}]{}  last used {}",
             k.get("id").and_then(|v| v.as_str()).unwrap_or("?"),
             k.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
-            k.get("scopes").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|s| s.as_str()).collect::<Vec<_>>().join(",")).unwrap_or_default(),
-            if k.get("revoked_at").map(|v| !v.is_null()).unwrap_or(false) { "  REVOKED" } else { "" },
-            k.get("last_used_at").and_then(|v| v.as_str()).unwrap_or("never"),
+            k.get("scopes")
+                .and_then(|v| v.as_array())
+                .map(|a| a
+                    .iter()
+                    .filter_map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","))
+                .unwrap_or_default(),
+            if k.get("revoked_at").map(|v| !v.is_null()).unwrap_or(false) {
+                "  REVOKED"
+            } else {
+                ""
+            },
+            k.get("last_used_at")
+                .and_then(|v| v.as_str())
+                .unwrap_or("never"),
         );
     }
     Ok(())
@@ -419,10 +551,18 @@ pub async fn vault(client: &Client, action: Option<&str>, minutes: Option<u32>) 
 }
 
 pub async fn export(client: &Client, out: Option<std::path::PathBuf>) -> Result<()> {
-    client.post("/v1/export/start", &json!({"actor": ACTOR})).await
-        .map_err(|e| if e.to_string().contains("vault") {
-            anyhow!("{e}\n(an export contains everything — unlock first: hearthloom vault unlock)")
-        } else { e })?;
+    client
+        .post("/v1/export/start", &json!({"actor": ACTOR}))
+        .await
+        .map_err(|e| {
+            if e.to_string().contains("vault") {
+                anyhow!(
+                    "{e}\n(an export contains everything — unlock first: hearthloom vault unlock)"
+                )
+            } else {
+                e
+            }
+        })?;
     eprintln!("export started — waiting…");
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -467,7 +607,10 @@ pub async fn upgrade(client: &Client, check: bool) -> Result<()> {
     let info = client.get("/v1/version", &[]).await?;
     let current = info.get("current").and_then(|v| v.as_str()).unwrap_or("?");
     let latest = info.get("latest").and_then(|v| v.as_str());
-    let update = info.get("update_available").and_then(|v| v.as_bool()).unwrap_or(false);
+    let update = info
+        .get("update_available")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     match latest {
         Some(l) if update => println!("hearthloom {current} → {l} available"),
         Some(l) => {
@@ -485,7 +628,11 @@ pub async fn upgrade(client: &Client, check: bool) -> Result<()> {
     if check {
         return Ok(());
     }
-    if !info.get("can_self_update").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if !info
+        .get("can_self_update")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         bail!(
             "this node can't self-update (built from source, an unsupported platform, or a hosted \n               instance). Source builds: pull and rebuild. Hosted instances: your hosting provider updates the image."
         );
@@ -503,11 +650,17 @@ pub async fn upgrade(client: &Client, check: bool) -> Result<()> {
 
 pub async fn task_add(client: &Client, description: &str) -> Result<()> {
     let res = client
-        .post("/v1/tasks", &json!({"actor": ACTOR, "description": description}))
+        .post(
+            "/v1/tasks",
+            &json!({"actor": ACTOR, "description": description}),
+        )
         .await?;
     println!(
         "✓ on the desk: {}",
-        res.get("task").and_then(|t| t.get("description")).and_then(|v| v.as_str()).unwrap_or(description)
+        res.get("task")
+            .and_then(|t| t.get("description"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(description)
     );
     Ok(())
 }
@@ -521,7 +674,9 @@ pub async fn note_new(client: &Client, title: Option<String>) -> Result<()> {
     let tmp = std::env::temp_dir().join(format!("hearthloom-note-{}.md", std::process::id()));
     std::fs::write(&tmp, "")?;
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
-    let status = std::process::Command::new(&editor).arg(&tmp).status()
+    let status = std::process::Command::new(&editor)
+        .arg(&tmp)
+        .status()
         .with_context(|| format!("launching {editor}"))?;
     if !status.success() {
         bail!("{editor} exited nonzero — note not saved");
@@ -532,7 +687,10 @@ pub async fn note_new(client: &Client, title: Option<String>) -> Result<()> {
         bail!("empty note — nothing saved");
     }
     client
-        .post("/v1/notes", &json!({"actor": ACTOR, "title": title, "body": body}))
+        .post(
+            "/v1/notes",
+            &json!({"actor": ACTOR, "title": title, "body": body}),
+        )
         .await?;
     println!("✓ note saved: {title}");
     Ok(())
@@ -540,11 +698,21 @@ pub async fn note_new(client: &Client, title: Option<String>) -> Result<()> {
 
 pub async fn note_list(client: &Client) -> Result<()> {
     let res = client.get("/v1/notes", &[("limit", "15".into())]).await?;
-    for n in res.get("notes").and_then(|v| v.as_array()).unwrap_or(&vec![]) {
+    for n in res
+        .get("notes")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&vec![])
+    {
         println!(
             "{}  {}",
-            n.get("modified_at").or(n.get("updated_at")).and_then(|v| v.as_str()).map(|s| &s[..10.min(s.len())]).unwrap_or("          "),
-            n.get("title").and_then(|v| v.as_str()).unwrap_or("(untitled)"),
+            n.get("modified_at")
+                .or(n.get("updated_at"))
+                .and_then(|v| v.as_str())
+                .map(|s| &s[..10.min(s.len())])
+                .unwrap_or("          "),
+            n.get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(untitled)"),
         );
     }
     Ok(())
@@ -565,10 +733,31 @@ pub fn ember_validate(dir: &std::path::Path) -> Result<()> {
     }
     if let Some(ui) = &manifest.ui {
         for (section, entries) in [
-            ("nav", ui.get("nav").map(|v| vec![v.clone()]).unwrap_or_default()),
-            ("visualize", ui.get("visualize").and_then(|v| v.as_array()).cloned().unwrap_or_default()),
-            ("hamburger", ui.get("hamburger").and_then(|v| v.as_array()).cloned().unwrap_or_default()),
-            ("desk", ui.get("desk").and_then(|v| v.as_array()).cloned().unwrap_or_default()),
+            (
+                "nav",
+                ui.get("nav").map(|v| vec![v.clone()]).unwrap_or_default(),
+            ),
+            (
+                "visualize",
+                ui.get("visualize")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default(),
+            ),
+            (
+                "hamburger",
+                ui.get("hamburger")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default(),
+            ),
+            (
+                "desk",
+                ui.get("desk")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default(),
+            ),
         ] {
             for e in entries {
                 if let Some(page) = e.get("page").and_then(|p| p.as_str()) {
@@ -607,7 +796,11 @@ pub fn ember_pack(dir: &std::path::Path, out: Option<std::path::PathBuf>) -> Res
 
 pub async fn ember_list(client: &Client) -> Result<()> {
     let res = client.get("/v1/plugins", &[]).await?;
-    let list = res.get("plugins").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let list = res
+        .get("plugins")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     if list.is_empty() {
         println!("no embers installed (☰ → Integrations → embers)");
     }
@@ -617,20 +810,25 @@ pub async fn ember_list(client: &Client) -> Result<()> {
             p.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
             p.get("version").and_then(|v| v.as_str()).unwrap_or("?"),
             if p.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
-                if p.get("running").and_then(|v| v.as_bool()).unwrap_or(false) { "running" } else { "enabled" }
-            } else { "disabled" },
-            p.get("sync").and_then(|v| v.as_str()).map(|s| if s == "mirror" { " · mirrored" } else { "" }).unwrap_or(""),
+                if p.get("running").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    "running"
+                } else {
+                    "enabled"
+                }
+            } else {
+                "disabled"
+            },
+            p.get("sync")
+                .and_then(|v| v.as_str())
+                .map(|s| if s == "mirror" { " · mirrored" } else { "" })
+                .unwrap_or(""),
         );
     }
     Ok(())
 }
 
 pub fn ember_logs(name: &str, follow: bool) -> Result<()> {
-    let path = home()
-        .root()
-        .join("plugins")
-        .join(name)
-        .join("plugin.log");
+    let path = home().root().join("plugins").join(name).join("plugin.log");
     if !path.exists() {
         bail!("no log at {} — is the ember installed?", path.display());
     }
@@ -642,10 +840,13 @@ pub fn ember_logs(name: &str, follow: bool) -> Result<()> {
 pub async fn notify(client: &Client, title: &str, body: Option<String>) -> Result<()> {
     // origin derives from the KEY server-side; the body field is required
     client
-        .post("/v1/notifications", &json!({
-            "title": title,
-            "body": body.unwrap_or_default(),
-        }))
+        .post(
+            "/v1/notifications",
+            &json!({
+                "title": title,
+                "body": body.unwrap_or_default(),
+            }),
+        )
         .await?;
     println!("✓ the bell will ring");
     Ok(())
@@ -675,7 +876,14 @@ fn tail_file(path: &std::path::Path, follow: bool) -> Result<()> {
         out
     };
     let content = std::fs::read_to_string(path).unwrap_or_default();
-    for line in content.lines().rev().take(40).collect::<Vec<_>>().into_iter().rev() {
+    for line in content
+        .lines()
+        .rev()
+        .take(40)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
         println!("{}", strip(line));
     }
     if follow {
@@ -716,13 +924,19 @@ pub fn secret_set(home: &hearthloom_core::Home, key: &str) -> Result<()> {
     std::io::stdin().read_to_string(&mut value)?;
     let value = value.trim();
     if value.is_empty() {
-        bail!("empty value on stdin — pipe it: printf '%s' \"$VALUE\" | hearthloom secret set {key}");
+        bail!(
+            "empty value on stdin — pipe it: printf '%s' \"$VALUE\" | hearthloom secret set {key}"
+        );
     }
     hearthloom_core::secrets::set_env_vars(home.root(), &[(key, value)])?;
     let sealed = home.root().join(".env.sealed").exists();
     println!(
         "{key} saved to {}. Restart the daemon to apply:",
-        if sealed { ".env.sealed (encrypted)" } else { ".env (plaintext - no master key)" }
+        if sealed {
+            ".env.sealed (encrypted)"
+        } else {
+            ".env (plaintext - no master key)"
+        }
     );
     println!("  launchctl kickstart -k gui/$(id -u)/com.hearthloom.daemon");
     Ok(())

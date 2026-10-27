@@ -174,9 +174,8 @@ impl Store {
         nodes.truncate(120); // hard cap regardless of source count
 
         // 3. Co-citation links among the selected planets.
-        let id_json = serde_json::to_string(
-            &nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
-        )?;
+        let id_json =
+            serde_json::to_string(&nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>())?;
         let mut stmt = conn.prepare(&format!(
             "SELECT ee1.entity_id, ee2.entity_id, COUNT(DISTINCT ee1.episode_id) AS n
              FROM episode_entities ee1
@@ -215,12 +214,28 @@ impl Store {
             self.scope_guard("ea.scope"),
             self.scope_guard("eb.scope"),
         ))?;
-        type PairRow = (String, String, String, String, String, String, String, String, f64);
+        type PairRow = (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            f64,
+        );
         let pair_rows: Vec<PairRow> = stmt
             .query_map([from, to], |row| {
                 Ok((
-                    row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
-                    row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?,
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
                     row.get(8)?,
                 ))
             })?
@@ -270,9 +285,8 @@ impl Store {
             .collect::<std::result::Result<_, _>>()?;
         let mut notes = Vec::new();
         for (id, title, tags, views) in note_rows {
-            let mut stmt = conn.prepare(
-                "SELECT entity_id FROM note_mentions WHERE note_id = ?1 LIMIT 6",
-            )?;
+            let mut stmt =
+                conn.prepare("SELECT entity_id FROM note_mentions WHERE note_id = ?1 LIMIT 6")?;
             let mentions: Vec<String> = stmt
                 .query_map([&id], |row| row.get(0))?
                 .collect::<std::result::Result<_, _>>()?;

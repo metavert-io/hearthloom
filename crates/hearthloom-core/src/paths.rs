@@ -54,7 +54,9 @@ impl Home {
     /// Resolve the home directory: `HEARTHLOOM_HOME` or `~/.hearthloom`.
     pub fn resolve() -> Result<Self> {
         if let Ok(dir) = std::env::var("HEARTHLOOM_HOME") {
-            return Ok(Home { root: PathBuf::from(dir) });
+            return Ok(Home {
+                root: PathBuf::from(dir),
+            });
         }
         let home = std::env::var("HOME").map_err(|_| anyhow!("HOME is not set"))?;
         Ok(Home {
@@ -190,7 +192,9 @@ impl Home {
 fn stays_inside(rel: &str) -> bool {
     !rel.starts_with('/')
         && !rel.contains(['\\', '\0'])
-        && rel.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+        && rel
+            .split('/')
+            .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
 }
 
 #[cfg(test)]
@@ -204,14 +208,9 @@ mod tests {
         home.init().unwrap();
         assert!(home.config_dir().join("development.yaml").exists());
 
-        let rel = home
-            .write_raw("ep_abc", "2026-03-15", "hello")
-            .unwrap();
+        let rel = home.write_raw("ep_abc", "2026-03-15", "hello").unwrap();
         assert_eq!(rel, "raw/2026/03/15/ep_abc.txt");
-        assert_eq!(
-            fs::read_to_string(home.root().join(&rel)).unwrap(),
-            "hello"
-        );
+        assert_eq!(fs::read_to_string(home.root().join(&rel)).unwrap(), "hello");
 
         // Idempotent re-init.
         home.init().unwrap();
@@ -222,9 +221,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let home = Home::at(tmp.path().join("hl"));
         home.init().unwrap();
-        assert_eq!(home.write_note("ideas/plan", "x").unwrap(), "notes/ideas/plan.md");
+        assert_eq!(
+            home.write_note("ideas/plan", "x").unwrap(),
+            "notes/ideas/plan.md"
+        );
         for slug in ["../../escape", "a/../../b", "/etc/x", "a\\b"] {
-            assert!(home.write_note(slug, "x").is_err(), "{slug:?} must be refused");
+            assert!(
+                home.write_note(slug, "x").is_err(),
+                "{slug:?} must be refused"
+            );
         }
         assert!(home.write_raw("../../escape", "2026-03-15", "x").is_err());
         assert!(home.write_raw("ep_x", "..-..-..", "x").is_err());

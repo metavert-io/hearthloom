@@ -35,10 +35,8 @@ pub fn index_path(mbox: &Path) -> PathBuf {
 /// built (size+mtime fingerprint).
 pub fn is_stale(mbox: &Path) -> bool {
     let idx = index_path(mbox);
-    let Ok(conn) = Connection::open_with_flags(
-        &idx,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ) else {
+    let Ok(conn) = Connection::open_with_flags(&idx, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
         return true;
     };
     let stored: Option<String> = conn
@@ -193,10 +191,7 @@ pub fn build(mbox: &Path) -> Result<usize> {
 
 /// Best-effort copy of non-fingerprint meta from a previous index.
 fn carry_meta(old_index: &Path, conn: &Connection) -> Result<()> {
-    let old = Connection::open_with_flags(
-        old_index,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?;
+    let old = Connection::open_with_flags(old_index, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut stmt = old.prepare("SELECT key, value FROM meta WHERE key != 'fingerprint'")?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
     for row in rows.flatten() {
@@ -227,7 +222,9 @@ fn index_stream(
     let mut count = 0usize;
     let mut pending: Vec<(String, u64, u64, HeaderFields)> = Vec::new();
 
-    let flush = |conn: &Connection, pending: &mut Vec<(String, u64, u64, HeaderFields)>| -> Result<()> {
+    let flush = |conn: &Connection,
+                 pending: &mut Vec<(String, u64, u64, HeaderFields)>|
+     -> Result<()> {
         if pending.is_empty() {
             return Ok(());
         }
@@ -246,7 +243,15 @@ fn index_stream(
                 conn.execute(
                     "INSERT INTO messages(id, offset, length, date, from_addr, subject, labels)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    rusqlite::params![fallback, start as i64, len as i64, f.date, f.from, f.subject, f.labels],
+                    rusqlite::params![
+                        fallback,
+                        start as i64,
+                        len as i64,
+                        f.date,
+                        f.from,
+                        f.subject,
+                        f.labels
+                    ],
                 )?;
                 fallback
             } else {
@@ -366,10 +371,8 @@ pub fn search(mbox: &Path, query: &str, limit: usize) -> Result<Vec<(String, Str
             mbox.display()
         ));
     }
-    let conn = Connection::open_with_flags(
-        index_path(mbox),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?;
+    let conn =
+        Connection::open_with_flags(index_path(mbox), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     // Quote each term so FTS5 treats them as plain tokens (implicit AND).
     let fts_query = query
         .split_whitespace()
@@ -405,10 +408,8 @@ pub fn fetch(mbox: &Path, id: &str, cap_chars: usize) -> Result<String> {
             mbox.display()
         ));
     }
-    let conn = Connection::open_with_flags(
-        index_path(mbox),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?;
+    let conn =
+        Connection::open_with_flags(index_path(mbox), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let (offset, length): (i64, i64) = conn
         .query_row(
             "SELECT offset, length FROM messages WHERE id = ?1",
@@ -420,7 +421,10 @@ pub fn fetch(mbox: &Path, id: &str, cap_chars: usize) -> Result<String> {
     file.seek(SeekFrom::Start(offset as u64))?;
     let mut buf = vec![0u8; length as usize];
     file.read_exact(&mut buf)?;
-    Ok(String::from_utf8_lossy(&buf).chars().take(cap_chars).collect())
+    Ok(String::from_utf8_lossy(&buf)
+        .chars()
+        .take(cap_chars)
+        .collect())
 }
 
 #[cfg(test)]
@@ -525,18 +529,33 @@ Numbers attached.\n";
         let fields = scan_headers("X-Gmail-Labels: Inbox,\n Unread\nX-Gmail-Labels: Sent\n");
         assert_eq!(fields.labels, "Inbox, Unread");
         // An empty first header (the live pull's, for unlabeled mail) holds.
-        assert_eq!(scan_headers("X-Gmail-Labels:\nX-Gmail-Labels: Starred\n").labels, "");
+        assert_eq!(
+            scan_headers("X-Gmail-Labels:\nX-Gmail-Labels: Starred\n").labels,
+            ""
+        );
 
         // End to end: the hit shows the first labels and keeps the real id.
         let tmp = tempfile::tempdir().unwrap();
         let mbox = tmp.path().join("mail.mbox");
-        std::fs::write(&mbox, format!("From x@y Mon Jan 05 10:00:00 2026\n{head}\npromo body\n")).unwrap();
+        std::fs::write(
+            &mbox,
+            format!("From x@y Mon Jan 05 10:00:00 2026\n{head}\npromo body\n"),
+        )
+        .unwrap();
         build(&mbox).unwrap();
         let hits = search(&mbox, "sale", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, "real@shop.example");
-        assert!(hits[0].1.contains("Category Promotions"), "got: {}", hits[0].1);
-        assert!(!hits[0].1.contains("Starred") && !hits[0].1.contains("bank"), "got: {}", hits[0].1);
+        assert!(
+            hits[0].1.contains("Category Promotions"),
+            "got: {}",
+            hits[0].1
+        );
+        assert!(
+            !hits[0].1.contains("Starred") && !hits[0].1.contains("bank"),
+            "got: {}",
+            hits[0].1
+        );
     }
 
     #[test]

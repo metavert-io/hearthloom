@@ -15,7 +15,6 @@ use serde_json::{json, Value};
 
 use crate::client::Client;
 
-
 fn urlencode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
@@ -44,7 +43,9 @@ impl Registry {
         // registry unless its owner chooses one.
         let root = url
             .filter(|u| !u.trim().is_empty())
-            .ok_or_else(|| anyhow!("no ember registry: pass --registry <url> or set HEARTHLOOM_REGISTRY_URL"))?
+            .ok_or_else(|| {
+                anyhow!("no ember registry: pass --registry <url> or set HEARTHLOOM_REGISTRY_URL")
+            })?
             .trim_end_matches('/')
             .to_string();
         let http = reqwest::Client::builder()
@@ -72,7 +73,12 @@ impl Registry {
             }
             _ => (format!("{root}/registry/v1"), None),
         };
-        Ok(Registry { root, base, countersign_key, http })
+        Ok(Registry {
+            root,
+            base,
+            countersign_key,
+            http,
+        })
     }
 
     async fn get(&self, path: &str) -> Result<Value> {
@@ -98,7 +104,11 @@ impl Registry {
             path.push_str("&context=cloud");
         }
         let res = self.get(&path).await?;
-        let embers = res.get("embers").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let embers = res
+            .get("embers")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         if embers.is_empty() {
             println!("nothing matched {query:?} at {}", self.base);
             return Ok(());
@@ -107,7 +117,9 @@ impl Registry {
             println!(
                 "{:24} {:10} {}  — {}",
                 e.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
-                e.get("latestVersion").and_then(|v| v.as_str()).unwrap_or("-"),
+                e.get("latestVersion")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("-"),
                 e.get("publisher").and_then(|v| v.as_str()).unwrap_or("?"),
                 e.get("description").and_then(|v| v.as_str()).unwrap_or(""),
             );
@@ -123,27 +135,64 @@ impl Registry {
         let ember = res.get("ember").cloned().unwrap_or_default();
         println!(
             "{} — {}",
-            ember.get("displayName").or(ember.get("name")).and_then(|v| v.as_str()).unwrap_or(name),
-            ember.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+            ember
+                .get("displayName")
+                .or(ember.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(name),
+            ember
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
         );
         println!(
             "  publisher: {} · latest: {} · cloud-eligible: {}",
-            ember.get("publisher").and_then(|v| v.as_str()).unwrap_or("?"),
-            ember.get("latestVersion").and_then(|v| v.as_str()).unwrap_or("-"),
-            ember.get("cloudEligible").and_then(|v| v.as_bool()).unwrap_or(false),
+            ember
+                .get("publisher")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
+            ember
+                .get("latestVersion")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-"),
+            ember
+                .get("cloudEligible")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         );
         for link in ["homepage", "sourceUrl"] {
             if let Some(url) = ember.get(link).and_then(|v| v.as_str()) {
                 println!("  {link}: {url}");
             }
         }
-        for v in res.get("versions").and_then(|v| v.as_array()).unwrap_or(&vec![]) {
+        for v in res
+            .get("versions")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&vec![])
+        {
             println!(
                 "  {}  scopes [{}]{}  {}",
                 v.get("version").and_then(|x| x.as_str()).unwrap_or("?"),
-                v.get("scopes").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|s| s.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default(),
-                if v.get("countersigned").and_then(|x| x.as_bool()).unwrap_or(false) { "  ✓ registry-reviewed" } else { "" },
-                v.get("publishedAt").and_then(|x| x.as_str()).map(|s| &s[..10.min(s.len())]).unwrap_or(""),
+                v.get("scopes")
+                    .and_then(|x| x.as_array())
+                    .map(|a| a
+                        .iter()
+                        .filter_map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "))
+                    .unwrap_or_default(),
+                if v.get("countersigned")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false)
+                {
+                    "  ✓ registry-reviewed"
+                } else {
+                    ""
+                },
+                v.get("publishedAt")
+                    .and_then(|x| x.as_str())
+                    .map(|s| &s[..10.min(s.len())])
+                    .unwrap_or(""),
             );
         }
         Ok(())
@@ -163,7 +212,12 @@ impl Registry {
             // remote node: IT stages and verifies (its cloud policy is
             // enforced server-side); we show scopes and approve.
             let staged = self.remote_stage(client, name, version).await?;
-            self.ensure_host(client, staged.get("requires_host").and_then(|v| v.as_str()), upgrade_host).await?;
+            self.ensure_host(
+                client,
+                staged.get("requires_host").and_then(|v| v.as_str()),
+                upgrade_host,
+            )
+            .await?;
             return self.remote_approve_install(client, staged, yes, &[]).await;
         }
         let ember = self
@@ -179,11 +233,16 @@ impl Registry {
                 .to_string(),
         };
         let v = self.fetch_and_verify(name, &version).await?;
-        self.ensure_host(client, v.requires_host.as_deref(), upgrade_host).await?;
+        self.ensure_host(client, v.requires_host.as_deref(), upgrade_host)
+            .await?;
         println!("{name} {version} by {}", v.publisher);
         println!(
             "  scopes it will hold: {}",
-            if v.scopes.is_empty() { "(none)".into() } else { v.scopes.join(", ") }
+            if v.scopes.is_empty() {
+                "(none)".into()
+            } else {
+                v.scopes.join(", ")
+            }
         );
         println!("  {}", v.trust_line());
         if !yes && !confirm("install? [y/N] ")? {
@@ -223,12 +282,24 @@ impl Registry {
         }
         let mut outdated: Vec<(String, String, String, Vec<String>)> = Vec::new();
         for row in &rows {
-            let name = row.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-            let have = row.get("version").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let name = row
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let have = row
+                .get("version")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
             let granted: Vec<String> = row
                 .get("granted_scopes")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             let page = match self.get(&format!("/embers/{name}")).await {
                 Ok(p) => p,
@@ -270,21 +341,24 @@ impl Registry {
             return Ok(());
         }
         if check {
-            println!("{} update{} available (run without --check to apply)",
-                outdated.len(), if outdated.len() == 1 { "" } else { "s" });
+            println!(
+                "{} update{} available (run without --check to apply)",
+                outdated.len(),
+                if outdated.len() == 1 { "" } else { "s" }
+            );
             return Ok(());
         }
         if client.is_remote() {
             for (name, _have, latest, granted) in outdated {
                 let staged = self.remote_stage(client, &name, Some(latest)).await?;
-                self.remote_approve_install(client, staged, yes, &granted).await?;
+                self.remote_approve_install(client, staged, yes, &granted)
+                    .await?;
             }
             return Ok(());
         }
         for (name, _have, latest, granted) in outdated {
             let v = self.fetch_and_verify(&name, &latest).await?;
-            let widened: Vec<&String> =
-                v.scopes.iter().filter(|s| !granted.contains(s)).collect();
+            let widened: Vec<&String> = v.scopes.iter().filter(|s| !granted.contains(s)).collect();
             println!("{name} → {latest} ({})", v.trust_line());
             let approved = if widened.is_empty() {
                 yes || confirm(&format!("update {name}? [y/N] "))?
@@ -292,8 +366,16 @@ impl Registry {
                 // scope widening NEVER rides --yes
                 println!(
                     "  ⚠ this version asks for NEW scopes: {} (you granted: {})",
-                    widened.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
-                    if granted.is_empty() { "none".into() } else { granted.join(", ") },
+                    widened
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    if granted.is_empty() {
+                        "none".into()
+                    } else {
+                        granted.join(", ")
+                    },
                 );
                 confirm(&format!("grant the wider scopes and update {name}? [y/N] "))?
             };
@@ -327,7 +409,10 @@ impl Registry {
             use sha2::Digest;
             format!("{:x}", sha2::Sha256::digest(&bytes))
         };
-        let want = record.get("artifactSha256").and_then(|v| v.as_str()).unwrap_or("");
+        let want = record
+            .get("artifactSha256")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if digest != want {
             bail!("artifact hash mismatch (got {digest}, registry says {want}) — refusing");
         }
@@ -348,11 +433,17 @@ impl Registry {
             })
             .and_then(|k| k.get("publicKey"))
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("publisher {publisher} has no active key {key_id} — refusing"))?;
+            .ok_or_else(|| {
+                anyhow!("publisher {publisher} has no active key {key_id} — refusing")
+            })?;
         let mut scopes: Vec<String> = record
             .get("scopes")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         scopes.sort();
         let payload = format!(
@@ -360,16 +451,27 @@ impl Registry {
             record.get("protocol").and_then(|v| v.as_i64()).unwrap_or(1),
             scopes.join(","),
         );
-        verify_ed25519(pubkey, &payload, sig.get("sig").and_then(|v| v.as_str()).unwrap_or(""))
-            .context("developer signature verification FAILED — refusing")?;
-        let reviewed = match (record.get("countersign").filter(|c| !c.is_null()), &self.countersign_key) {
+        verify_ed25519(
+            pubkey,
+            &payload,
+            sig.get("sig").and_then(|v| v.as_str()).unwrap_or(""),
+        )
+        .context("developer signature verification FAILED — refusing")?;
+        let reviewed = match (
+            record.get("countersign").filter(|c| !c.is_null()),
+            &self.countersign_key,
+        ) {
             (Some(cs), Some(org_key)) => {
                 // signed at second precision; may be served with millis
                 let served = cs.get("approvedAt").and_then(|v| v.as_str()).unwrap_or("");
                 let operator = cs.get("operator").and_then(|v| v.as_str()).unwrap_or("");
                 let sig = cs.get("sig").and_then(|v| v.as_str()).unwrap_or("");
                 let normalized = chrono::DateTime::parse_from_rfc3339(served)
-                    .map(|t| t.with_timezone(&chrono::Utc).format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                    .map(|t| {
+                        t.with_timezone(&chrono::Utc)
+                            .format("%Y-%m-%dT%H:%M:%SZ")
+                            .to_string()
+                    })
                     .unwrap_or_else(|_| served.to_string());
                 let ok = [served.to_string(), normalized].iter().any(|ts| {
                     let payload = format!(
@@ -390,7 +492,13 @@ impl Registry {
             .and_then(|r| r.get("host"))
             .and_then(|h| h.as_str())
             .map(String::from);
-        Ok(Verified { bytes: bytes.to_vec(), scopes, publisher, reviewed, requires_host })
+        Ok(Verified {
+            bytes: bytes.to_vec(),
+            scopes,
+            publisher,
+            reviewed,
+            requires_host,
+        })
     }
 
     async fn stage_and_install(
@@ -406,12 +514,19 @@ impl Registry {
             .and_then(|x| x.as_str())
             .ok_or_else(|| anyhow!("staging failed: {staged}"))?;
         let res = client
-            .post("/v1/plugins/install", &json!({"path": path, "scopes": v.scopes}))
+            .post(
+                "/v1/plugins/install",
+                &json!({"path": path, "scopes": v.scopes}),
+            )
             .await?;
         println!(
             "✓ installed {} v{} — reload the dashboard for its pages",
-            res.get("installed").and_then(|x| x.as_str()).unwrap_or(name),
-            res.get("version").and_then(|x| x.as_str()).unwrap_or(version),
+            res.get("installed")
+                .and_then(|x| x.as_str())
+                .unwrap_or(name),
+            res.get("version")
+                .and_then(|x| x.as_str())
+                .unwrap_or(version),
         );
         Ok(())
     }
@@ -419,10 +534,21 @@ impl Registry {
     /// If the ember needs a newer hearthloom than the target runs,
     /// either upgrade the host first (--upgrade-host) or refuse with
     /// guidance. `req` is the ember's `requires.host` range.
-    async fn ensure_host(&self, client: &Client, req: Option<&str>, upgrade_host: bool) -> Result<()> {
-        let Some(req) = req.filter(|r| !r.trim().is_empty()) else { return Ok(()) };
+    async fn ensure_host(
+        &self,
+        client: &Client,
+        req: Option<&str>,
+        upgrade_host: bool,
+    ) -> Result<()> {
+        let Some(req) = req.filter(|r| !r.trim().is_empty()) else {
+            return Ok(());
+        };
         let info = client.get("/v1/version", &[]).await.unwrap_or_default();
-        let current = info.get("current").and_then(|v| v.as_str()).unwrap_or("0.0.0").to_string();
+        let current = info
+            .get("current")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0.0.0")
+            .to_string();
         if version_satisfies(&current, req) {
             return Ok(());
         }
@@ -473,22 +599,44 @@ impl Registry {
         yes: bool,
         granted: &[String],
     ) -> Result<()> {
-        let name = staged.get("name").and_then(|v| v.as_str()).unwrap_or("?").to_string();
-        let version = staged.get("version").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+        let name = staged
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string();
+        let version = staged
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string();
         let scopes: Vec<String> = staged
             .get("scopes")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
-        let reviewed = staged.get("reviewed").and_then(|v| v.as_bool()).unwrap_or(false);
+        let reviewed = staged
+            .get("reviewed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         println!(
             "{name} {version} by {} → {}",
-            staged.get("publisher").and_then(|v| v.as_str()).unwrap_or("?"),
+            staged
+                .get("publisher")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
             client.base_url(),
         );
         println!(
             "  scopes it will hold: {}",
-            if scopes.is_empty() { "(none)".into() } else { scopes.join(", ") }
+            if scopes.is_empty() {
+                "(none)".into()
+            } else {
+                scopes.join(", ")
+            }
         );
         println!(
             "  {}",
@@ -504,7 +652,11 @@ impl Registry {
         } else {
             println!(
                 "  ⚠ this version asks for NEW scopes: {}",
-                widened.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
+                widened
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
             );
             confirm(&format!("grant the wider scopes and update {name}? [y/N] "))?
         };
@@ -516,12 +668,19 @@ impl Registry {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("staging failed: {staged}"))?;
         let res = client
-            .post("/v1/plugins/install", &json!({"path": path, "scopes": scopes}))
+            .post(
+                "/v1/plugins/install",
+                &json!({"path": path, "scopes": scopes}),
+            )
             .await?;
         println!(
             "✓ installed {} v{}",
-            res.get("installed").and_then(|x| x.as_str()).unwrap_or(&name),
-            res.get("version").and_then(|x| x.as_str()).unwrap_or(&version),
+            res.get("installed")
+                .and_then(|x| x.as_str())
+                .unwrap_or(&name),
+            res.get("version")
+                .and_then(|x| x.as_str())
+                .unwrap_or(&version),
         );
         Ok(())
     }
@@ -565,7 +724,10 @@ fn semver_gt(a: &str, b: &str) -> bool {
     };
     let (a, b) = (parse(a), parse(b));
     for i in 0..a.len().max(b.len()) {
-        let (x, y) = (a.get(i).copied().unwrap_or(0), b.get(i).copied().unwrap_or(0));
+        let (x, y) = (
+            a.get(i).copied().unwrap_or(0),
+            b.get(i).copied().unwrap_or(0),
+        );
         if x != y {
             return x > y;
         }
@@ -587,7 +749,9 @@ pub async fn uninstall(client: &Client, name: &str, yes: bool) -> Result<()> {
     let res = client.delete(&format!("/v1/plugins/{name}"), &[]).await?;
     println!(
         "✓ uninstalled — data kept at {}",
-        res.get("data_dir_kept").and_then(|v| v.as_str()).unwrap_or("?"),
+        res.get("data_dir_kept")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?"),
     );
     Ok(())
 }
@@ -595,19 +759,39 @@ pub async fn uninstall(client: &Client, name: &str, yes: bool) -> Result<()> {
 /// Client-side version-range check (mirror of the daemon's).
 fn version_satisfies(current: &str, req: &str) -> bool {
     let parse = |s: &str| -> (u64, u64, u64) {
-        let mut it = s.trim().trim_start_matches('v').split(['.', '-', '+'])
+        let mut it = s
+            .trim()
+            .trim_start_matches('v')
+            .split(['.', '-', '+'])
             .map(|x| x.parse::<u64>().unwrap_or(0));
-        (it.next().unwrap_or(0), it.next().unwrap_or(0), it.next().unwrap_or(0))
+        (
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+            it.next().unwrap_or(0),
+        )
     };
     let req = req.trim();
-    let (op, ver) = if let Some(r) = req.strip_prefix(">=") { (">=", r) }
-        else if let Some(r) = req.strip_prefix("<=") { ("<=", r) }
-        else if let Some(r) = req.strip_prefix('>') { (">", r) }
-        else if let Some(r) = req.strip_prefix('<') { ("<", r) }
-        else if let Some(r) = req.strip_prefix('=') { ("=", r) }
-        else { (">=", req) };
+    let (op, ver) = if let Some(r) = req.strip_prefix(">=") {
+        (">=", r)
+    } else if let Some(r) = req.strip_prefix("<=") {
+        ("<=", r)
+    } else if let Some(r) = req.strip_prefix('>') {
+        (">", r)
+    } else if let Some(r) = req.strip_prefix('<') {
+        ("<", r)
+    } else if let Some(r) = req.strip_prefix('=') {
+        ("=", r)
+    } else {
+        (">=", req)
+    };
     let (c, v) = (parse(current), parse(ver));
-    match op { ">=" => c >= v, ">" => c > v, "<=" => c <= v, "<" => c < v, _ => c == v }
+    match op {
+        ">=" => c >= v,
+        ">" => c > v,
+        "<=" => c <= v,
+        "<" => c < v,
+        _ => c == v,
+    }
 }
 
 fn verify_ed25519(pubkey_b64: &str, payload: &str, sig_b64: &str) -> Result<()> {

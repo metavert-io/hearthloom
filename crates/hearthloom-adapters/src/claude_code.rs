@@ -36,8 +36,7 @@ pub fn ingest(dir: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
 }
 
 fn collect_session_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    let entries = std::fs::read_dir(dir)
-        .with_context(|| format!("reading {}", dir.display()))?;
+    let entries = std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -125,7 +124,11 @@ fn session_to_draft(path: &Path, scope: Option<&str>) -> Result<Option<EpisodeDr
         if trimmed.is_empty() || trimmed.starts_with("<command-name>") {
             continue;
         }
-        let speaker = if kind == Some("user") { "you" } else { "claude" };
+        let speaker = if kind == Some("user") {
+            "you"
+        } else {
+            "claude"
+        };
         turns.push((speaker.into(), text));
     }
 
@@ -212,11 +215,7 @@ mod tests {
             serde_json::json!({"type":"user","isMeta":true,
                 "message":{"role":"user","content":"meta noise"}}),
         ];
-        fs::write(
-            &session,
-            lines.map(|l| l.to_string()).join("\n"),
-        )
-        .unwrap();
+        fs::write(&session, lines.map(|l| l.to_string()).join("\n")).unwrap();
         // Subagent transcript must be skipped.
         fs::write(proj.join("agent-abc.jsonl"), "{}").unwrap();
         // Session with no human turns must be skipped.
@@ -233,7 +232,10 @@ mod tests {
         assert_eq!(draft.source_ref, "sess-1");
         assert_eq!(draft.kind, "agent_session");
         assert_eq!(draft.title, "Fix the flaky login test");
-        assert_eq!(draft.event_time.utc.as_deref(), Some("2026-07-02T15:00:00Z"));
+        assert_eq!(
+            draft.event_time.utc.as_deref(),
+            Some("2026-07-02T15:00:00Z")
+        );
         assert!(draft.body.contains("you: Fix the flaky login test"));
         assert!(draft.body.contains("claude: Found the race in setup."));
         assert!(!draft.body.contains("meta noise"));

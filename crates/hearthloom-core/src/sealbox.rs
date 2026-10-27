@@ -103,7 +103,11 @@ mod tests {
         let public = public_from_secret(&secret);
         let msg = b"sk-ant-a-real-looking-key-0123456789";
         let sealed = seal(&public, msg).unwrap();
-        assert_ne!(&sealed[32..], &msg[..], "ciphertext must not equal plaintext");
+        assert_ne!(
+            &sealed[32..],
+            &msg[..],
+            "ciphertext must not equal plaintext"
+        );
         assert_eq!(open(&secret, &sealed).unwrap(), msg);
     }
 

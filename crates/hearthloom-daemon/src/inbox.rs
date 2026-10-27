@@ -76,10 +76,8 @@ async fn scan_once(state: &AppState) -> Result<()> {
                 tracing::warn!("inbox: {name} failed: {err:#}");
                 let dest = inbox.join("failed");
                 move_to(&path, &dest)?;
-                let _ = std::fs::write(
-                    dest.join(format!("{name}.error.txt")),
-                    format!("{err:#}\n"),
-                );
+                let _ =
+                    std::fs::write(dest.join(format!("{name}.error.txt")), format!("{err:#}\n"));
             }
         }
     }
@@ -229,9 +227,8 @@ fn ingest_tree(store: &Store, home: &hearthloom_core::Home, root: &Path) -> Resu
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_lowercase();
-            let ingestable = name.ends_with(".mbox")
-                || name.ends_with(".ics")
-                || name == "conversations.json";
+            let ingestable =
+                name.ends_with(".mbox") || name.ends_with(".ics") || name == "conversations.json";
             if !ingestable {
                 continue;
             }

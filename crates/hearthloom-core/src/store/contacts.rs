@@ -111,12 +111,16 @@ impl Store {
                                      device, updated_at, ingest_time)
                                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,1,0,?9,?10,?10)",
                                 rusqlite::params![
-                                    c.key, c.name.trim(),
+                                    c.key,
+                                    c.name.trim(),
                                     serde_json::to_string(&c.emails)?,
                                     serde_json::to_string(&c.phones)?,
-                                    c.org, c.birthday,
+                                    c.org,
+                                    c.birthday,
                                     serde_json::to_string(&c.postal)?,
-                                    hash, device, now
+                                    hash,
+                                    device,
+                                    now
                                 ],
                             )?;
                             new += 1;
@@ -129,12 +133,17 @@ impl Store {
                                      revision=?9, applied=0, device=?10, updated_at=?11
                                  WHERE key=?1",
                                 rusqlite::params![
-                                    c.key, c.name.trim(),
+                                    c.key,
+                                    c.name.trim(),
                                     serde_json::to_string(&c.emails)?,
                                     serde_json::to_string(&c.phones)?,
-                                    c.org, c.birthday,
+                                    c.org,
+                                    c.birthday,
                                     serde_json::to_string(&c.postal)?,
-                                    hash, rev + 1, device, now
+                                    hash,
+                                    rev + 1,
+                                    device,
+                                    now
                                 ],
                             )?;
                             updated += 1;
@@ -169,7 +178,8 @@ impl Store {
                 revision: row.get(7)?,
             })
         })?;
-        rows.collect::<std::result::Result<_, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
     }
 
     pub fn contacts_mark_applied(&self, key: &str, revision: i64) -> Result<()> {
@@ -217,7 +227,13 @@ impl Store {
             })?
             .collect::<std::result::Result<_, _>>()?;
         drop(stmt);
-        let next = super::page_cursor(&conn, "synced_at", "FROM contact_card WHERE synced_at > ?1", since, limit)?;
+        let next = super::page_cursor(
+            &conn,
+            "synced_at",
+            "FROM contact_card WHERE synced_at > ?1",
+            since,
+            limit,
+        )?;
         Ok(json!({ "items": items, "next": next }))
     }
 
@@ -229,7 +245,12 @@ impl Store {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let mut applied = 0usize;
-        for r in batch.get("items").and_then(|v| v.as_array()).into_iter().flatten() {
+        for r in batch
+            .get("items")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
             let (Some(key), Some(name), Some(updated_at), Some(hash)) = (
                 r.get("key").and_then(|v| v.as_str()),
                 r.get("name").and_then(|v| v.as_str()),
@@ -260,7 +281,8 @@ impl Store {
                              birthday=?6, postal=?7, content_hash=?8, revision=?9,
                              applied=0, device=?10, updated_at=?11 WHERE key=?1",
                         rusqlite::params![
-                            key, name,
+                            key,
+                            name,
                             r.get("emails").and_then(|v| v.as_str()).unwrap_or("[]"),
                             r.get("phones").and_then(|v| v.as_str()).unwrap_or("[]"),
                             r.get("org").and_then(|v| v.as_str()),
@@ -280,15 +302,18 @@ impl Store {
                              ingest_time)
                          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,0,?10,?11,?12)",
                         rusqlite::params![
-                            key, name,
+                            key,
+                            name,
                             r.get("emails").and_then(|v| v.as_str()).unwrap_or("[]"),
                             r.get("phones").and_then(|v| v.as_str()).unwrap_or("[]"),
                             r.get("org").and_then(|v| v.as_str()),
                             r.get("birthday").and_then(|v| v.as_str()),
                             r.get("postal").and_then(|v| v.as_str()).unwrap_or("[]"),
-                            hash, rev,
+                            hash,
+                            rev,
                             r.get("device").and_then(|v| v.as_str()).unwrap_or("peer"),
-                            updated_at, now_utc()
+                            updated_at,
+                            now_utc()
                         ],
                     )?;
                 }
@@ -319,9 +344,19 @@ mod tests {
     fn test_upsert_change_detection_and_revisions() {
         let store = Store::open_in_memory().unwrap();
         let c = card("c1", "Ada Lovelace", "ada@example.com");
-        assert_eq!(store.contacts_upsert("iPhone", std::slice::from_ref(&c)).unwrap(), (1, 0, 0));
+        assert_eq!(
+            store
+                .contacts_upsert("iPhone", std::slice::from_ref(&c))
+                .unwrap(),
+            (1, 0, 0)
+        );
         // identical re-POST: unchanged, still applied=0 (not yet minted)
-        assert_eq!(store.contacts_upsert("iPhone", std::slice::from_ref(&c)).unwrap(), (0, 0, 1));
+        assert_eq!(
+            store
+                .contacts_upsert("iPhone", std::slice::from_ref(&c))
+                .unwrap(),
+            (0, 0, 1)
+        );
         let pending = store.contacts_pending_apply(10).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].revision, 1);
@@ -339,10 +374,15 @@ mod tests {
     fn test_peer_lww_roundtrip() {
         let a = Store::open_in_memory().unwrap();
         let b = Store::open_in_memory().unwrap();
-        a.contacts_upsert("iPhone", &[card("c1", "Ada", "ada@example.com")]).unwrap();
+        a.contacts_upsert("iPhone", &[card("c1", "Ada", "ada@example.com")])
+            .unwrap();
         let page = a.contacts_since("", 100).unwrap();
         assert_eq!(b.contacts_apply(&page).unwrap(), 1);
-        assert_eq!(b.contacts_apply(&page).unwrap(), 0, "same content is a no-op");
+        assert_eq!(
+            b.contacts_apply(&page).unwrap(),
+            0,
+            "same content is a no-op"
+        );
         // the receiver's copy is pending apply (it must mint its own episode)
         assert_eq!(b.contacts_pending_apply(10).unwrap().len(), 1);
     }

@@ -144,12 +144,12 @@ pub fn unseal(key: &Key, sealed: &[u8]) -> Result<Vec<u8>> {
 }
 
 /* ————— node-sealed small secrets (ember secrets, 2026-10-23) —————
-   Sealed with the master key when this node has one. A node without
-   one (a hosted node whose operator hasn't provisioned
-   HEARTHLOOM_MASTER_KEY) seals with a per-node key file at the home
-   root instead — never exported, 0600 — and says so (`node_seal_source`)
-   so the UI can warn. That is weaker than a key held off the data
-   disk, and is labeled as such rather than pretending. */
+Sealed with the master key when this node has one. A node without
+one (a hosted node whose operator hasn't provisioned
+HEARTHLOOM_MASTER_KEY) seals with a per-node key file at the home
+root instead — never exported, 0600 — and says so (`node_seal_source`)
+so the UI can warn. That is weaker than a key held off the data
+disk, and is labeled as such rather than pretending. */
 
 const SEAL_MAGIC_NODE: &[u8] = b"HLSEALN\n";
 pub const NODE_SEAL_KEY_FILE: &str = ".ember-secrets.key";
@@ -222,7 +222,8 @@ pub fn unseal_node(home_root: &Path, sealed: &[u8]) -> Result<Vec<u8>> {
         container.extend_from_slice(body);
         return unseal(&key, &container);
     }
-    let (key, _) = master_key().ok_or_else(|| anyhow!("sealed with the master key, which this node doesn't have"))?;
+    let (key, _) = master_key()
+        .ok_or_else(|| anyhow!("sealed with the master key, which this node doesn't have"))?;
     unseal(&key, sealed)
 }
 
@@ -267,7 +268,11 @@ pub fn set_env_vars(home_root: &Path, updates: &[(&str, &str)]) -> Result<()> {
             .iter()
             .any(|(k, _)| line.split('=').next().map(str::trim) == Some(*k))
     };
-    let mut lines: Vec<String> = current.lines().filter(|l| !is_update(l)).map(String::from).collect();
+    let mut lines: Vec<String> = current
+        .lines()
+        .filter(|l| !is_update(l))
+        .map(String::from)
+        .collect();
     for (k, v) in updates {
         lines.push(format!("{k}={v}"));
         std::env::set_var(k, v);
@@ -298,7 +303,8 @@ pub fn merge_env(existing: &str, update: &str) -> String {
         if line.is_empty() || line.starts_with('#') {
             return None;
         }
-        line.split_once('=').map(|(k, _)| k.trim().trim_start_matches("export ").to_string())
+        line.split_once('=')
+            .map(|(k, _)| k.trim().trim_start_matches("export ").to_string())
     };
     let updated: Vec<String> = update.lines().filter_map(key_of).collect();
     let mut lines: Vec<String> = existing
@@ -306,7 +312,12 @@ pub fn merge_env(existing: &str, update: &str) -> String {
         .filter(|l| key_of(l).is_none_or(|k| !updated.contains(&k)))
         .map(String::from)
         .collect();
-    lines.extend(update.lines().filter(|l| key_of(l).is_some()).map(String::from));
+    lines.extend(
+        update
+            .lines()
+            .filter(|l| key_of(l).is_some())
+            .map(String::from),
+    );
     lines.join("\n") + "\n"
 }
 
@@ -345,7 +356,8 @@ pub fn load_sealed_env(home_root: &Path) -> Option<String> {
                     .map_err(anyhow::Error::from)
                     .and_then(|plain| {
                         let content = if sealed_path.exists() {
-                            let existing = String::from_utf8(unseal(&key, &std::fs::read(&sealed_path)?)?)?;
+                            let existing =
+                                String::from_utf8(unseal(&key, &std::fs::read(&sealed_path)?)?)?;
                             merge_env(&existing, &plain)
                         } else {
                             plain
@@ -456,9 +468,15 @@ mod tests {
         let existing = "ANTHROPIC_API_KEY=sk-old\n# a comment\nGMAIL_IMAP_USER=me@example.com\n";
         let update = "HEARTHLOOM_HOST=0.0.0.0\nANTHROPIC_API_KEY=sk-new\n";
         let merged = merge_env(existing, update);
-        assert!(merged.contains("GMAIL_IMAP_USER=me@example.com"), "{merged}");
+        assert!(
+            merged.contains("GMAIL_IMAP_USER=me@example.com"),
+            "{merged}"
+        );
         assert!(merged.contains("# a comment"));
-        assert!(merged.contains("ANTHROPIC_API_KEY=sk-new") && !merged.contains("sk-old"), "{merged}");
+        assert!(
+            merged.contains("ANTHROPIC_API_KEY=sk-new") && !merged.contains("sk-old"),
+            "{merged}"
+        );
         assert!(merged.contains("HEARTHLOOM_HOST=0.0.0.0"));
     }
 
@@ -498,7 +516,10 @@ mod tests {
         // node-key path (no master key)
         let sealed = seal_node_with(&home, b"ta-secret.abc", None).unwrap();
         assert!(sealed.starts_with(SEAL_MAGIC_NODE));
-        assert!(!sealed.windows(13).any(|w| w == b"ta-secret.abc"), "no plaintext at rest");
+        assert!(
+            !sealed.windows(13).any(|w| w == b"ta-secret.abc"),
+            "no plaintext at rest"
+        );
         assert_eq!(unseal_node(&home, &sealed).unwrap(), b"ta-secret.abc");
         let key_file = home.join(NODE_SEAL_KEY_FILE);
         #[cfg(unix)]

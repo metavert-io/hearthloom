@@ -30,25 +30,46 @@ pub fn hook_body(agent: &AgentRow, task: &AgentTaskRow, report_url: &str, token:
         "wakeMode": "now",
         "deliver": false,
     });
-    if let Some(id) = agent.config["agent_id"].as_str().filter(|a| !a.trim().is_empty()) {
+    if let Some(id) = agent.config["agent_id"]
+        .as_str()
+        .filter(|a| !a.trim().is_empty())
+    {
         body["agentId"] = json!(id);
     }
     body
 }
 
-pub async fn run(_state: &AppState, agent: &AgentRow, task: &AgentTaskRow, token: &str) -> Result<String> {
+pub async fn run(
+    _state: &AppState,
+    agent: &AgentRow,
+    task: &AgentTaskRow,
+    token: &str,
+) -> Result<String> {
     let url = agent.config["url"]
         .as_str()
         .map(|u| u.trim().trim_end_matches('/').to_string())
         .filter(|u| !u.is_empty())
-        .ok_or_else(|| anyhow!("set the address of {}'s gateway on the Agents page", agent.name))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "set the address of {}'s gateway on the Agents page",
+                agent.name
+            )
+        })?;
     let hook_token = super::secret(&agent.id, "TOKEN")
         .ok_or_else(|| anyhow!("add {}'s webhook token on the Agents page", agent.name))?;
     // Where OpenClaw can reach this node: the node's public address when
     // it has one, else loopback (OpenClaw on the same machine).
-    let me = std::env::var("HEARTHLOOM_PUBLIC_URL")
-        .unwrap_or_else(|_| format!("http://127.0.0.1:{}", std::env::var("HEARTHLOOM_PORT").unwrap_or_else(|_| "43278".into())));
-    let report_url = format!("{}/v1/agents/tasks/{}/report", me.trim_end_matches('/'), task.id);
+    let me = std::env::var("HEARTHLOOM_PUBLIC_URL").unwrap_or_else(|_| {
+        format!(
+            "http://127.0.0.1:{}",
+            std::env::var("HEARTHLOOM_PORT").unwrap_or_else(|_| "43278".into())
+        )
+    });
+    let report_url = format!(
+        "{}/v1/agents/tasks/{}/report",
+        me.trim_end_matches('/'),
+        task.id
+    );
     let response = reqwest::Client::new()
         .post(format!("{url}/hooks/agent"))
         .timeout(std::time::Duration::from_secs(30))
@@ -70,17 +91,39 @@ mod tests {
     #[test]
     fn test_hook_body_tells_openclaw_how_to_report() {
         let agent = AgentRow {
-            id: "ag_o".into(), name: "Claw".into(), harness: "openclaw".into(),
-            config: json!({"agent_id": "main"}), secret_name: None, key_id: None, enabled: true,
-            created_at: String::new(), updated_at: String::new(),
+            id: "ag_o".into(),
+            name: "Claw".into(),
+            harness: "openclaw".into(),
+            config: json!({"agent_id": "main"}),
+            secret_name: None,
+            key_id: None,
+            enabled: true,
+            created_at: String::new(),
+            updated_at: String::new(),
         };
         let task = AgentTaskRow {
-            id: "at_9".into(), ask_id: None, agent_id: Some("ag_o".into()), request: "r".into(),
-            brief: "Text Ada the address".into(), classes: vec![], tainted: None, sensitive: false,
-            status: "running".into(), result: None, error: None, node: None, actions: 0,
-            created_at: String::new(), updated_at: String::new(),
+            id: "at_9".into(),
+            ask_id: None,
+            agent_id: Some("ag_o".into()),
+            request: "r".into(),
+            brief: "Text Ada the address".into(),
+            classes: vec![],
+            tainted: None,
+            sensitive: false,
+            status: "running".into(),
+            result: None,
+            error: None,
+            node: None,
+            actions: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
         };
-        let body = hook_body(&agent, &task, "http://h/v1/agents/tasks/at_9/report", "hlt_x");
+        let body = hook_body(
+            &agent,
+            &task,
+            "http://h/v1/agents/tasks/at_9/report",
+            "hlt_x",
+        );
         let message = body["message"].as_str().unwrap();
         assert!(message.contains("Text Ada the address") && message.contains("hlt_x"));
         assert!(message.contains("/v1/agents/tasks/at_9/report"));

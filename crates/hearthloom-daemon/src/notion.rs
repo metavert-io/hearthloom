@@ -26,8 +26,8 @@ const CELL_CAP: usize = 200;
 const BODY_CAP: usize = 96 * 1024;
 
 const MEDIA_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "webp", "svg", "heic", "bmp", "tiff",
-    "pdf", "mp4", "mov", "mp3", "wav", "m4a", "zip", "pptx", "docx", "xlsx",
+    "png", "jpg", "jpeg", "gif", "webp", "svg", "heic", "bmp", "tiff", "pdf", "mp4", "mov", "mp3",
+    "wav", "m4a", "zip", "pptx", "docx", "xlsx",
 ];
 
 /// Images are the exception to no-rich-media (Jon 2026-07-10: "some
@@ -174,7 +174,9 @@ fn rewrite_media_links(
                 stats.images_copied += 1;
                 stats.image_bytes += bytes;
                 let encoded = filename.replace(' ', "%20");
-                out.push_str(&format!("![{filename}](/notes-media/{origin_ref}/{encoded})"));
+                out.push_str(&format!(
+                    "![{filename}](/notes-media/{origin_ref}/{encoded})"
+                ));
             } else {
                 out.push_str(&format!("[media: {filename}]"));
                 stats.placeholders += 1;
@@ -194,7 +196,10 @@ fn parse_notion_datetime(s: &str) -> Option<String> {
     let parts: Vec<&str> = s.split([' ', ',']).filter(|p| !p.is_empty()).collect();
     // Month D YYYY [H:MM AM/PM]
     let first = parts.first()?;
-    let month = MONTHS_FULL.iter().position(|m| first.eq_ignore_ascii_case(m))? + 1;
+    let month = MONTHS_FULL
+        .iter()
+        .position(|m| first.eq_ignore_ascii_case(m))?
+        + 1;
     let day: u32 = parts.get(1)?.parse().ok()?;
     let year: i32 = parts.get(2)?.parse().ok()?;
     let (mut hour, minute) = match parts.get(3).and_then(|t| t.split_once(':')) {
@@ -206,12 +211,24 @@ fn parse_notion_datetime(s: &str) -> Option<String> {
         Some(ref ap) if ap == "AM" && hour == 12 => hour = 0,
         _ => {}
     }
-    Some(format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:00Z"))
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:00Z"
+    ))
 }
 
 const MONTHS_FULL: [&str; 12] = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
 ];
 
 /// Pull `Created:` / `Updated:` property lines from the top of a page
@@ -283,7 +300,10 @@ pub fn import(store: &Store, home: &Home, root: &Path, scope: &str) -> Result<No
     loop {
         let entries: Vec<PathBuf> = std::fs::read_dir(&root)?
             .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')))
+            .filter(|p| {
+                !p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+            })
             .collect();
         match entries.as_slice() {
             [only] if only.is_dir() => root = only.clone(),
@@ -312,7 +332,11 @@ pub fn import(store: &Store, home: &Home, root: &Path, scope: &str) -> Result<No
     let mut since_sleep = 0usize;
     for path in &files {
         let rel = path.strip_prefix(root).unwrap_or(path);
-        let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+        let extension = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let (title, page_id) = split_page_id(stem);
         let origin_ref = page_id.unwrap_or_else(|| path_ref(rel));
@@ -354,12 +378,24 @@ pub fn import(store: &Store, home: &Home, root: &Path, scope: &str) -> Result<No
                 let mut body = body.to_string();
                 body.truncate(BODY_CAP);
                 report.pages += 1;
-                Some(store.import_note(&actor, home, &title, &body, &tags, scope, "notion", &origin_ref, timestamps)?)
+                Some(store.import_note(
+                    &actor,
+                    home,
+                    &title,
+                    &body,
+                    &tags,
+                    scope,
+                    "notion",
+                    &origin_ref,
+                    timestamps,
+                )?)
             }
             "csv" => {
                 // Notion emits "Db.csv" AND "Db_all.csv" — keep one
                 if stem.ends_with("_all")
-                    && csv_names.iter().any(|n| n == &format!("{}.csv", stem.trim_end_matches("_all")))
+                    && csv_names
+                        .iter()
+                        .any(|n| n == &format!("{}.csv", stem.trim_end_matches("_all")))
                 {
                     continue;
                 }
@@ -370,12 +406,24 @@ pub fn import(store: &Store, home: &Home, root: &Path, scope: &str) -> Result<No
                     continue;
                 }
                 if rows.len() - 1 > CSV_TABLE_MAX_ROWS {
-                    report.big_csvs.push(format!("{title} ({} rows)", rows.len() - 1));
+                    report
+                        .big_csvs
+                        .push(format!("{title} ({} rows)", rows.len() - 1));
                     continue;
                 }
                 let body = csv_to_table(&rows);
                 report.tables += 1;
-                Some(store.import_note(&actor, home, &title, &body, &tags, scope, "notion", &origin_ref, None)?)
+                Some(store.import_note(
+                    &actor,
+                    home,
+                    &title,
+                    &body,
+                    &tags,
+                    scope,
+                    "notion",
+                    &origin_ref,
+                    None,
+                )?)
             }
             _ => {
                 // media that slipped past "no files" — never imported
@@ -410,7 +458,9 @@ mod tests {
         assert_eq!(split_page_id("Plain title").1, None);
 
         assert_eq!(
-            tags_from(Path::new("Work 21fc4a5a8df3411caa11aa22bb33cc44/Game Design")),
+            tags_from(Path::new(
+                "Work 21fc4a5a8df3411caa11aa22bb33cc44/Game Design"
+            )),
             vec!["work", "game-design"]
         );
 
@@ -454,7 +504,10 @@ mod tests {
         assert_eq!(updated.as_deref(), Some("2022-12-31T12:05:00Z"));
         assert!(!body.contains("Created:"));
         assert!(body.contains("real text"));
-        assert_eq!(parse_notion_datetime("June 1, 2015").as_deref(), Some("2015-06-01T12:00:00Z"));
+        assert_eq!(
+            parse_notion_datetime("June 1, 2015").as_deref(),
+            Some("2015-06-01T12:00:00Z")
+        );
     }
 
     #[test]

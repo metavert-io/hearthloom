@@ -40,8 +40,14 @@ struct Question {
 /// The invented example suites, embedded so `init` can scaffold them
 /// wherever the binary runs (no checkout needed).
 pub const EXAMPLES: &[(&str, &str)] = &[
-    ("personal-eval", include_str!("../../../eval/examples/personal-eval.yaml")),
-    ("ask-eval", include_str!("../../../eval/examples/ask-eval.yaml")),
+    (
+        "personal-eval",
+        include_str!("../../../eval/examples/personal-eval.yaml"),
+    ),
+    (
+        "ask-eval",
+        include_str!("../../../eval/examples/ask-eval.yaml"),
+    ),
 ];
 
 /// Copy the example suites into `<home>/eval/` wherever one is missing;
@@ -75,16 +81,20 @@ pub fn resolve(home_root: &Path, suite: &str, file: Option<PathBuf>) -> Result<P
         );
     }
     if !path.exists() {
-        bail!("no eval suite at {} (suites live in {})", path.display(), home_root.join("eval").display());
+        bail!(
+            "no eval suite at {} (suites live in {})",
+            path.display(),
+            home_root.join("eval").display()
+        );
     }
     Ok(path)
 }
 
 pub async fn run(client: &Client, path: &Path) -> Result<()> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let eval: EvalFile = serde_yaml::from_str(&raw)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let eval: EvalFile =
+        serde_yaml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
 
     if !eval.description.is_empty() {
         println!("{}\n", eval.description);
@@ -96,7 +106,10 @@ pub async fn run(client: &Client, path: &Path) -> Result<()> {
     for q in &eval.questions {
         if let Some(reason) = &q.skip {
             skipped += 1;
-            println!("SKIP {:<24} {:>6} tok  {} (needs your ground truth: {reason})", q.id, 0, q.question);
+            println!(
+                "SKIP {:<24} {:>6} tok  {} (needs your ground truth: {reason})",
+                q.id, 0, q.question
+            );
             continue;
         }
         let response = ask(client, q).await;
@@ -117,9 +130,7 @@ pub async fn run(client: &Client, path: &Path) -> Result<()> {
                     ("FAIL", tokens, format!("missing {missing:?}"))
                 }
             }
-            Err(err) if err.to_string().contains("is offline") => {
-                ("SKIP", 0, err.to_string())
-            }
+            Err(err) if err.to_string().contains("is offline") => ("SKIP", 0, err.to_string()),
             Err(err) => ("FAIL", 0, err.to_string()),
         };
         total_tokens += tokens;
@@ -134,13 +145,21 @@ pub async fn run(client: &Client, path: &Path) -> Result<()> {
             q.id,
             tokens,
             q.question,
-            if note.is_empty() { String::new() } else { format!("— {note}") },
+            if note.is_empty() {
+                String::new()
+            } else {
+                format!("— {note}")
+            },
         );
     }
     let graded = eval.questions.len() - skipped;
     println!(
         "\n{passed}/{graded} passed{} · ~{total_tokens} answer tokens total",
-        if skipped > 0 { format!(" ({skipped} skipped)") } else { String::new() }
+        if skipped > 0 {
+            format!(" ({skipped} skipped)")
+        } else {
+            String::new()
+        }
     );
     if passed < graded {
         anyhow::bail!("eval failures");
@@ -290,7 +309,8 @@ fn ask_cost(transcript: &Value) -> AskCost {
         let model = step.get("model").and_then(|m| m.as_str()).unwrap_or("");
         match hearthloom_core::provider::pricing_for(model) {
             Some(p) => {
-                cost.usd += (tin as f64 * p.input + tout as f64 * p.output
+                cost.usd += (tin as f64 * p.input
+                    + tout as f64 * p.output
                     + cached as f64 * p.cache_read
                     + written as f64 * p.cache_write)
                     / 1_000_000.0;
@@ -313,7 +333,12 @@ fn grade_ask(q: &AskQuestion, response: &Value) -> Vec<String> {
     if !missing.is_empty() {
         problems.push(format!("missing {missing:?}"));
     }
-    if !q.expect_any.is_empty() && !q.expect_any.iter().any(|n| answer.contains(&n.to_lowercase())) {
+    if !q.expect_any.is_empty()
+        && !q
+            .expect_any
+            .iter()
+            .any(|n| answer.contains(&n.to_lowercase()))
+    {
         problems.push(format!("none of {:?}", q.expect_any));
     }
     let present: Vec<&String> = q
@@ -326,10 +351,16 @@ fn grade_ask(q: &AskQuestion, response: &Value) -> Vec<String> {
     }
     let citations = response["citations"].as_array().map(Vec::len).unwrap_or(0);
     if citations < q.min_citations {
-        problems.push(format!("{citations} citations, wanted ≥{}", q.min_citations));
+        problems.push(format!(
+            "{citations} citations, wanted ≥{}",
+            q.min_citations
+        ));
     }
     // An invented citation is a failure on EVERY case, asked for or not.
-    let dropped = response["dropped_citations"].as_array().map(Vec::len).unwrap_or(0);
+    let dropped = response["dropped_citations"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or(0);
     if dropped > 0 {
         problems.push(format!("{dropped} invented citation(s)"));
     }
@@ -346,10 +377,10 @@ fn grade_ask(q: &AskQuestion, response: &Value) -> Vec<String> {
 /// rounds, tokens, cached share, dollars and latency per question, so a
 /// model/prompt/caching change can be judged against a baseline.
 pub async fn run_ask(client: &Client, path: &Path, only: &[String]) -> Result<()> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
-    let eval: AskEvalFile = serde_yaml::from_str(&raw)
-        .with_context(|| format!("parsing {}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let eval: AskEvalFile =
+        serde_yaml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
     if !eval.description.is_empty() {
         println!("{}\n", eval.description);
     }
@@ -418,7 +449,11 @@ pub async fn run_ask(client: &Client, path: &Path, only: &[String]) -> Result<()
                     cost.tokens_out,
                     cost.usd,
                     wall_ms as f64 / 1000.0,
-                    if problems.is_empty() { String::new() } else { format!("— {}", problems.join("; ")) },
+                    if problems.is_empty() {
+                        String::new()
+                    } else {
+                        format!("— {}", problems.join("; "))
+                    },
                 );
                 // A content miss is only diagnosable with the answer in hand.
                 if problems.iter().any(|p| !p.contains("rounds, wanted")) {
@@ -440,8 +475,10 @@ pub async fn run_ask(client: &Client, path: &Path, only: &[String]) -> Result<()
                 // A billing/credential refusal fails every later question
                 // the same way — stop instead of hammering the provider.
                 let lower = message.to_lowercase();
-                if lower.contains("credit balance") || lower.contains("billing")
-                    || lower.contains("401") || lower.contains("invalid x-api-key")
+                if lower.contains("credit balance")
+                    || lower.contains("billing")
+                    || lower.contains("401")
+                    || lower.contains("invalid x-api-key")
                 {
                     let rest: Vec<&str> = questions[index + 1..]
                         .iter()
@@ -528,8 +565,10 @@ mod tests {
 
     #[test]
     fn test_grade_ask() {
-        let case = q("{id: a, question: q, expect_contains: [July], expect_any: [lease, rent], \
-                      expect_not_contains: [Gazette], min_citations: 1, max_rounds: 3}");
+        let case = q(
+            "{id: a, question: q, expect_contains: [July], expect_any: [lease, rent], \
+                      expect_not_contains: [Gazette], min_citations: 1, max_rounds: 3}",
+        );
         let good = json!({"answer": "In july the LEASE was signed.", "citations": ["ep_1"],
                           "dropped_citations": [], "rounds": 2});
         assert!(grade_ask(&case, &good).is_empty());
@@ -537,7 +576,14 @@ mod tests {
         let bad = json!({"answer": "The Gazette covered it.", "citations": [],
                          "dropped_citations": ["ep_x"], "rounds": 5});
         let problems = grade_ask(&case, &bad).join("; ");
-        for expected in ["missing", "none of", "must not say", "citations, wanted", "invented", "rounds, wanted"] {
+        for expected in [
+            "missing",
+            "none of",
+            "must not say",
+            "citations, wanted",
+            "invented",
+            "rounds, wanted",
+        ] {
             assert!(problems.contains(expected), "{expected} in {problems}");
         }
         // An invented citation fails even a case that asked for nothing.
@@ -555,7 +601,10 @@ mod tests {
             {"kind": "answer", "model": "mystery-llm", "tokens_in": 5, "tokens_out": 5, "llm_ms": 10},
         ]);
         let cost = ask_cost(&transcript);
-        assert_eq!((cost.tokens_in, cost.tokens_out, cost.cache_read), (1005, 105, 10000));
+        assert_eq!(
+            (cost.tokens_in, cost.tokens_out, cost.cache_read),
+            (1005, 105, 10000)
+        );
         // 1000×$4 + 100×$20 + 10000×$0.20 + 2000×$5 (write = 1.25× input), per million.
         assert!((cost.usd - 0.018).abs() < 1e-9, "{}", cost.usd);
         assert_eq!(cost.cache_write, 2000);

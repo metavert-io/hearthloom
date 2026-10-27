@@ -53,7 +53,9 @@ struct PassClock {
 
 impl PassClock {
     fn start() -> Self {
-        Self { last: std::time::Instant::now() }
+        Self {
+            last: std::time::Instant::now(),
+        }
     }
     fn lap(&mut self, pass: &str) {
         let ms = self.last.elapsed().as_millis();
@@ -359,7 +361,9 @@ pub async fn run_automation(state: &AppState, key: &str, actor: &Actor) -> anyho
             let n = write_chapters(state, llm.unwrap().as_ref(), actor).await?;
             json!({ "chapters_written": n })
         }
-        "opportunity_scan" => json!({ "opportunities_found": state.store.scan_opportunities(actor)? }),
+        "opportunity_scan" => {
+            json!({ "opportunities_found": state.store.scan_opportunities(actor)? })
+        }
         "friend_activity" => {
             json!({ "notifications": crate::network_out::friend_activity_scan(state) })
         }
@@ -448,7 +452,10 @@ pub async fn consolidate(state: &AppState) -> anyhow::Result<Value> {
     let shadow;
     let state: &AppState = if delegated && state.llm.is_some() {
         tracing::info!("consolidation: LLM passes delegated to the always-on peer");
-        shadow = AppState { llm: None, ..state.clone() };
+        shadow = AppState {
+            llm: None,
+            ..state.clone()
+        };
         &shadow
     } else {
         state
@@ -630,25 +637,22 @@ pub async fn consolidate(state: &AppState) -> anyhow::Result<Value> {
     }
     clock.lap("extract_entities");
 
-
     // 3.9 Chapter headings: idle-time LLM titles per month — the
     // Dial's widest-zoom label tier. Land as kind=chapter episodes
     // (source consolidation, Month uncertainty); inputs hard-exclude
     // private (cloud-pass rule). Backfills a couple of dozen months
     // per cycle.
     let chapters = match (&state.llm, due_claim(state, "chapters")) {
-        (Some(llm), Some(_g)) => {
-            match write_chapters(state, llm.as_ref(), &actor).await {
-                Ok(n) => {
-                    automation_ran(&state.store, "chapters");
-                    n
-                }
-                Err(err) => {
-                    tracing::warn!("chapter headings failed: {err:#}");
-                    0
-                }
+        (Some(llm), Some(_g)) => match write_chapters(state, llm.as_ref(), &actor).await {
+            Ok(n) => {
+                automation_ran(&state.store, "chapters");
+                n
             }
-        }
+            Err(err) => {
+                tracing::warn!("chapter headings failed: {err:#}");
+                0
+            }
+        },
         _ => 0,
     };
     clock.lap("chapters");
@@ -1048,12 +1052,10 @@ pub async fn consolidate(state: &AppState) -> anyhow::Result<Value> {
     // name-embedding land in the review queue (the Tend yes/no; local
     // embeddings, no LLM, bias to under-merge preserved — this only
     // ever SUGGESTS).
-    let merge_candidates = propose_merge_candidates(state)
-        .await
-        .unwrap_or_else(|err| {
-            tracing::warn!("merge-candidate scan failed: {err:#}");
-            0
-        });
+    let merge_candidates = propose_merge_candidates(state).await.unwrap_or_else(|err| {
+        tracing::warn!("merge-candidate scan failed: {err:#}");
+        0
+    });
     clock.lap("merge_candidates");
 
     // 3.99 The record lint: report-only findings → Tend (weekly by
@@ -1078,18 +1080,16 @@ pub async fn consolidate(state: &AppState) -> anyhow::Result<Value> {
     // 3.995 Weekly review: one rollup episode per week — the important
     // new ideas, old↔new connections, hubs forming, what to feed next.
     let weekly_review = match (&state.llm, due_claim(state, "weekly_review")) {
-        (Some(llm), Some(_g)) => {
-            match write_weekly_review(state, llm.as_ref(), &actor).await {
-                Ok(written) => {
-                    automation_ran(&state.store, "weekly_review");
-                    written
-                }
-                Err(err) => {
-                    tracing::warn!("weekly review failed: {err:#}");
-                    false
-                }
+        (Some(llm), Some(_g)) => match write_weekly_review(state, llm.as_ref(), &actor).await {
+            Ok(written) => {
+                automation_ran(&state.store, "weekly_review");
+                written
             }
-        }
+            Err(err) => {
+                tracing::warn!("weekly review failed: {err:#}");
+                false
+            }
+        },
         _ => false,
     };
     clock.lap("weekly_review");
@@ -1115,18 +1115,16 @@ pub async fn consolidate(state: &AppState) -> anyhow::Result<Value> {
     // 3.996 Living topic pages: consolidator-drafted hub notes,
     // revisions proposed through Tend (quarantine diff cards).
     let topic_pages = match (&state.llm, due_claim(state, "topic_pages")) {
-        (Some(llm), Some(_g)) => {
-            match tend_topic_pages(state, llm.as_ref(), &actor).await {
-                Ok(n) => {
-                    automation_ran(&state.store, "topic_pages");
-                    n
-                }
-                Err(err) => {
-                    tracing::warn!("topic pages failed: {err:#}");
-                    0
-                }
+        (Some(llm), Some(_g)) => match tend_topic_pages(state, llm.as_ref(), &actor).await {
+            Ok(n) => {
+                automation_ran(&state.store, "topic_pages");
+                n
             }
-        }
+            Err(err) => {
+                tracing::warn!("topic pages failed: {err:#}");
+                0
+            }
+        },
         _ => 0,
     };
     clock.lap("topic_pages");
@@ -1138,8 +1136,7 @@ pub async fn consolidate(state: &AppState) -> anyhow::Result<Value> {
         let path = state.home.brain_index_path();
         tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
             let content = brain_index::generate(&store)?;
-            let changed =
-                std::fs::read_to_string(&path).ok().as_deref() != Some(content.as_str());
+            let changed = std::fs::read_to_string(&path).ok().as_deref() != Some(content.as_str());
             if changed {
                 std::fs::write(&path, &content)?;
             }
@@ -1238,7 +1235,10 @@ async fn expand_cascades(
             }
         };
         let fmt = |items: &[(String, String)]| -> Vec<String> {
-            items.iter().map(|(id, line)| format!("[{id}] {line}")).collect()
+            items
+                .iter()
+                .map(|(id, line)| format!("[{id}] {line}"))
+                .collect()
         };
         prompt.push_str(&list("entities", &ctx.entities));
         prompt.push_str(&list("connections", &ctx.entity_neighbors));
@@ -1247,7 +1247,18 @@ async fn expand_cascades(
         prompt.push_str(&list("textual neighbors", &fmt(&ctx.semantic)));
         prompt.push('\n');
     }
-    let response = crate::llm::call(&state.store, llm, "cascades", None, Tier::High, system, &prompt, 2500).await?.text;
+    let response = crate::llm::call(
+        &state.store,
+        llm,
+        "cascades",
+        None,
+        Tier::High,
+        system,
+        &prompt,
+        2500,
+    )
+    .await?
+    .text;
     let json_text = response
         .trim()
         .trim_start_matches("```json")
@@ -1330,10 +1341,9 @@ pub async fn setup_goal(state: AppState, intent_id: String) {
         }
     }
     let store = state.store.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        store.run_intent_backlog(&actor, &intent_id, 200)
-    })
-    .await;
+    let result =
+        tokio::task::spawn_blocking(move || store.run_intent_backlog(&actor, &intent_id, 200))
+            .await;
     match result {
         Ok(Ok(n)) => tracing::info!("goal setup: {n} backlog matches"),
         Ok(Err(err)) => tracing::warn!("goal backlog scan failed: {err:#}"),
@@ -1362,7 +1372,18 @@ async fn decompose_intents(
     for (id, name, query) in &pending {
         prompt.push_str(&format!("id: {id}\nname: {name}\ngoal: {query}\n\n"));
     }
-    let response = crate::llm::call(&state.store, llm, "intent_decomposition", None, Tier::Medium, system, &prompt, 1200).await?.text;
+    let response = crate::llm::call(
+        &state.store,
+        llm,
+        "intent_decomposition",
+        None,
+        Tier::Medium,
+        system,
+        &prompt,
+        1200,
+    )
+    .await?
+    .text;
     let json_text = response
         .trim()
         .trim_start_matches("```json")
@@ -1382,8 +1403,7 @@ async fn decompose_intents(
                     .filter_map(|v| v.as_str())
                     .take(5)
                     .map(|q| {
-                        let embedding =
-                            state.embedder.as_ref().and_then(|e| e.embed(q).ok());
+                        let embedding = state.embedder.as_ref().and_then(|e| e.embed(q).ok());
                         (q.to_string(), embedding)
                     })
                     .collect()
@@ -1447,7 +1467,10 @@ fn email_matches_name(localpart: &str, full_name: &str) -> bool {
     if last.len() < 4 || !lp.contains(last.as_str()) {
         return false;
     }
-    let parts: Vec<&str> = lp.split(['.', '_', '-']).filter(|p| !p.is_empty()).collect();
+    let parts: Vec<&str> = lp
+        .split(['.', '_', '-'])
+        .filter(|p| !p.is_empty())
+        .collect();
     // morgan.reyes / reyes.morgan
     if parts.iter().any(|p| *p == first) {
         return true;
@@ -1534,8 +1557,7 @@ async fn propose_merge_candidates(state: &AppState) -> anyhow::Result<usize> {
         return Ok(queued);
     };
 
-    let mut cache: std::collections::HashMap<String, Vec<f32>> =
-        std::collections::HashMap::new();
+    let mut cache: std::collections::HashMap<String, Vec<f32>> = std::collections::HashMap::new();
     let mut embed = |name: &str| -> Option<Vec<f32>> {
         if let Some(v) = cache.get(name) {
             return Some(v.clone());
@@ -1562,9 +1584,7 @@ async fn propose_merge_candidates(state: &AppState) -> anyhow::Result<usize> {
         //    question, not one per acquaintance sharing the name.
         let mut best_bare: Option<(String, String, f32)> = None;
         for token in tokens_a.iter().take(3) {
-            for (cand_id, cand_name) in
-                state.store.persons_sharing_token(token, id, 12)?
-            {
+            for (cand_id, cand_name) in state.store.persons_sharing_token(token, id, 12)? {
                 if !seen_candidates.insert(cand_id.clone()) {
                     continue;
                 }
@@ -1585,13 +1605,17 @@ async fn propose_merge_candidates(state: &AppState) -> anyhow::Result<usize> {
                 if multi_a && multi_b && last_a != last_b {
                     continue;
                 }
-                let Some(vec_b) = embed(&cand_name) else { continue };
-                let similarity =
-                    hearthloom_core::embeddings::cosine_similarity(&vec_a, &vec_b);
+                let Some(vec_b) = embed(&cand_name) else {
+                    continue;
+                };
+                let similarity = hearthloom_core::embeddings::cosine_similarity(&vec_a, &vec_b);
                 // rule 2: bare-name subset pairs park in best_bare
                 if (!multi_a || !multi_b) && subset && shared < 2 {
                     if similarity >= 0.92
-                        && best_bare.as_ref().map(|(_, _, s)| similarity > *s).unwrap_or(true)
+                        && best_bare
+                            .as_ref()
+                            .map(|(_, _, s)| similarity > *s)
+                            .unwrap_or(true)
                     {
                         best_bare = Some((cand_id.clone(), cand_name.clone(), similarity));
                     }
@@ -1653,7 +1677,10 @@ async fn predict_relationships(
     // Who "the user" is comes from the record itself (the `me` entity),
     // never from code: every install classifies relationships to its OWN
     // owner, and no one else's name is sent to their model.
-    let owner = state.store.owner_name()?.unwrap_or_else(|| "the user".to_string());
+    let owner = state
+        .store
+        .owner_name()?
+        .unwrap_or_else(|| "the user".to_string());
     let mut prompt = format!(
         "The user is {owner}. For each person below, their evidence mix and \
          recent episode samples (each sample starts with its episode id):\n\n"
@@ -1662,7 +1689,9 @@ async fn predict_relationships(
         std::collections::HashMap::new();
     for (id, name, n) in &people {
         let (mix, samples) = state.store.person_evidence_brief(id)?;
-        prompt.push_str(&format!("person: {id}\nname: {name} ({n} episodes this year)\n"));
+        prompt.push_str(&format!(
+            "person: {id}\nname: {name} ({n} episodes this year)\n"
+        ));
         prompt.push_str(&format!("mix: {}\n", mix.join(", ")));
         for sample in &samples {
             prompt.push_str(&format!("- {sample}\n"));
@@ -1690,7 +1719,18 @@ async fn predict_relationships(
         colleague; social plans and photos → friend; same family name + domestic \
         context → family; newsletters/robots → service. A human will confirm or \
         reject every proposal.";
-    let response = crate::llm::call(&state.store, llm, "relationship_predict", None, Tier::Medium, system, &prompt, 1500).await?.text;
+    let response = crate::llm::call(
+        &state.store,
+        llm,
+        "relationship_predict",
+        None,
+        Tier::Medium,
+        system,
+        &prompt,
+        1500,
+    )
+    .await?
+    .text;
     let json_text = response
         .trim()
         .trim_start_matches("```json")
@@ -1702,8 +1742,12 @@ async fn predict_relationships(
 
     let mut proposed = 0usize;
     for (id, _, _) in &people {
-        let Some(verdict) = verdicts.get(id) else { continue };
-        let Some(kind) = verdict.get("kind").and_then(|v| v.as_str()) else { continue };
+        let Some(verdict) = verdicts.get(id) else {
+            continue;
+        };
+        let Some(kind) = verdict.get("kind").and_then(|v| v.as_str()) else {
+            continue;
+        };
         if verdict.get("confidence").and_then(|v| v.as_str()) == Some("low") {
             continue; // low-confidence guesses are noise, not proposals
         }
@@ -1770,7 +1814,18 @@ async fn write_relationship_briefs(
             mix.join(", "),
             samples.join("\n"),
         );
-        let brief = crate::llm::call(&state.store, llm, "relationship_briefs", None, automation_tier(&state.store, "relationship_briefs"), system, &prompt, 500).await?.text;
+        let brief = crate::llm::call(
+            &state.store,
+            llm,
+            "relationship_briefs",
+            None,
+            automation_tier(&state.store, "relationship_briefs"),
+            system,
+            &prompt,
+            500,
+        )
+        .await?
+        .text;
         let report = state.store.apply_batch(
             &state.home,
             &hearthloom_core::IngestBatch {
@@ -1873,7 +1928,18 @@ async fn grow_self_model(
         invent. Seeking propositions are especially valuable (they power opportunity \
         detection) but only when the evidence shows an active want.";
 
-    let response = crate::llm::call(&state.store, llm, "self_model", None, Tier::High, system, &prompt, 1200).await?.text;
+    let response = crate::llm::call(
+        &state.store,
+        llm,
+        "self_model",
+        None,
+        Tier::High,
+        system,
+        &prompt,
+        1200,
+    )
+    .await?
+    .text;
     let json_text = response
         .trim()
         .trim_start_matches("```json")
@@ -1960,7 +2026,9 @@ fn notify_written(state: &AppState, title: &str, body: &str, link: (&str, &str),
 fn previous_month(today: chrono::NaiveDate) -> String {
     use chrono::Datelike;
     let first = today.with_day(1).unwrap_or(today);
-    (first - chrono::Duration::days(1)).format("%Y-%m").to_string()
+    (first - chrono::Duration::days(1))
+        .format("%Y-%m")
+        .to_string()
 }
 
 /// One heading per month from its sampled titles: `month → heading`.
@@ -1977,20 +2045,36 @@ async fn chapter_headings(
     for (month, titles) in inputs {
         prompt.push_str(&format!("{month}:\n"));
         for (_, t) in titles {
-            prompt.push_str(&format!("- {}\n", hearthloom_core::one_line(t).chars().take(80).collect::<String>()));
+            prompt.push_str(&format!(
+                "- {}\n",
+                hearthloom_core::one_line(t)
+                    .chars()
+                    .take(80)
+                    .collect::<String>()
+            ));
         }
         prompt.push('\n');
     }
-    let response = crate::llm::call(&state.store, llm, "chapters", None,
-        automation_tier(&state.store, "chapters"), system, &prompt, 1500)
-        .await?.text;
+    let response = crate::llm::call(
+        &state.store,
+        llm,
+        "chapters",
+        None,
+        automation_tier(&state.store, "chapters"),
+        system,
+        &prompt,
+        1500,
+    )
+    .await?
+    .text;
     let json_text = response
         .trim()
         .trim_start_matches("```json")
         .trim_start_matches("```")
         .trim_end_matches("```")
         .trim();
-    serde_json::from_str(json_text).map_err(|e| anyhow::anyhow!("unparseable chapter response: {e}"))
+    serde_json::from_str(json_text)
+        .map_err(|e| anyhow::anyhow!("unparseable chapter response: {e}"))
 }
 
 /// A chapter episode. Its body lists the titles it was written from, one
@@ -2034,7 +2118,9 @@ async fn write_chapters(
     llm: &dyn LlmProvider,
     actor: &Actor,
 ) -> anyhow::Result<usize> {
-    let months = state.store.months_needing_chapters(CHAPTER_MONTHS_PER_CYCLE)?;
+    let months = state
+        .store
+        .months_needing_chapters(CHAPTER_MONTHS_PER_CYCLE)?;
     if months.is_empty() {
         return Ok(0);
     }
@@ -2087,9 +2173,10 @@ async fn write_chapters(
             // older months stays quiet. (Inputs exclude private, so the
             // heading is safe to show with the vault locked.)
             if let (Some(heading), true) = (announce, report.episodes_new > 0) {
-                let month_name = chrono::NaiveDate::parse_from_str(&format!("{just_ended}-01"), "%Y-%m-%d")
-                    .map(|d| d.format("%B").to_string())
-                    .unwrap_or_else(|_| just_ended.clone());
+                let month_name =
+                    chrono::NaiveDate::parse_from_str(&format!("{just_ended}-01"), "%Y-%m-%d")
+                        .map(|d| d.format("%B").to_string())
+                        .unwrap_or_else(|_| just_ended.clone());
                 notify_written(
                     state,
                     &format!("{month_name} has a chapter heading: “{heading}”"),
@@ -2216,9 +2303,18 @@ async fn run_lint(state: &AppState, actor: &Actor) -> anyhow::Result<usize> {
     let system = "You lint a personal knowledge base for internal conflicts. \
         Conservative and literal: most related notes are consistent; a finding must \
         point at specific incompatible claims. A human reviews every finding.";
-    let response = crate::llm::call(&state.store, llm.as_ref(), "lint", None,
-        automation_tier(&state.store, "lint"), system, &prompt, 1500)
-        .await?.text;
+    let response = crate::llm::call(
+        &state.store,
+        llm.as_ref(),
+        "lint",
+        None,
+        automation_tier(&state.store, "lint"),
+        system,
+        &prompt,
+        1500,
+    )
+    .await?
+    .text;
     let json_text = response
         .trim()
         .trim_start_matches("```json")
@@ -2228,8 +2324,12 @@ async fn run_lint(state: &AppState, actor: &Actor) -> anyhow::Result<usize> {
     let verdicts: serde_json::Map<String, Value> = serde_json::from_str(json_text)
         .map_err(|e| anyhow::anyhow!("unparseable lint response: {e}"))?;
     for (i, p) in pairs.iter().enumerate() {
-        let Some(v) = verdicts.get(&i.to_string()) else { continue };
-        let Some(verdict) = v.get("verdict").and_then(|x| x.as_str()) else { continue };
+        let Some(v) = verdicts.get(&i.to_string()) else {
+            continue;
+        };
+        let Some(verdict) = v.get("verdict").and_then(|x| x.as_str()) else {
+            continue;
+        };
         if !matches!(verdict, "contradiction" | "superseded") {
             continue;
         }
@@ -2247,7 +2347,11 @@ async fn run_lint(state: &AppState, actor: &Actor) -> anyhow::Result<usize> {
             &key.join(","),
             &format!(
                 "{}: \"{}\" ↔ \"{}\"",
-                if verdict == "contradiction" { "Contradiction" } else { "Superseded" },
+                if verdict == "contradiction" {
+                    "Contradiction"
+                } else {
+                    "Superseded"
+                },
                 p.title_a,
                 p.title_b
             ),
@@ -2351,7 +2455,18 @@ async fn compose_weekly_review(
         brain — the Karpathy loop's reflection step: what new ideas landed, how they \
         connect to older material, which topics are becoming hubs, and what input the \
         record is missing. Grounded only in the evidence given.";
-    let review = crate::llm::call(&state.store, llm, "weekly_review", None, automation_tier(&state.store, "weekly_review"), system, &prompt, 900).await?.text;
+    let review = crate::llm::call(
+        &state.store,
+        llm,
+        "weekly_review",
+        None,
+        automation_tier(&state.store, "weekly_review"),
+        system,
+        &prompt,
+        900,
+    )
+    .await?
+    .text;
     let report = state.store.apply_batch(
         &state.home,
         &IngestBatch {
@@ -2434,7 +2549,18 @@ async fn tend_topic_pages(
                 ))
                 .unwrap_or_default(),
         );
-        let draft = crate::llm::call(&state.store, llm, "topic_pages", None, automation_tier(&state.store, "topic_pages"), system, &prompt, 800).await?.text;
+        let draft = crate::llm::call(
+            &state.store,
+            llm,
+            "topic_pages",
+            None,
+            automation_tier(&state.store, "topic_pages"),
+            system,
+            &prompt,
+            800,
+        )
+        .await?
+        .text;
         state.store.propose_memories(
             actor,
             &[json!({
@@ -2494,7 +2620,10 @@ async fn index_locations(state: &AppState, actor: &Actor) -> anyhow::Result<usiz
             let pending = store.location_pending("apple-health", "workout", batch)?;
             for (id, day, body) in &pending {
                 let mut points = Vec::new();
-                if let Some((lat, lon)) = gpx_root.as_deref().and_then(|root| workout_route_start(root, body)) {
+                if let Some((lat, lon)) = gpx_root
+                    .as_deref()
+                    .and_then(|root| workout_route_start(root, body))
+                {
                     points.push((None, day.clone(), lat, lon));
                     added += 1;
                 }
@@ -2606,7 +2735,10 @@ async fn refresh_local_sources(state: &AppState, actor: &Actor) -> anyhow::Resul
         }
         // TCC-gated sources refresh too when the daemon has access.
         if let Ok(library) = hearthloom_adapters::photos::default_library() {
-            apply("photos", hearthloom_adapters::photos::ingest(&library, None))?;
+            apply(
+                "photos",
+                hearthloom_adapters::photos::ingest(&library, None),
+            )?;
             // v47: the same scan feeds the durable photo-point union so
             // Mac and phone photos reconcile (idempotent by key).
             if let Ok(points) = hearthloom_adapters::photos::scan_points(&library) {
@@ -2617,7 +2749,8 @@ async fn refresh_local_sources(state: &AppState, actor: &Actor) -> anyhow::Resul
                             key: p.key(),
                             filename: p.filename.clone(),
                             taken_at: chrono::DateTime::from_timestamp(p.at_unix, 0)?
-                                .format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                                .format("%Y-%m-%dT%H:%M:%SZ")
+                                .to_string(),
                             tz_offset_minutes: p.tz_offset_minutes.unwrap_or(0),
                             lat: p.latitude,
                             lon: p.longitude,
@@ -2638,10 +2771,8 @@ async fn refresh_local_sources(state: &AppState, actor: &Actor) -> anyhow::Resul
         let conn_actor = actor.clone();
         let store = state.store.clone();
         let summary_clone = summary.clone();
-        tokio::task::spawn_blocking(move || {
-            store.record_refresh(&conn_actor, &ts, &summary_clone)
-        })
-        .await??;
+        tokio::task::spawn_blocking(move || store.record_refresh(&conn_actor, &ts, &summary_clone))
+            .await??;
     }
     Ok(summary)
 }
@@ -2664,8 +2795,18 @@ pub enum LlmFailure {
 
 pub fn classify_llm_error(err: &str) -> LlmFailure {
     let e = err.to_lowercase();
-    let billing = ["401", "403", "402", "authentication", "invalid x-api-key",
-        "insufficient_quota", "quota exceeded", "credit", "billing", "payment"];
+    let billing = [
+        "401",
+        "403",
+        "402",
+        "authentication",
+        "invalid x-api-key",
+        "insufficient_quota",
+        "quota exceeded",
+        "credit",
+        "billing",
+        "payment",
+    ];
     if billing.iter().any(|m| e.contains(m)) {
         LlmFailure::Billing
     } else {
@@ -2674,7 +2815,11 @@ pub fn classify_llm_error(err: &str) -> LlmFailure {
 }
 
 pub fn llm_blocked(store: &Store) -> Option<String> {
-    store.consolidation_state("llm.blocked").ok().flatten().filter(|v| !v.is_empty())
+    store
+        .consolidation_state("llm.blocked")
+        .ok()
+        .flatten()
+        .filter(|v| !v.is_empty())
 }
 
 /// Billing-class failure: stop spend NOW, raise the critical bell (it
@@ -2685,7 +2830,8 @@ fn set_llm_blocked(state: &AppState, detail: &str) {
     let _ = state.store.set_consolidation_state(
         "llm.blocked",
         &serde_json::json!({"class": "billing", "detail": detail,
-                            "since": hearthloom_core::time::now_utc()}).to_string(),
+                            "since": hearthloom_core::time::now_utc()})
+        .to_string(),
     );
     crate::provisioner::notify_system(
         state, "critical", "AI provider needs attention",
@@ -2732,7 +2878,14 @@ pub fn extraction_tier(store: &Store, source: &str) -> Option<Tier> {
         .ok()
         .flatten()
     {
-        Some(v) if matches!(v.trim().to_lowercase().as_str(), "disabled" | "off" | "none") => None,
+        Some(v)
+            if matches!(
+                v.trim().to_lowercase().as_str(),
+                "disabled" | "off" | "none"
+            ) =>
+        {
+            None
+        }
         Some(v) => Tier::parse(&v).or(default),
         None => default,
     }
@@ -2781,115 +2934,138 @@ async fn extract_entities(
     let mut mined = 0usize;
     let mut linked = 0usize;
     loop {
-    let pending = state
-        .store
-        .episodes_needing_extraction(&source_list, EXTRACT_PER_CYCLE)?;
-    if pending.is_empty() {
-        break;
-    }
-    // Group pending rows by source so each source's batches run at its tier.
-    let mut by_source: std::collections::HashMap<
-        &str,
-        Vec<&hearthloom_core::store::PendingExtraction>,
-    > = std::collections::HashMap::new();
-    for row in &pending {
-        by_source.entry(row.1.as_str()).or_default().push(row);
-    }
+        let pending = state
+            .store
+            .episodes_needing_extraction(&source_list, EXTRACT_PER_CYCLE)?;
+        if pending.is_empty() {
+            break;
+        }
+        // Group pending rows by source so each source's batches run at its tier.
+        let mut by_source: std::collections::HashMap<
+            &str,
+            Vec<&hearthloom_core::store::PendingExtraction>,
+        > = std::collections::HashMap::new();
+        for row in &pending {
+            by_source.entry(row.1.as_str()).or_default().push(row);
+        }
 
-    for (source, tier) in &tiers {
-        let Some(rows) = by_source.get(source) else {
-            continue;
-        };
-        for batch in rows.chunks(EXTRACT_BATCH) {
-            let mut prompt = String::from("Extract entities from these episodes:\n\n");
-            for (id, _, title, _, excerpt) in batch {
-                prompt.push_str(&format!(
-                    "id: {id}\ntitle: {title}\ntext: {}\n\n",
-                    excerpt.replace('\n', " ")
-                ));
-            }
-            // transient failures retry in place; billing-class failures
-            // stop ALL spend and raise the bell (resume is explicit)
-            let mut response = None;
-            for attempt in 0..3u32 {
-                match crate::llm::call(&state.store, llm, "extraction", None, *tier, system, &prompt, 2500).await {
-                    Ok(r) => {
-                        response = Some(r.text);
-                        break;
-                    }
-                    Err(err) => {
-                        let msg = format!("{err:#}");
-                        if classify_llm_error(&msg) == LlmFailure::Billing {
-                            set_llm_blocked(state, &msg);
-                            return Ok((mined, linked));
+        for (source, tier) in &tiers {
+            let Some(rows) = by_source.get(source) else {
+                continue;
+            };
+            for batch in rows.chunks(EXTRACT_BATCH) {
+                let mut prompt = String::from("Extract entities from these episodes:\n\n");
+                for (id, _, title, _, excerpt) in batch {
+                    prompt.push_str(&format!(
+                        "id: {id}\ntitle: {title}\ntext: {}\n\n",
+                        excerpt.replace('\n', " ")
+                    ));
+                }
+                // transient failures retry in place; billing-class failures
+                // stop ALL spend and raise the bell (resume is explicit)
+                let mut response = None;
+                for attempt in 0..3u32 {
+                    match crate::llm::call(
+                        &state.store,
+                        llm,
+                        "extraction",
+                        None,
+                        *tier,
+                        system,
+                        &prompt,
+                        2500,
+                    )
+                    .await
+                    {
+                        Ok(r) => {
+                            response = Some(r.text);
+                            break;
                         }
-                        tracing::warn!("extraction call failed (attempt {}): {msg}", attempt + 1);
-                        tokio::time::sleep(std::time::Duration::from_secs(2 << attempt)).await;
+                        Err(err) => {
+                            let msg = format!("{err:#}");
+                            if classify_llm_error(&msg) == LlmFailure::Billing {
+                                set_llm_blocked(state, &msg);
+                                return Ok((mined, linked));
+                            }
+                            tracing::warn!(
+                                "extraction call failed (attempt {}): {msg}",
+                                attempt + 1
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(2 << attempt)).await;
+                        }
                     }
                 }
-            }
-            let Some(response) = response else {
-                // still transient after retries: end the cycle early —
-                // the pending pool resumes next cycle automatically
-                return Ok((mined, linked));
-            };
-            let json_text = response
-                .trim()
-                .trim_start_matches("```json")
-                .trim_start_matches("```")
-                .trim_end_matches("```")
-                .trim();
-            let verdicts: serde_json::Map<String, Value> = match serde_json::from_str(json_text) {
-                Ok(v) => v,
-                Err(e) => {
-                    // poison batch: mark failed (requeue-able) and move on —
-                    // and CAPTURE why, or the episodes vanish from "N to go"
-                    // with no trace (the Integrations card reports this).
-                    tracing::warn!("unparseable extraction response — marking batch failed: {e}");
-                    let ids: Vec<String> = batch.iter().map(|(id, ..)| id.clone()).collect();
-                    let _ = state.store.mark_extraction_failed(&ids);
-                    let mut msg = format!("the AI's answer wasn't usable ({e})");
-                    msg.truncate(160);
-                    let _ = state.store.set_consolidation_state(
-                        &format!("extract.{source}.last_error"),
-                        &serde_json::json!({
-                            "error": msg,
-                            "episodes": ids.len(),
-                            "ts": hearthloom_core::time::now_utc(),
-                        })
-                        .to_string(),
-                    );
-                    continue;
-                }
-            };
-            for (id, _, _, scope, _) in batch {
-                let entities: Vec<(String, String)> = verdicts
-                    .get(id)
-                    .and_then(|v| v.as_array())
-                    .map(|list| {
-                        list.iter()
-                            .filter_map(|item| {
-                                Some((
-                                    item.get("type")?.as_str()?.to_string(),
-                                    item.get("name")?.as_str()?.to_string(),
-                                ))
+                let Some(response) = response else {
+                    // still transient after retries: end the cycle early —
+                    // the pending pool resumes next cycle automatically
+                    return Ok((mined, linked));
+                };
+                let json_text = response
+                    .trim()
+                    .trim_start_matches("```json")
+                    .trim_start_matches("```")
+                    .trim_end_matches("```")
+                    .trim();
+                let verdicts: serde_json::Map<String, Value> = match serde_json::from_str(json_text)
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // poison batch: mark failed (requeue-able) and move on —
+                        // and CAPTURE why, or the episodes vanish from "N to go"
+                        // with no trace (the Integrations card reports this).
+                        tracing::warn!(
+                            "unparseable extraction response — marking batch failed: {e}"
+                        );
+                        let ids: Vec<String> = batch.iter().map(|(id, ..)| id.clone()).collect();
+                        let _ = state.store.mark_extraction_failed(&ids);
+                        let mut msg = format!("the AI's answer wasn't usable ({e})");
+                        msg.truncate(160);
+                        let _ = state.store.set_consolidation_state(
+                            &format!("extract.{source}.last_error"),
+                            &serde_json::json!({
+                                "error": msg,
+                                "episodes": ids.len(),
+                                "ts": hearthloom_core::time::now_utc(),
                             })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                linked += state.store.record_verdict(
-                    actor, id, scope, &entities, tier.as_str(), llm.name())?;
-                mined += 1;
+                            .to_string(),
+                        );
+                        continue;
+                    }
+                };
+                for (id, _, _, scope, _) in batch {
+                    let entities: Vec<(String, String)> = verdicts
+                        .get(id)
+                        .and_then(|v| v.as_array())
+                        .map(|list| {
+                            list.iter()
+                                .filter_map(|item| {
+                                    Some((
+                                        item.get("type")?.as_str()?.to_string(),
+                                        item.get("name")?.as_str()?.to_string(),
+                                    ))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    linked += state.store.record_verdict(
+                        actor,
+                        id,
+                        scope,
+                        &entities,
+                        tier.as_str(),
+                        llm.name(),
+                    )?;
+                    mined += 1;
+                }
             }
         }
-    }
-    tokio::time::sleep(std::time::Duration::from_millis(120)).await; // unfair mutex
-    if cycle_started.elapsed() > std::time::Duration::from_secs(EXTRACT_CYCLE_BUDGET_SECS) {
-        tracing::info!(
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await; // unfair mutex
+        if cycle_started.elapsed() > std::time::Duration::from_secs(EXTRACT_CYCLE_BUDGET_SECS) {
+            tracing::info!(
             "extraction cycle budget spent after {mined} episodes — the rest continues next cycle"
         );
-        break;
-    }
+            break;
+        }
     }
     Ok((mined, linked))
 }
@@ -2921,7 +3097,18 @@ async fn classify_scopes(
                 snippet.replace('\n', " ")
             ));
         }
-        let response = crate::llm::call(&state.store, llm, "classification", None, Tier::Low, system, &prompt, 2000).await?.text;
+        let response = crate::llm::call(
+            &state.store,
+            llm,
+            "classification",
+            None,
+            Tier::Low,
+            system,
+            &prompt,
+            2000,
+        )
+        .await?
+        .text;
         // Tolerate code fences around the JSON.
         let json_text = response
             .trim()
@@ -2951,7 +3138,11 @@ async fn classify_scopes(
 
 /// At most one digest per day, and only when episodes arrived since the
 /// last one. Returns true if a new digest episode was written.
-async fn semantic_summary(store: &Store, home: &Home, llm: &dyn LlmProvider) -> anyhow::Result<bool> {
+async fn semantic_summary(
+    store: &Store,
+    home: &Home,
+    llm: &dyn LlmProvider,
+) -> anyhow::Result<bool> {
     let today = hearthloom_core::time::now_utc()[..10].to_string();
     let last = store.latest_digest_written()?;
     if let Some(previous) = &last {
@@ -2977,7 +3168,15 @@ async fn semantic_summary(store: &Store, home: &Home, llm: &dyn LlmProvider) -> 
             return Ok(false);
         }
     }
-    compose_digest(store, home, llm, &today, format!("summary:{today}"), &activity).await?;
+    compose_digest(
+        store,
+        home,
+        llm,
+        &today,
+        format!("summary:{today}"),
+        &activity,
+    )
+    .await?;
     Ok(true)
 }
 
@@ -3019,7 +3218,18 @@ async fn compose_digest(
          ## Self-model notes\n2-4 bullets on what this activity suggests about the \
          user's current focus and priorities. Mark inferences as inferences."
     );
-    let digest = crate::llm::call(store, llm, "daily_digest", None, automation_tier(store, "daily_digest"), system, &prompt, 1200).await?.text;
+    let digest = crate::llm::call(
+        store,
+        llm,
+        "daily_digest",
+        None,
+        automation_tier(store, "daily_digest"),
+        system,
+        &prompt,
+        1200,
+    )
+    .await?
+    .text;
 
     let batch = IngestBatch {
         actor: "agent:consolidation".into(),
@@ -3057,7 +3267,11 @@ const REWRITES_PER_CYCLE: usize = 4;
 /// recorded their inputs, its time window as it stands now) — under
 /// `<ref>@<retirement>`, at the same place on the timeline. Runs where the
 /// thinking role is; a job that comes out empty is marked done.
-async fn rewrite_summaries(state: &AppState, llm: &dyn LlmProvider, actor: &Actor) -> anyhow::Result<usize> {
+async fn rewrite_summaries(
+    state: &AppState,
+    llm: &dyn LlmProvider,
+    actor: &Actor,
+) -> anyhow::Result<usize> {
     let mut written = 0usize;
     for job in state.store.rewrite_jobs(REWRITES_PER_CYCLE)? {
         let window = hearthloom_core::store::base_ref(&job.source_ref);
@@ -3068,43 +3282,65 @@ async fn rewrite_summaries(state: &AppState, llm: &dyn LlmProvider, actor: &Acto
                     Some(rows) => rows,
                     None => state.store.digest_inputs_as_of(&job.ingest_time, 120)?,
                 };
-                let activity: Vec<&hearthloom_core::store::EpisodeRow> =
-                    rows.iter().filter(|e| e.source != "consolidation").collect();
+                let activity: Vec<&hearthloom_core::store::EpisodeRow> = rows
+                    .iter()
+                    .filter(|e| e.source != "consolidation")
+                    .collect();
                 if activity.is_empty() {
                     Ok(false)
                 } else {
-                    compose_digest(&state.store, &state.home, llm, &day, job.new_ref.clone(), &activity).await
+                    compose_digest(
+                        &state.store,
+                        &state.home,
+                        llm,
+                        &day,
+                        job.new_ref.clone(),
+                        &activity,
+                    )
+                    .await
                 }
             }
             "review" => {
                 let week = window.trim_start_matches("review:").to_string();
                 let from = chrono::DateTime::parse_from_rfc3339(&job.ingest_time)
-                    .map(|t| (t.with_timezone(&chrono::Utc) - chrono::Duration::days(7))
-                        .format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                    .map(|t| {
+                        (t.with_timezone(&chrono::Utc) - chrono::Duration::days(7))
+                            .format("%Y-%m-%dT%H:%M:%SZ")
+                            .to_string()
+                    })
                     .unwrap_or_else(|_| job.ingest_time.clone());
-                let mut inputs = state.store.weekly_review_inputs_between(&from, &job.ingest_time)?;
+                let mut inputs = state
+                    .store
+                    .weekly_review_inputs_between(&from, &job.ingest_time)?;
                 if let Some(rows) = state.store.recorded_inputs(&job.summary_id)? {
                     inputs.episodes = rows
                         .iter()
-                        .filter(|e| !e.title.is_empty() && e.kind != "health_day" && e.kind != "chapter")
+                        .filter(|e| {
+                            !e.title.is_empty() && e.kind != "health_day" && e.kind != "chapter"
+                        })
                         .map(|e| {
                             let day = e.event_time.as_deref().unwrap_or(&e.ingest_time);
-                            (e.id.clone(), format!("{} [{}] {}", &day[..day.len().min(10)], e.kind, e.title))
+                            (
+                                e.id.clone(),
+                                format!("{} [{}] {}", &day[..day.len().min(10)], e.kind, e.title),
+                            )
                         })
                         .collect();
                 }
                 if inputs.episodes.is_empty() {
                     Ok(false)
                 } else {
-                    compose_weekly_review(state, llm, actor, &week, job.new_ref.clone(), &inputs).await
+                    compose_weekly_review(state, llm, actor, &week, job.new_ref.clone(), &inputs)
+                        .await
                 }
             }
             "chapter" => {
                 let month = window.trim_start_matches("chapter:").to_string();
-                let titles: Vec<(String, String)> = match state.store.recorded_inputs(&job.summary_id)? {
-                    Some(rows) => rows.into_iter().map(|e| (e.id, e.title)).collect(),
-                    None => state.store.chapter_inputs(&month, 8)?,
-                };
+                let titles: Vec<(String, String)> =
+                    match state.store.recorded_inputs(&job.summary_id)? {
+                        Some(rows) => rows.into_iter().map(|e| (e.id, e.title)).collect(),
+                        None => state.store.chapter_inputs(&month, 8)?,
+                    };
                 if titles.is_empty() {
                     Ok(false)
                 } else {
@@ -3113,15 +3349,24 @@ async fn rewrite_summaries(state: &AppState, llm: &dyn LlmProvider, actor: &Acto
                     match headings.get(&month).and_then(|h| h.as_str()) {
                         None => Ok(false),
                         Some(heading) => {
-                            let draft = chapter_draft(&month, heading, &inputs[0].1, job.new_ref.clone())?;
+                            let draft =
+                                chapter_draft(&month, heading, &inputs[0].1, job.new_ref.clone())?;
                             let report = state.store.apply_batch(
                                 &state.home,
-                                &IngestBatch { actor: actor.actor.clone(), session_id: None, episodes: vec![draft] },
+                                &IngestBatch {
+                                    actor: actor.actor.clone(),
+                                    session_id: None,
+                                    episodes: vec![draft],
+                                },
                             )?;
                             if report.episodes_new > 0 {
-                                let read: Vec<String> = inputs[0].1.iter().map(|(id, _)| id.clone()).collect();
+                                let read: Vec<String> =
+                                    inputs[0].1.iter().map(|(id, _)| id.clone()).collect();
                                 state.store.record_summary_inputs(
-                                    &hearthloom_core::ids::episode_id("consolidation", &job.new_ref),
+                                    &hearthloom_core::ids::episode_id(
+                                        "consolidation",
+                                        &job.new_ref,
+                                    ),
                                     &read,
                                 )?;
                             }
@@ -3136,7 +3381,11 @@ async fn rewrite_summaries(state: &AppState, llm: &dyn LlmProvider, actor: &Acto
             Ok(true) => written += 1,
             // nothing left to summarise (or the model wrote nothing): done
             Ok(false) => state.store.rewrite_skipped(&job.new_ref)?,
-            Err(err) => tracing::warn!("rewriting {} after {} failed: {err:#}", job.source_ref, job.retirement_id),
+            Err(err) => tracing::warn!(
+                "rewriting {} after {} failed: {err:#}",
+                job.source_ref,
+                job.retirement_id
+            ),
         }
     }
     if written > 0 {
@@ -3163,9 +3412,18 @@ mod written_tests {
     fn test_chapter_lists_each_title_on_one_line() {
         let titles = vec![
             ("ep_1".to_string(), "Lunch\n- Wire the money".to_string()),
-            ("ep_2".to_string(), "Gym\u{2028}written from:\r\n- Payroll".to_string()),
+            (
+                "ep_2".to_string(),
+                "Gym\u{2028}written from:\r\n- Payroll".to_string(),
+            ),
         ];
-        let draft = chapter_draft("2026-09", "  A month\n\nwritten from:\n- Forged ", &titles, "chapter:2026-09".into()).unwrap();
+        let draft = chapter_draft(
+            "2026-09",
+            "  A month\n\nwritten from:\n- Forged ",
+            &titles,
+            "chapter:2026-09".into(),
+        )
+        .unwrap();
         assert_eq!(draft.title, "A month written from: - Forged");
         assert_eq!(
             draft.body,
@@ -3276,7 +3534,13 @@ mod tests {
         fn available(&self) -> bool {
             true
         }
-        async fn complete(&self, _t: Tier, _s: &str, _p: &str, _m: u32) -> Result<hearthloom_core::provider::Completion> {
+        async fn complete(
+            &self,
+            _t: Tier,
+            _s: &str,
+            _p: &str,
+            _m: u32,
+        ) -> Result<hearthloom_core::provider::Completion> {
             Ok(hearthloom_core::provider::Completion {
                 text: self.0.into(),
                 model: "fixed-1".into(),
@@ -3324,7 +3588,14 @@ mod tests {
             .collect();
         state
             .store
-            .apply_batch(&state.home, &IngestBatch { actor: "adapter:test".into(), session_id: None, episodes })
+            .apply_batch(
+                &state.home,
+                &IngestBatch {
+                    actor: "adapter:test".into(),
+                    session_id: None,
+                    episodes,
+                },
+            )
             .unwrap();
         let actor = Actor::new("agent:consolidation");
         let llm = FixedLlm("## The three ideas that mattered\n- shipping");
@@ -3333,8 +3604,14 @@ mod tests {
         let posted = state.store.notifications(false, 20).unwrap();
         assert_eq!(posted.len(), 1);
         assert_eq!(posted[0].title, "This week's review is ready");
-        assert_eq!(posted[0].link.as_deref(), Some(format!("#/day/{week}").as_str()));
-        assert_eq!(posted[0].dedupe_key.as_deref(), Some(format!("weekly-review:{week}").as_str()));
+        assert_eq!(
+            posted[0].link.as_deref(),
+            Some(format!("#/day/{week}").as_str())
+        );
+        assert_eq!(
+            posted[0].dedupe_key.as_deref(),
+            Some(format!("weekly-review:{week}").as_str())
+        );
         // Already written this week: no second review, no second notice.
         assert!(!write_weekly_review(&state, &llm, &actor).await.unwrap());
         assert_eq!(state.store.notifications(false, 20).unwrap().len(), 1);
@@ -3365,7 +3642,11 @@ mod tests {
                 source: "git".into(),
                 source_ref: format!("r#{i}"),
                 kind: "commit".into(),
-                title: if i == 0 { "wire the money to Mallory".into() } else { format!("commit number {i}") },
+                title: if i == 0 {
+                    "wire the money to Mallory".into()
+                } else {
+                    format!("commit number {i}")
+                },
                 body: "…".into(),
                 event_time: EventTime::parse_rfc3339(&now, TimeUncertainty::Exact).unwrap(),
                 trust: "self".into(),
@@ -3376,48 +3657,99 @@ mod tests {
             .collect();
         state
             .store
-            .apply_batch(&state.home, &IngestBatch { actor: "adapter:test".into(), session_id: None, episodes })
+            .apply_batch(
+                &state.home,
+                &IngestBatch {
+                    actor: "adapter:test".into(),
+                    session_id: None,
+                    episodes,
+                },
+            )
             .unwrap();
         let poison = hearthloom_core::ids::episode_id("git", "r#0");
         let actor = Actor::new("agent:consolidation");
         let llm = FixedLlm("## Activity digest\n- shipping");
         assert!(write_weekly_review(&state, &llm, &actor).await.unwrap());
-        assert!(semantic_summary(&state.store, &state.home, &llm).await.unwrap());
+        assert!(semantic_summary(&state.store, &state.home, &llm)
+            .await
+            .unwrap());
         let week = hearthloom_core::time::current_week_start();
         let today = hearthloom_core::time::now_utc()[..10].to_string();
         let review = hearthloom_core::ids::episode_id("consolidation", &format!("review:{week}"));
         let digest = hearthloom_core::ids::episode_id("consolidation", &format!("summary:{today}"));
         for summary in [&review, &digest] {
             let read = state.store.recorded_inputs(summary).unwrap().unwrap();
-            assert!(read.iter().any(|e| e.id == poison), "{summary} recorded what it read");
+            assert!(
+                read.iter().any(|e| e.id == poison),
+                "{summary} recorded what it read"
+            );
         }
 
         let preview = state.store.retirement_preview("memory", &poison).unwrap();
-        let found: Vec<&str> = preview["summaries"].as_array().unwrap().iter()
+        let found: Vec<&str> = preview["summaries"]
+            .as_array()
+            .unwrap()
+            .iter()
             .filter(|s| s["exact"] == json!(true))
             .map(|s| s["id"].as_str().unwrap())
             .collect();
-        assert!(found.contains(&review.as_str()) && found.contains(&digest.as_str()), "{found:?}");
+        assert!(
+            found.contains(&review.as_str()) && found.contains(&digest.as_str()),
+            "{found:?}"
+        );
 
-        let r = state.store
-            .retire(&Actor::new("human:test"), "memory", &poison, &[review.clone(), digest.clone()], "")
+        let r = state
+            .store
+            .retire(
+                &Actor::new("human:test"),
+                "memory",
+                &poison,
+                &[review.clone(), digest.clone()],
+                "",
+            )
             .unwrap();
         state.store.retirement_apply(&r.id).unwrap();
         assert_eq!(rewrite_summaries(&state, &llm, &actor).await.unwrap(), 2);
         assert!(state.store.rewrite_jobs(10).unwrap().is_empty());
-        for (summary, base) in [(&review, format!("review:{week}")), (&digest, format!("summary:{today}"))] {
-            let rewrite = hearthloom_core::ids::episode_id("consolidation", &format!("{base}@{}", r.id));
-            assert!(state.store.episode(&rewrite).unwrap().is_some(), "{base} rewritten and live");
-            assert!(state.store.episode(summary).unwrap().is_none(), "{base} original retired");
+        for (summary, base) in [
+            (&review, format!("review:{week}")),
+            (&digest, format!("summary:{today}")),
+        ] {
+            let rewrite =
+                hearthloom_core::ids::episode_id("consolidation", &format!("{base}@{}", r.id));
+            assert!(
+                state.store.episode(&rewrite).unwrap().is_some(),
+                "{base} rewritten and live"
+            );
+            assert!(
+                state.store.episode(summary).unwrap().is_none(),
+                "{base} original retired"
+            );
             let read = state.store.recorded_inputs(&rewrite).unwrap().unwrap();
-            assert!(!read.is_empty() && read.iter().all(|e| e.id != poison), "{base} rewritten without it");
+            assert!(
+                !read.is_empty() && read.iter().all(|e| e.id != poison),
+                "{base} rewritten without it"
+            );
         }
 
-        state.store.retirement_undo(&Actor::new("human:test"), &r.id).unwrap();
-        for (summary, base) in [(&review, format!("review:{week}")), (&digest, format!("summary:{today}"))] {
-            let rewrite = hearthloom_core::ids::episode_id("consolidation", &format!("{base}@{}", r.id));
-            assert!(state.store.episode(summary).unwrap().is_some(), "{base} original back");
-            assert!(state.store.episode(&rewrite).unwrap().is_none(), "{base} rewrite stepped back");
+        state
+            .store
+            .retirement_undo(&Actor::new("human:test"), &r.id)
+            .unwrap();
+        for (summary, base) in [
+            (&review, format!("review:{week}")),
+            (&digest, format!("summary:{today}")),
+        ] {
+            let rewrite =
+                hearthloom_core::ids::episode_id("consolidation", &format!("{base}@{}", r.id));
+            assert!(
+                state.store.episode(summary).unwrap().is_some(),
+                "{base} original back"
+            );
+            assert!(
+                state.store.episode(&rewrite).unwrap().is_none(),
+                "{base} rewrite stepped back"
+            );
         }
         assert!(state.store.episode(&poison).unwrap().is_some());
     }
@@ -3447,7 +3779,7 @@ mod tests {
         assert_eq!(extraction_tier(&store, "substack"), Some(Tier::Low));
         assert_eq!(extraction_tier(&store, "mbox"), None);
         assert_eq!(extraction_tier(&store, "git"), None); // never eligible
-        // Pre-Phase-3b behavior: exactly the Some(_) rows are enabled.
+                                                          // Pre-Phase-3b behavior: exactly the Some(_) rows are enabled.
         let enabled: Vec<&str> = enabled_extraction_sources(&store)
             .iter()
             .map(|(s, _)| *s)
@@ -3509,15 +3841,25 @@ mod route_tests {
 
         let body = |route: &str| format!("workout: Running\nstart: x\nend: y\nroute: {route}\n");
         let start = Some((42.3601, -71.0589));
-        assert_eq!(workout_route_start(&archive, &body("/workout-routes/route_1.gpx")), start);
-        assert_eq!(workout_route_start(&archive, &body("workout-routes/route_1.gpx")), start);
+        assert_eq!(
+            workout_route_start(&archive, &body("/workout-routes/route_1.gpx")),
+            start
+        );
+        assert_eq!(
+            workout_route_start(&archive, &body("workout-routes/route_1.gpx")),
+            start
+        );
         for escape in [
             "../outside.gpx",
             "/../outside.gpx",
             "workout-routes/../../outside.gpx",
             "./../outside.gpx",
         ] {
-            assert_eq!(workout_route_start(&archive, &body(escape)), None, "{escape:?} must be refused");
+            assert_eq!(
+                workout_route_start(&archive, &body(escape)),
+                None,
+                "{escape:?} must be refused"
+            );
         }
         // an absolute path is taken as archive-relative: nothing there
         let absolute = tmp.path().join("outside.gpx").display().to_string();

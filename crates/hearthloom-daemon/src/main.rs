@@ -15,8 +15,7 @@ async fn main() -> Result<()> {
     use tracing_subscriber::util::SubscriberInitExt;
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .with(hearthloom_daemon::apm::tracing_layer())

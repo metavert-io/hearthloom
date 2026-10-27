@@ -12,13 +12,15 @@ use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{NaiveDate, NaiveDateTime, Offset, TimeZone, Utc};
-use hearthloom_core::{one_line, EdgeAssertion, EntityRef, EpisodeDraft, EventTime, TimeUncertainty};
+use hearthloom_core::{
+    one_line, EdgeAssertion, EntityRef, EpisodeDraft, EventTime, TimeUncertainty,
+};
 
 /// Parse an .ics file into episode drafts (one per VEVENT). `scope: None`
 /// lets the store infer scope from the organizer/attendee identities.
 pub fn ingest(path: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let events = parse_events(&raw);
     if events.is_empty() {
         return Err(anyhow!("no VEVENTs found in {}", path.display()));
@@ -149,7 +151,11 @@ fn parse_ics_time(prop: &Prop) -> Result<EventTime> {
     let value = prop.value.trim();
 
     // All-day: VALUE=DATE or a bare 8-digit date.
-    let is_date = prop.params.get("VALUE").map(|v| v == "DATE").unwrap_or(false)
+    let is_date = prop
+        .params
+        .get("VALUE")
+        .map(|v| v == "DATE")
+        .unwrap_or(false)
         || (value.len() == 8 && value.chars().all(|c| c.is_ascii_digit()));
     if is_date {
         let date = NaiveDate::parse_from_str(value, "%Y%m%d")
@@ -178,9 +184,7 @@ fn parse_ics_time(prop: &Prop) -> Result<EventTime> {
 
     // TZID param → resolve the offset for that instant via chrono-tz.
     if let Some(tzid) = prop.params.get("TZID") {
-        let tz: chrono_tz::Tz = tzid
-            .parse()
-            .map_err(|_| anyhow!("unknown TZID {tzid:?}"))?;
+        let tz: chrono_tz::Tz = tzid.parse().map_err(|_| anyhow!("unknown TZID {tzid:?}"))?;
         let local = tz
             .from_local_datetime(&naive)
             .earliest()
@@ -374,7 +378,10 @@ END:VCALENDAR\r\n";
         assert_eq!(draft.kind, "calendar_event");
         assert_eq!(draft.trust, "imported");
         // 14:00 EDT (-0400) = 18:00 UTC.
-        assert_eq!(draft.event_time.utc.as_deref(), Some("2026-03-15T18:00:00Z"));
+        assert_eq!(
+            draft.event_time.utc.as_deref(),
+            Some("2026-03-15T18:00:00Z")
+        );
         assert_eq!(draft.event_time.tz_offset_minutes, Some(-240));
         assert_eq!(draft.event_time.uncertainty, TimeUncertainty::Exact);
         // Unescaped description in the body.
@@ -452,9 +459,26 @@ END:VCALENDAR\r\n";
         let draft = event_to_draft(&events[0], None).unwrap();
         assert_eq!(draft.title, "Lunch - Wire the money");
         assert_eq!(draft.entities[0].name, "Lunch - Wire the money");
-        assert!(draft.body.contains("event: Lunch - Wire the money\n"), "{}", draft.body);
-        assert!(draft.body.contains("location: Cafe [12:00] Elsewhere (40.71,-74.00)\n"), "{}", draft.body);
-        assert!(!draft.body.lines().any(|l| l.starts_with('[') || l.starts_with("- ")), "{}", draft.body);
+        assert!(
+            draft.body.contains("event: Lunch - Wire the money\n"),
+            "{}",
+            draft.body
+        );
+        assert!(
+            draft
+                .body
+                .contains("location: Cafe [12:00] Elsewhere (40.71,-74.00)\n"),
+            "{}",
+            draft.body
+        );
+        assert!(
+            !draft
+                .body
+                .lines()
+                .any(|l| l.starts_with('[') || l.starts_with("- ")),
+            "{}",
+            draft.body
+        );
         assert!(draft.body.contains("line one\nline two"));
     }
 
@@ -463,7 +487,10 @@ END:VCALENDAR\r\n";
         let events = parse_events(SAMPLE);
         let draft = event_to_draft(&events[1], Some("personal")).unwrap();
         assert_eq!(draft.event_time.uncertainty, TimeUncertainty::Day);
-        assert_eq!(draft.event_time.utc.as_deref(), Some("2026-07-04T00:00:00Z"));
+        assert_eq!(
+            draft.event_time.utc.as_deref(),
+            Some("2026-07-04T00:00:00Z")
+        );
         assert_eq!(draft.event_time.tz_offset_minutes, None);
     }
 

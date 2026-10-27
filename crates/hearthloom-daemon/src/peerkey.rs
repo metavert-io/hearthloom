@@ -59,7 +59,8 @@ pub fn ensure_keypair(home: &Home, store: &Store) -> Result<[u8; 32]> {
 
 /// Seal `plaintext` to a base64 X25519 public key, returning base64 ciphertext.
 pub fn seal_to(recipient_public_b64: &str, plaintext: &[u8]) -> Result<String> {
-    let public = decode32(recipient_public_b64).ok_or_else(|| anyhow!("bad recipient public key"))?;
+    let public =
+        decode32(recipient_public_b64).ok_or_else(|| anyhow!("bad recipient public key"))?;
     Ok(b64().encode(sealbox::seal(&public, plaintext)?))
 }
 

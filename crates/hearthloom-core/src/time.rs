@@ -79,8 +79,8 @@ impl EventTime {
 
     /// Parse an RFC 3339 / ISO-8601 string with offset (e.g. git's `%aI`).
     pub fn parse_rfc3339(s: &str, uncertainty: TimeUncertainty) -> Result<Self> {
-        let dt = DateTime::parse_from_rfc3339(s)
-            .map_err(|e| anyhow!("bad timestamp {s:?}: {e}"))?;
+        let dt =
+            DateTime::parse_from_rfc3339(s).map_err(|e| anyhow!("bad timestamp {s:?}: {e}"))?;
         Ok(Self::from_fixed(dt, uncertainty))
     }
 
@@ -105,8 +105,7 @@ pub fn now_utc() -> String {
 pub fn current_week_start() -> String {
     use chrono::Datelike;
     let today = Utc::now().date_naive();
-    let monday =
-        today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64);
+    let monday = today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64);
     monday.format("%Y-%m-%d").to_string()
 }
 
@@ -116,8 +115,8 @@ mod tests {
 
     #[test]
     fn test_parse_preserves_offset() {
-        let t = EventTime::parse_rfc3339("2026-03-15T14:30:00-04:00", TimeUncertainty::Exact)
-            .unwrap();
+        let t =
+            EventTime::parse_rfc3339("2026-03-15T14:30:00-04:00", TimeUncertainty::Exact).unwrap();
         assert_eq!(t.utc.as_deref(), Some("2026-03-15T18:30:00Z"));
         assert_eq!(t.tz_offset_minutes, Some(-240));
         assert_eq!(t.uncertainty, TimeUncertainty::Exact);

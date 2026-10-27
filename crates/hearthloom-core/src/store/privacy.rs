@@ -111,19 +111,35 @@ impl Store {
             "INSERT INTO privacy_rules (id, kind, pattern, created_at, actor)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(kind, pattern) DO NOTHING",
-            rusqlite::params![rule.id, rule.kind, rule.pattern, rule.created_at, rule.actor],
+            rusqlite::params![
+                rule.id,
+                rule.kind,
+                rule.pattern,
+                rule.created_at,
+                rule.actor
+            ],
         )?;
         // Journal the new row (only when the insert actually landed — a
         // conflicting duplicate is a no-op with no new id to journal).
         if inserted > 0 {
-            super::journal_row(&conn, actor, "privacy_rule", "privacy_rules", &rule.id, "create")?;
+            super::journal_row(
+                &conn,
+                actor,
+                "privacy_rule",
+                "privacy_rules",
+                &rule.id,
+                "create",
+            )?;
         }
 
         // Retroactive sweep. LIKE patterns escape their wildcards; the FTS
         // leg quotes the pattern as a phrase.
         let like = format!(
             "%{}%",
-            pattern.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+            pattern
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
         );
         let phrase = format!("\"{}\"", pattern.replace('"', ""));
         let relabeled = match kind {
@@ -234,11 +250,16 @@ impl Store {
         let placeholders: Vec<String> = (1..=cols.len()).map(|i| format!("?{i}")).collect();
         let sql = format!(
             "INSERT OR REPLACE INTO privacy_rules ({}) VALUES ({})",
-            cols.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", "),
+            cols.iter()
+                .map(|c| c.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
             placeholders.join(", ")
         );
-        let params: Vec<rusqlite::types::Value> =
-            cols.iter().map(|c| super::json_to_sql(&map[c.as_str()])).collect();
+        let params: Vec<rusqlite::types::Value> = cols
+            .iter()
+            .map(|c| super::json_to_sql(&map[c.as_str()]))
+            .collect();
         conn.execute(&sql, rusqlite::params_from_iter(params))?;
         super::journal_row(&conn, actor, "privacy_rule", "privacy_rules", id, "update")?;
         Ok(())
@@ -291,7 +312,12 @@ mod tests {
                     actor: "adapter:chrome".into(),
                     session_id: None,
                     episodes: vec![
-                        draft("https://privateclinic.example/x", "Clinic", "page visit", None),
+                        draft(
+                            "https://privateclinic.example/x",
+                            "Clinic",
+                            "page visit",
+                            None,
+                        ),
                         draft("https://example.com/news", "News", "reading news", None),
                     ],
                 },
@@ -323,14 +349,20 @@ mod tests {
             )
             .unwrap();
         let episode = store
-            .episode(&crate::ids::episode_id("chrome", "https://privateclinic.example/y"))
+            .episode(&crate::ids::episode_id(
+                "chrome",
+                "https://privateclinic.example/y",
+            ))
             .unwrap()
             .unwrap();
         assert_eq!(episode.scope, "private");
 
         // The untouched episode stays put.
         let episode = store
-            .episode(&crate::ids::episode_id("chrome", "https://example.com/news"))
+            .episode(&crate::ids::episode_id(
+                "chrome",
+                "https://example.com/news",
+            ))
             .unwrap()
             .unwrap();
         assert_ne!(episode.scope, "private");
@@ -386,14 +418,24 @@ mod tests {
             assert!(store.entity_dossier("Clinic").unwrap().is_none());
             assert!(store.traverse("Clinic", None, 1, None).is_err());
             assert!(store.recall_entity("Clinic", 10).is_err());
-            assert_eq!(store.entity_dossier("Office").unwrap().unwrap().episode_count, 1);
+            assert_eq!(
+                store
+                    .entity_dossier("Office")
+                    .unwrap()
+                    .unwrap()
+                    .episode_count,
+                1
+            );
             let span = store.recall_span("0000-01-01", "9999-12-31", 50).unwrap();
             assert!(span.iter().all(|e| e.scope == "work"), "{span:?}");
             // Raw SQL knows the vault, not areas — refused outright.
             assert!(store.read_query("SELECT id FROM episodes", 10).is_err());
             {
                 // Nested filters restore on drop; junk labels narrow to nothing.
-                let _none = crate::store::enter_area_filter(&["private".to_string(), "x' OR 1=1 --".to_string()]);
+                let _none = crate::store::enter_area_filter(&[
+                    "private".to_string(),
+                    "x' OR 1=1 --".to_string(),
+                ]);
                 assert!(store.search("roadmap", 10).unwrap().is_empty());
             }
             assert_eq!(store.search("roadmap", 10).unwrap().len(), 1);
@@ -458,37 +500,38 @@ mod tests {
         assert_eq!(comp.kinds, store.episode_counts_by("kind").unwrap());
         assert!(comp.scopes.iter().all(|(scope, _)| scope != "private"));
         // The raw sql handle sees shadowed tables; main. is rejected.
-        let (_, rows) = store
-            .read_query("SELECT id FROM episodes", 200)
-            .unwrap();
+        let (_, rows) = store.read_query("SELECT id FROM episodes", 200).unwrap();
         assert_eq!(rows.len(), 1);
         let (_, rows) = store
-            .read_query("SELECT body FROM episode_fts WHERE body LIKE '%safehouse%'", 200)
+            .read_query(
+                "SELECT body FROM episode_fts WHERE body LIKE '%safehouse%'",
+                200,
+            )
             .unwrap();
         assert!(rows.is_empty());
-        assert!(store.read_query("SELECT id FROM main.episodes", 200).is_err());
+        assert!(store
+            .read_query("SELECT id FROM main.episodes", 200)
+            .is_err());
         // The location index shadows too — a private day's coordinates
         // never leave through the raw sql handle while locked.
         {
             let secret_id: String = {
                 let conn = store.lock();
-                conn.query_row(
-                    "SELECT id FROM episodes WHERE scope = 'private'",
-                    [],
-                    |r| r.get(0),
-                )
+                conn.query_row("SELECT id FROM episodes WHERE scope = 'private'", [], |r| {
+                    r.get(0)
+                })
                 .unwrap()
             };
             store
-                .insert_location_points(
-                    &secret_id,
-                    &[(None, "2026-03-01".into(), 41.89, 12.49)],
-                )
+                .insert_location_points(&secret_id, &[(None, "2026-03-01".into(), 41.89, 12.49)])
                 .unwrap();
             let (_, rows) = store
                 .read_query("SELECT lat, lon FROM location_points", 200)
                 .unwrap();
-            assert!(rows.is_empty(), "locked vault must hide private coordinates");
+            assert!(
+                rows.is_empty(),
+                "locked vault must hide private coordinates"
+            );
             assert!(store
                 .atlas_points("2026-01-01", "2026-12-31", 100)
                 .unwrap()
@@ -510,11 +553,9 @@ mod tests {
                     [],
                 )
                 .unwrap();
-                conn.query_row(
-                    "SELECT id FROM episodes WHERE scope = 'private'",
-                    [],
-                    |r| r.get(0),
-                )
+                conn.query_row("SELECT id FROM episodes WHERE scope = 'private'", [], |r| {
+                    r.get(0)
+                })
                 .unwrap()
             };
             {
@@ -531,11 +572,17 @@ mod tests {
             let (_, rows) = store
                 .read_query("SELECT text FROM self_model", 200)
                 .unwrap();
-            assert!(rows.is_empty(), "locked vault must hide private propositions");
+            assert!(
+                rows.is_empty(),
+                "locked vault must hide private propositions"
+            );
             let (_, rows) = store
                 .read_query("SELECT id FROM opportunities", 200)
                 .unwrap();
-            assert!(rows.is_empty(), "locked vault must hide private-evidence opportunities");
+            assert!(
+                rows.is_empty(),
+                "locked vault must hide private-evidence opportunities"
+            );
         }
 
         // Always-excluded surfaces, locked or not.
@@ -561,15 +608,22 @@ mod tests {
         assert_eq!(rows.len(), 2);
         let comp = store.episode_composition().unwrap();
         assert_eq!(comp.total, 2);
-        assert!(comp.scopes.iter().any(|(scope, n)| scope == "private" && *n == 1));
+        assert!(comp
+            .scopes
+            .iter()
+            .any(|(scope, n)| scope == "private" && *n == 1));
         // The bulk-read variant excludes private EVEN while unlocked
         // (the cloud-pass rule), and leaves no shadow views behind.
-        let (_, rows) = store.read_query_public("SELECT id FROM episodes", 200).unwrap();
+        let (_, rows) = store
+            .read_query_public("SELECT id FROM episodes", 200)
+            .unwrap();
         assert_eq!(rows.len(), 1);
         let (_, rows) = store.read_query("SELECT id FROM episodes", 200).unwrap();
         assert_eq!(rows.len(), 2);
         // An ask begun while unlocked is sensitive: visible now.
-        let sensitive_ask = store.ask_start(&actor, "what is at the safehouse?", None).unwrap();
+        let sensitive_ask = store
+            .ask_start(&actor, "what is at the safehouse?", None)
+            .unwrap();
         assert!(store.ask_get(&sensitive_ask).unwrap().is_some());
 
         store.vault_lock();
@@ -584,7 +638,9 @@ mod tests {
         // A locked viewer can't take anything OUT of the vault: the
         // relabel passes over the private row, which stays hidden…
         assert_eq!(
-            store.set_episode_scopes(&actor, std::slice::from_ref(&secret_id), "personal").unwrap(),
+            store
+                .set_episode_scopes(&actor, std::slice::from_ref(&secret_id), "personal")
+                .unwrap(),
             0
         );
         assert!(store.episode(&secret_id).unwrap().is_none());
@@ -592,7 +648,9 @@ mod tests {
         // (they are transient): unlocked, the same relabel lands.
         store.vault_unlock(15);
         assert_eq!(
-            store.set_episode_scopes(&actor, std::slice::from_ref(&secret_id), "personal").unwrap(),
+            store
+                .set_episode_scopes(&actor, std::slice::from_ref(&secret_id), "personal")
+                .unwrap(),
             1
         );
         store.vault_lock();

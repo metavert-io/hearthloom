@@ -262,7 +262,8 @@ impl Store {
         let params: Vec<&dyn rusqlite::ToSql> =
             sources.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
         let rows = stmt.query_map(&params[..], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// pending episodes by source and apply each source's tier. Private
@@ -330,7 +331,10 @@ impl Store {
             .optional()?
             .unwrap_or(false);
         if !live {
-            conn.execute("UPDATE episodes SET extracted = 1 WHERE id = ?1", [episode_id])?;
+            conn.execute(
+                "UPDATE episodes SET extracted = 1 WHERE id = ?1",
+                [episode_id],
+            )?;
             return Ok(0);
         }
         let mut linked = 0;
@@ -338,14 +342,8 @@ impl Store {
             if !TYPES.contains(&entity_type.as_str()) || name.trim().len() < 2 {
                 continue;
             }
-            let (id, _, _) = super::graph::upsert_entity(
-                &conn,
-                actor,
-                entity_type,
-                name.trim(),
-                scope,
-                &[],
-            )?;
+            let (id, _, _) =
+                super::graph::upsert_entity(&conn, actor, entity_type, name.trim(), scope, &[])?;
             let added = conn.execute(
                 "INSERT OR IGNORE INTO episode_entities (episode_id, entity_id, role)
                  VALUES (?1, ?2, 'mentioned')",
@@ -423,7 +421,13 @@ impl Store {
                  WHERE superseded_by IS NULL{guard} GROUP BY source, kind, derivation, scope"
             ))?;
             let rows = stmt.query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
@@ -531,7 +535,10 @@ impl Store {
     /// `superseded_by` (`retired:<id>` when retired) and its body.
     /// Vault-guarded.
     #[allow(clippy::type_complexity)]
-    pub fn episode_forensic(&self, id: &str) -> Result<Option<(EpisodeRow, Option<String>, Option<String>)>> {
+    pub fn episode_forensic(
+        &self,
+        id: &str,
+    ) -> Result<Option<(EpisodeRow, Option<String>, Option<String>)>> {
         let guard = self.scope_guard("e.scope");
         let conn = self.lock();
         let columns = EPISODE_COLUMNS

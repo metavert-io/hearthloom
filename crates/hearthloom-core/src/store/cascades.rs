@@ -71,7 +71,10 @@ impl Store {
             .collect::<std::result::Result<_, _>>()?;
         // Mark everything pending as handled — including private matches
         // this SELECT skipped, which must never queue for a cloud pass.
-        conn.execute("UPDATE intent_matches SET cascaded = 1 WHERE cascaded = 0", [])?;
+        conn.execute(
+            "UPDATE intent_matches SET cascaded = 1 WHERE cascaded = 0",
+            [],
+        )?;
         Ok(seeds)
     }
 
@@ -160,10 +163,9 @@ impl Store {
                    AND e.id != ?4 AND e.scope != 'private' AND e.superseded_by IS NULL
                  LIMIT 6",
             )?;
-            let rows = stmt.query_map(
-                rusqlite::params![lat, lon, day, episode_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
+            let rows = stmt.query_map(rusqlite::params![lat, lon, day, episode_id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?;
             ctx.place = rows.collect::<std::result::Result<_, _>>()?;
         }
 
@@ -275,7 +277,13 @@ mod tests {
             .unwrap();
         assert_eq!(ctx.entities, vec!["Ada (Person)".to_string()]);
         // The private episode shares title tokens but must not surface.
-        assert!(ctx.semantic.iter().all(|(_, line)| !line.contains("secret")));
-        assert!(ctx.temporal.iter().all(|(_, line)| !line.contains("secret")));
+        assert!(ctx
+            .semantic
+            .iter()
+            .all(|(_, line)| !line.contains("secret")));
+        assert!(ctx
+            .temporal
+            .iter()
+            .all(|(_, line)| !line.contains("secret")));
     }
 }

@@ -175,11 +175,10 @@ fn sanitize_term(term: &str) -> String {
 /// survives stopword filtering.
 fn or_fallback_query(query: &str) -> Option<String> {
     const STOPWORDS: &[&str] = &[
-        "a", "an", "and", "are", "as", "at", "be", "but", "by", "did", "do", "does", "for",
-        "from", "had", "has", "have", "how", "i", "in", "is", "it", "its", "me", "my", "of",
-        "on", "or", "that", "the", "their", "them", "then", "there", "these", "they", "this",
-        "to", "was", "we", "were", "what", "when", "where", "which", "who", "whom", "why",
-        "will", "with",
+        "a", "an", "and", "are", "as", "at", "be", "but", "by", "did", "do", "does", "for", "from",
+        "had", "has", "have", "how", "i", "in", "is", "it", "its", "me", "my", "of", "on", "or",
+        "that", "the", "their", "them", "then", "there", "these", "they", "this", "to", "was",
+        "we", "were", "what", "when", "where", "which", "who", "whom", "why", "will", "with",
     ];
     let terms: Vec<String> = query
         .split_whitespace()
@@ -230,8 +229,18 @@ mod tests {
     #[test]
     fn test_search_and_or_fallback() {
         let store = Store::open_in_memory().unwrap();
-        seed(&store, "ep_1", "Fix auth bug", "Fixed the token refresh race in auth.rs");
-        seed(&store, "ep_2", "Standup notes", "Discussed the roadmap for entity resolution");
+        seed(
+            &store,
+            "ep_1",
+            "Fix auth bug",
+            "Fixed the token refresh race in auth.rs",
+        );
+        seed(
+            &store,
+            "ep_2",
+            "Standup notes",
+            "Discussed the roadmap for entity resolution",
+        );
 
         let hits = store.search("auth", 10).unwrap();
         assert_eq!(hits.len(), 1);

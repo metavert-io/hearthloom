@@ -41,7 +41,12 @@ pub fn generate(store: &Store) -> Result<String> {
                 sphere = &p.sphere;
                 out.push_str(&format!("**{sphere}**\n"));
             }
-            out.push_str(&format!("- ({}) {} _[{}]_\n", p.kind, one_line(&p.text), p.origin));
+            out.push_str(&format!(
+                "- ({}) {} _[{}]_\n",
+                p.kind,
+                one_line(&p.text),
+                p.origin
+            ));
         }
         out.push('\n');
     }
@@ -49,7 +54,9 @@ pub fn generate(store: &Store) -> Result<String> {
         Some(summary) => {
             out.push_str(&format!(
                 "_From the {} consolidation digest (trust: agent; episode {})._\n\n",
-                crate::store::base_ref(&summary.source_ref).strip_prefix("summary:").unwrap_or("latest"),
+                crate::store::base_ref(&summary.source_ref)
+                    .strip_prefix("summary:")
+                    .unwrap_or("latest"),
                 summary.id
             ));
             if let Some(body) = store.episode_body(&summary.id)? {
@@ -84,7 +91,9 @@ pub fn generate(store: &Store) -> Result<String> {
         for (entity, n) in &top {
             out.push_str(&format!(
                 "- **{}** ({}, {} episodes)\n",
-                one_line(&entity.name), entity.entity_type, n
+                one_line(&entity.name),
+                entity.entity_type,
+                n
             ));
         }
     }
@@ -171,7 +180,10 @@ mod tests {
     fn test_third_party_text_cannot_open_a_section() {
         assert_eq!(one_line("Lunch\n## Store\r\nmore"), "Lunch ## Store more");
         assert_eq!(one_line("a\u{2028}b"), "a b");
-        assert_eq!(demote_heading("## Self-model notes"), "### Self-model notes");
+        assert_eq!(
+            demote_heading("## Self-model notes"),
+            "### Self-model notes"
+        );
         assert_eq!(demote_heading("# Big"), "### Big");
         assert_eq!(demote_heading("### Already deep"), "### Already deep");
         assert_eq!(demote_heading("- a list line"), "- a list line");

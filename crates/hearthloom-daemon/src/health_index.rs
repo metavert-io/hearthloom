@@ -119,11 +119,7 @@ impl SidecarWriter {
 
 /// Read-only SQL over the sidecar: single SELECT/WITH statement, row cap.
 /// The caller (virtual_source::query) is responsible for the vault gate.
-pub fn query(
-    sidecar: &Path,
-    sql: &str,
-    max_rows: usize,
-) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+pub fn query(sidecar: &Path, sql: &str, max_rows: usize) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let head = trimmed
         .split_whitespace()
@@ -131,7 +127,9 @@ pub fn query(
         .unwrap_or("")
         .to_ascii_lowercase();
     if head != "select" && head != "with" {
-        return Err(anyhow!("vquery accepts a single read-only SELECT/WITH statement"));
+        return Err(anyhow!(
+            "vquery accepts a single read-only SELECT/WITH statement"
+        ));
     }
     if trimmed.contains(';') {
         return Err(anyhow!("vquery accepts exactly one statement"));
@@ -142,10 +140,7 @@ pub fn query(
             sidecar.display()
         ));
     }
-    let conn = Connection::open_with_flags(
-        sidecar,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?;
+    let conn = Connection::open_with_flags(sidecar, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut stmt = conn.prepare(trimmed)?;
     let columns: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
     let n = columns.len();
@@ -161,9 +156,7 @@ pub fn query(
             out.push(match v {
                 rusqlite::types::ValueRef::Null => Value::Null,
                 rusqlite::types::ValueRef::Integer(i) => Value::from(i),
-                rusqlite::types::ValueRef::Real(f) => {
-                    Value::from((f * 1000.0).round() / 1000.0)
-                }
+                rusqlite::types::ValueRef::Real(f) => Value::from((f * 1000.0).round() / 1000.0),
                 rusqlite::types::ValueRef::Text(t) => {
                     Value::from(String::from_utf8_lossy(t).into_owned())
                 }

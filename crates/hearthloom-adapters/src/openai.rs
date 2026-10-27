@@ -84,8 +84,8 @@ pub fn ingest(
     for chunk in &chunks {
         let raw = std::fs::read_to_string(chunk)
             .with_context(|| format!("reading {}", chunk.display()))?;
-        let convs: Value = serde_json::from_str(&raw)
-            .with_context(|| format!("parsing {}", chunk.display()))?;
+        let convs: Value =
+            serde_json::from_str(&raw).with_context(|| format!("parsing {}", chunk.display()))?;
         let Some(list) = convs.as_array() else {
             tracing::warn!("skipping {}: not a JSON array", chunk.display());
             continue;
@@ -147,7 +147,10 @@ fn preserve_asset(
 ) -> Option<String> {
     let id = asset_id(pointer)?;
     let dat = format!("{id}.dat");
-    let original = asset_names.get(&dat).cloned().unwrap_or_else(|| dat.clone());
+    let original = asset_names
+        .get(&dat)
+        .cloned()
+        .unwrap_or_else(|| dat.clone());
     let Some(base) = media_out else {
         return Some(original); // no home to copy into — just name it
     };
@@ -240,7 +243,10 @@ fn build_conversation(
             } else if part.get("content_type").and_then(|c| c.as_str())
                 == Some("image_asset_pointer")
             {
-                let pointer = part.get("asset_pointer").and_then(|p| p.as_str()).unwrap_or("");
+                let pointer = part
+                    .get("asset_pointer")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("");
                 match preserve_asset(pointer, id, dir, media_out, asset_names) {
                     Some(name) => {
                         text.push_str(&format!("[image: {name}]\n"));
@@ -252,7 +258,10 @@ fn build_conversation(
         if text.trim().is_empty() {
             continue;
         }
-        let at = message.get("create_time").and_then(|c| c.as_f64()).unwrap_or(0.0);
+        let at = message
+            .get("create_time")
+            .and_then(|c| c.as_f64())
+            .unwrap_or(0.0);
         messages.push((at, speaker.to_string(), text));
     }
     if messages.is_empty() {
@@ -317,7 +326,11 @@ mod tests {
     fn test_multichunk_export_with_media_and_metadata() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
-        write(dir, "user.json", r#"{"email":"Jon@Example.com","id":"user-1"}"#);
+        write(
+            dir,
+            "user.json",
+            r#"{"email":"Jon@Example.com","id":"user-1"}"#,
+        );
         write(
             dir,
             "conversation_asset_file_names.json",
@@ -364,7 +377,10 @@ mod tests {
         let u = c1.body.find("you:").unwrap();
         let a = c1.body.find("chatgpt:").unwrap();
         assert!(u < a, "user turn should precede assistant");
-        assert!(c1.body.contains("[image: cat.jpeg]"), "media named by original");
+        assert!(
+            c1.body.contains("[image: cat.jpeg]"),
+            "media named by original"
+        );
         assert!(!c1.body.contains("system"), "system turn excluded");
         // Owner attached as author with lowercased email.
         assert_eq!(c1.entities[0].attributes[0].1, "jon@example.com");
@@ -372,7 +388,11 @@ mod tests {
         assert!(media.join("c1").join("cat.jpeg").is_file());
 
         let c2 = drafts.iter().find(|d| d.source_ref == "c2").unwrap();
-        assert_eq!(c2.scope.as_deref(), Some("private"), "do-not-remember → private");
+        assert_eq!(
+            c2.scope.as_deref(),
+            Some("private"),
+            "do-not-remember → private"
+        );
         assert!(c2.body.contains("starred: true"));
     }
 

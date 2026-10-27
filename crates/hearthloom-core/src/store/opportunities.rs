@@ -301,9 +301,7 @@ impl Store {
             source_ref: format!("opportunity:{id}"),
             kind: "opportunity".into(),
             title: format!("Opportunity: {episode_title}"),
-            body: format!(
-                "seeking: {seeking_text}\nevidence: {evidence_id}\n\n{reason}"
-            ),
+            body: format!("seeking: {seeking_text}\nevidence: {evidence_id}\n\n{reason}"),
             event_time: match event_time {
                 Some(t) => crate::time::EventTime {
                     utc: Some(t),
@@ -394,7 +392,10 @@ mod tests {
 
         let pending = store.list_opportunities(10).unwrap();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].seeking_text, "collaborators for a game economy project");
+        assert_eq!(
+            pending[0].seeking_text,
+            "collaborators for a game economy project"
+        );
 
         // Keep → kind=opportunity episode minted, derivation inferred.
         let minted = store

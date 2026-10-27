@@ -156,7 +156,11 @@ pub fn group_id_of(target: &str) -> Option<&str> {
 fn next_stamp(conn: &rusqlite::Connection, id: &str) -> Result<String> {
     let now = now_utc();
     let current: Option<String> = conn
-        .query_row("SELECT updated_at FROM friend_groups WHERE id = ?1", [id], |row| row.get(0))
+        .query_row(
+            "SELECT updated_at FROM friend_groups WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
         .optional()?;
     match current {
         Some(current) if current.as_str() >= now.as_str() => {
@@ -175,7 +179,9 @@ fn clean_name(name: &str) -> Result<String> {
         return Err(anyhow!("a group needs a name"));
     }
     if name.chars().count() > MAX_NAME_CHARS {
-        return Err(anyhow!("a group name can be at most {MAX_NAME_CHARS} characters"));
+        return Err(anyhow!(
+            "a group name can be at most {MAX_NAME_CHARS} characters"
+        ));
     }
     Ok(name)
 }
@@ -206,7 +212,8 @@ impl Store {
              ORDER BY name COLLATE NOCASE"
         ))?;
         let rows = stmt.query_map([], row_to_group)?;
-        rows.collect::<std::result::Result<_, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
     }
 
     pub fn group(&self, id: &str) -> Result<Option<GroupRow>> {
@@ -245,7 +252,11 @@ impl Store {
                 (group, grant)
             })
             .collect();
-        Ok(FriendAccess { friend: friend.to_string(), direct, groups })
+        Ok(FriendAccess {
+            friend: friend.to_string(),
+            direct,
+            groups,
+        })
     }
 
     fn name_taken(&self, name: &str, except: Option<&str>) -> Result<bool> {
@@ -258,7 +269,13 @@ impl Store {
     fn write_group(&self, actor: &Actor, id: &str, verb: &str, detail: &Value) -> Result<()> {
         let conn = self.lock();
         super::journal_row(&conn, actor, "friend_group", "friend_groups", id, "update")?;
-        record_mutation(&conn, actor, verb, &format!("{verb}:{id}:{}", now_utc()), detail)?;
+        record_mutation(
+            &conn,
+            actor,
+            verb,
+            &format!("{verb}:{id}:{}", now_utc()),
+            detail,
+        )?;
         Ok(())
     }
 
@@ -278,7 +295,12 @@ impl Store {
                 rusqlite::params![id, name, now],
             )?;
         }
-        self.write_group(actor, &id, "group_created", &json!({"id": id, "name": name}))?;
+        self.write_group(
+            actor,
+            &id,
+            "group_created",
+            &json!({"id": id, "name": name}),
+        )?;
         self.live_group(&id)
     }
 
@@ -301,7 +323,12 @@ impl Store {
 
     /// Replace the roster. Every member must be a connection of this
     /// record (a grant row by that name); the list is de-duplicated.
-    pub fn set_group_members(&self, actor: &Actor, id: &str, members: &[String]) -> Result<GroupRow> {
+    pub fn set_group_members(
+        &self,
+        actor: &Actor,
+        id: &str,
+        members: &[String],
+    ) -> Result<GroupRow> {
         self.live_group(id)?;
         let mut roster: Vec<String> = Vec::new();
         for member in members {
@@ -322,7 +349,12 @@ impl Store {
                 rusqlite::params![id, json!(roster).to_string(), next_stamp(&conn, id)?],
             )?;
         }
-        self.write_group(actor, id, "group_members_set", &json!({"id": id, "members": roster}))?;
+        self.write_group(
+            actor,
+            id,
+            "group_members_set",
+            &json!({"id": id, "members": roster}),
+        )?;
         self.live_group(id)
     }
 
@@ -338,7 +370,12 @@ impl Store {
                 rusqlite::params![id, clean.to_string(), next_stamp(&conn, id)?],
             )?;
         }
-        self.write_group(actor, id, "group_sharing_set", &json!({"id": id, "sharing": clean}))?;
+        self.write_group(
+            actor,
+            id,
+            "group_sharing_set",
+            &json!({"id": id, "sharing": clean}),
+        )?;
         self.live_group(id)
     }
 
@@ -358,7 +395,14 @@ impl Store {
         };
         for share_id in &share_ids {
             // tombstone BEFORE the row is gone (deletes travel by journal)
-            super::journal_row(&conn, actor, "shared_item", "shared_items", share_id, "delete")?;
+            super::journal_row(
+                &conn,
+                actor,
+                "shared_item",
+                "shared_items",
+                share_id,
+                "delete",
+            )?;
             conn.execute("DELETE FROM shared_items WHERE id = ?1", [share_id])?;
         }
         let now = next_stamp(&conn, id)?;
@@ -412,7 +456,12 @@ impl Store {
             let members: Vec<String> = group
                 .get("members")
                 .and_then(|m| m.as_array())
-                .map(|list| list.iter().filter_map(|v| v.as_str().map(String::from)).take(500).collect())
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .take(500)
+                        .collect()
+                })
                 .unwrap_or_default();
             kept += tx.execute(
                 "INSERT OR REPLACE INTO peer_groups (friend, group_id, name, members, updated_at, fetched_at)
@@ -447,7 +496,8 @@ impl Store {
                 "fetched_at": row.get::<_, String>(4)?,
             }))
         })?;
-        rows.collect::<std::result::Result<_, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
     }
 
     /// Forget a friend's groups (the connection was removed).
@@ -480,13 +530,19 @@ impl Store {
                 "deleted_at": row.get::<_, Option<String>>(6)?,
             }))
         })?;
-        rows.collect::<std::result::Result<_, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
     }
 
     /// Last-writer-wins by `updated_at`, per group.
     pub(crate) fn groups_sync_apply(tx: &rusqlite::Transaction, batch: &Value) -> Result<usize> {
         let mut applied = 0usize;
-        for g in batch.get("groups").and_then(|v| v.as_array()).into_iter().flatten() {
+        for g in batch
+            .get("groups")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
             let (Some(id), Some(name), Some(stamp)) = (
                 g.get("id").and_then(|v| v.as_str()),
                 g.get("name").and_then(|v| v.as_str()),

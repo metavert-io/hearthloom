@@ -44,8 +44,8 @@ pub fn ingest_with_owner(
     scope: Option<&str>,
     owner: Option<&(String, String)>,
 ) -> Result<Vec<EpisodeDraft>> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let value: Value = serde_json::from_str(&raw)
         .with_context(|| format!("parsing {} as JSON", path.display()))?;
     let conversations = value
@@ -184,7 +184,9 @@ fn claude_conversation(
             turns.push((sender.to_string(), text));
         }
     }
-    Ok(build_draft("claude", id, title, event_time, turns, scope, owner))
+    Ok(build_draft(
+        "claude", id, title, event_time, turns, scope, owner,
+    ))
 }
 
 fn chatgpt_conversation(
@@ -256,7 +258,9 @@ fn chatgpt_conversation(
     }
     messages.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     let turns = messages.into_iter().map(|(_, s, t)| (s, t)).collect();
-    Ok(build_draft("chatgpt", id, title, event_time, turns, scope, owner))
+    Ok(build_draft(
+        "chatgpt", id, title, event_time, turns, scope, owner,
+    ))
 }
 
 #[cfg(test)]
@@ -285,7 +289,10 @@ mod tests {
         assert_eq!(draft.source, "chatlog-claude");
         assert_eq!(draft.source_ref, "conv-1");
         assert_eq!(draft.title, "Designing the second brain");
-        assert_eq!(draft.event_time.utc.as_deref(), Some("2026-07-01T18:00:00Z"));
+        assert_eq!(
+            draft.event_time.utc.as_deref(),
+            Some("2026-07-01T18:00:00Z")
+        );
         assert!(draft.body.contains("you: How should I store episodes?"));
         assert!(draft.body.contains("claude: Append-only, in SQLite."));
     }

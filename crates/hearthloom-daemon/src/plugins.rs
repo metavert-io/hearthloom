@@ -148,7 +148,10 @@ impl Manifest {
             );
         }
         if !valid_ember_name(&self.name) {
-            bail!("plugin name must be 1-40 chars of [a-z0-9-] (got {:?})", self.name);
+            bail!(
+                "plugin name must be 1-40 chars of [a-z0-9-] (got {:?})",
+                self.name
+            );
         }
         if self.name == "self" || self.name == "ui" {
             bail!("{:?} is a reserved name", self.name);
@@ -170,16 +173,23 @@ impl Manifest {
             }
         }
         if let Some(cfg) = &self.config {
-            let items = cfg.as_array().ok_or_else(|| anyhow!("config must be an array"))?;
+            let items = cfg
+                .as_array()
+                .ok_or_else(|| anyhow!("config must be an array"))?;
             for item in items {
                 let key = item.get("key").and_then(|k| k.as_str()).unwrap_or("");
                 if key.is_empty()
                     || key.starts_with("__")
-                    || !key.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                    || !key
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
                 {
                     bail!("config keys are [a-z0-9_] (got {key:?})");
                 }
-                let ty = item.get("type").and_then(|t| t.as_str()).unwrap_or("string");
+                let ty = item
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("string");
                 if !matches!(ty, "string" | "number" | "boolean" | "list") {
                     bail!("config type must be string|number|boolean|list");
                 }
@@ -203,10 +213,16 @@ impl Manifest {
         let mut seen = std::collections::HashSet::new();
         for p in &self.publish {
             if !valid_publish_path(&p.path) {
-                bail!("publish paths must be clean addresses under /.well-known/ (got {:?})", p.path);
+                bail!(
+                    "publish paths must be clean addresses under /.well-known/ (got {:?})",
+                    p.path
+                );
             }
             if safe_rel_path(&p.file).is_err() {
-                bail!("publish file {:?} must be a clean path in the ember's data store", p.file);
+                bail!(
+                    "publish file {:?} must be a clean path in the ember's data store",
+                    p.file
+                );
             }
             if !seen.insert(p.path.as_str()) {
                 bail!("{:?} is published twice", p.path);
@@ -265,7 +281,11 @@ fn parse_ver(s: &str) -> (u64, u64, u64) {
         .trim_start_matches('v')
         .split(['.', '-', '+'])
         .map(|x| x.parse::<u64>().unwrap_or(0));
-    (it.next().unwrap_or(0), it.next().unwrap_or(0), it.next().unwrap_or(0))
+    (
+        it.next().unwrap_or(0),
+        it.next().unwrap_or(0),
+        it.next().unwrap_or(0),
+    )
 }
 
 /// Does `current` satisfy the requirement `req`? A leading operator
@@ -319,8 +339,8 @@ pub fn manifest_path(dir: &Path) -> Option<PathBuf> {
 
 /// Parse + validate a package directory's manifest.
 pub fn load_manifest(dir: &Path) -> Result<Manifest> {
-    let path = manifest_path(dir)
-        .ok_or_else(|| anyhow!("no hearthember.json in {}", dir.display()))?;
+    let path =
+        manifest_path(dir).ok_or_else(|| anyhow!("no hearthember.json in {}", dir.display()))?;
     let raw = std::fs::read_to_string(&path)?;
     let manifest: Manifest =
         serde_json::from_str(&raw).with_context(|| format!("{} didn't parse", path.display()))?;
@@ -357,7 +377,7 @@ fn launchd_plist_path(name: &str) -> PathBuf {
 }
 
 /* ————— running an ember's sidecar: launchd on a Mac, the daemon's own
-   supervisor (sidecar.rs) everywhere else ————— */
+supervisor (sidecar.rs) everywhere else ————— */
 
 /// The `launch` entry for THIS machine: the exact target triple first
 /// (`x86_64-unknown-linux-gnu` — a package can carry one binary per
@@ -378,7 +398,9 @@ pub fn launch_entry(manifest: &Manifest) -> Option<&String> {
 /// supervisor on a Mac (testing the hosted path locally).
 fn use_launchd() -> bool {
     cfg!(target_os = "macos")
-        && std::env::var("HEARTHLOOM_SIDECAR_BACKEND").map(|v| v != "supervisor").unwrap_or(true)
+        && std::env::var("HEARTHLOOM_SIDECAR_BACKEND")
+            .map(|v| v != "supervisor")
+            .unwrap_or(true)
 }
 
 fn sidecar_env(state: &AppState, name: &str) -> Vec<(String, String)> {
@@ -446,7 +468,9 @@ pub fn start_enabled_sidecars(state: &AppState) {
     if use_launchd() {
         return;
     }
-    let Ok(rows) = state.store.list_plugins() else { return };
+    let Ok(rows) = state.store.list_plugins() else {
+        return;
+    };
     for row in rows.into_iter().filter(|r| r.enabled) {
         let Ok(manifest) = serde_json::from_value::<Manifest>(row.manifest) else {
             continue;
@@ -569,7 +593,11 @@ fn check_publish_free(state: &AppState, manifest: &Manifest) -> Result<()> {
         };
         for p in &manifest.publish {
             if other.publish.iter().any(|o| o.path == p.path) {
-                bail!("{} already publishes {} — only one ember may hold a public address", row.name, p.path);
+                bail!(
+                    "{} already publishes {} — only one ember may hold a public address",
+                    row.name,
+                    p.path
+                );
             }
         }
     }
@@ -610,7 +638,10 @@ pub fn install_from_dir(
     let granted = granted_scopes.unwrap_or_else(|| manifest.scopes.clone());
     for scope in &granted {
         if !PLUGIN_ALLOWED_SCOPES.contains(&scope.as_str()) {
-            bail!("plugins may be granted only: {}", PLUGIN_ALLOWED_SCOPES.join(", "));
+            bail!(
+                "plugins may be granted only: {}",
+                PLUGIN_ALLOWED_SCOPES.join(", ")
+            );
         }
     }
     let name = manifest.name.clone();
@@ -623,12 +654,10 @@ pub fn install_from_dir(
     let (api_key_id, secret) = match existing {
         Some(row) => (row.api_key_id, None),
         None => {
-            let (row, secret) = state.store.create_api_key(
-                &actor,
-                &format!("plugin:{name}"),
-                &granted,
-                None,
-            )?;
+            let (row, secret) =
+                state
+                    .store
+                    .create_api_key(&actor, &format!("plugin:{name}"), &granted, None)?;
             (row.id, Some(secret))
         }
     };
@@ -657,10 +686,9 @@ pub fn install_from_dir(
         }
     }
 
-    let manifest_json: Value =
-        serde_json::from_str(&std::fs::read_to_string(
-            manifest_path(src).ok_or_else(|| anyhow!("manifest vanished mid-install"))?,
-        )?)?;
+    let manifest_json: Value = serde_json::from_str(&std::fs::read_to_string(
+        manifest_path(src).ok_or_else(|| anyhow!("manifest vanished mid-install"))?,
+    )?)?;
     let sync = manifest.sync.clone().unwrap_or_else(|| "local-only".into());
     let row = state.store.install_plugin(
         &actor,
@@ -789,11 +817,22 @@ pub fn plugin_route_allowed(path: &str, method: &str, scopes: &[String]) -> bool
         // list, not allow-list: read is a broad scope by design and the
         // vault guard filters private beneath it either way.
         const DENIED: &[&str] = &[
-            "/v1/auth", "/v1/keys", "/v1/export", "/v1/users", "/v1/vault",
-            "/v1/plugins", "/v1/sync", "/v1/peer", "/v1/provisioner",
-            "/v1/privacy", "/v1/integrations", "/v1/monitor", "/v1/agents",
+            "/v1/auth",
+            "/v1/keys",
+            "/v1/export",
+            "/v1/users",
+            "/v1/vault",
+            "/v1/plugins",
+            "/v1/sync",
+            "/v1/peer",
+            "/v1/provisioner",
+            "/v1/privacy",
+            "/v1/integrations",
+            "/v1/monitor",
+            "/v1/agents",
             // who drives your car, and the questions about it, are yours
-            "/v1/vehicles", "/v1/trips",
+            "/v1/vehicles",
+            "/v1/trips",
         ];
         return path.starts_with("/v1/") && !DENIED.iter().any(|d| path.starts_with(d));
     }
@@ -841,7 +880,12 @@ pub fn ui_contributions(state: &AppState) -> Result<Value> {
         if let Some(n) = ui.get("nav").and_then(entry) {
             nav.push(n); // one top-nav entry per plugin, by shape
         }
-        for (list, out) in [("visualize", &mut visualize), ("hamburger", &mut hamburger), ("desk", &mut desk), ("card", &mut card)] {
+        for (list, out) in [
+            ("visualize", &mut visualize),
+            ("hamburger", &mut hamburger),
+            ("desk", &mut desk),
+            ("card", &mut card),
+        ] {
             if let Some(items) = ui.get(list).and_then(|v| v.as_array()) {
                 out.extend(items.iter().filter_map(entry));
             }
@@ -866,7 +910,9 @@ pub fn stage_zip(state: &AppState, bytes: &[u8]) -> Result<PathBuf> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
-        let Some(rel) = file.enclosed_name() else { continue }; // traversal-safe
+        let Some(rel) = file.enclosed_name() else {
+            continue;
+        }; // traversal-safe
         let out = staging.join(rel);
         if file.is_dir() {
             std::fs::create_dir_all(&out)?;
@@ -898,7 +944,9 @@ pub fn safe_rel_path(rel: &str) -> Result<&str> {
     let rel = rel.trim_start_matches('/');
     if rel.is_empty()
         || rel.len() > 512
-        || rel.split('/').any(|seg| seg.is_empty() || seg == "." || seg == ".." || seg.starts_with('.'))
+        || rel
+            .split('/')
+            .any(|seg| seg.is_empty() || seg == "." || seg == ".." || seg.starts_with('.'))
     {
         bail!("invalid storage path {rel:?}");
     }
@@ -906,10 +954,10 @@ pub fn safe_rel_path(rel: &str) -> Result<&str> {
 }
 
 /* ————— ember secrets: sealed at rest, never exported, never mirrored —————
-   plugins/<name>/secrets/<key>.sealed, sealed by core secrets::seal_node
-   (master key, else this node's key file). The SIDECAR reads values
-   back; the ember's UI page can set/list/delete but never read (a page
-   is a less-trusted surface than the binary the user installed). */
+plugins/<name>/secrets/<key>.sealed, sealed by core secrets::seal_node
+(master key, else this node's key file). The SIDECAR reads values
+back; the ember's UI page can set/list/delete but never read (a page
+is a less-trusted surface than the binary the user installed). */
 
 pub const SECRET_MAX_BYTES: usize = 64 * 1024;
 
@@ -963,7 +1011,10 @@ pub fn secret_get(state: &AppState, name: &str, key: &str) -> Result<Option<Vec<
     let Ok(sealed) = std::fs::read(&path) else {
         return Ok(None);
     };
-    Ok(Some(hearthloom_core::secrets::unseal_node(state.home.root(), &sealed)?))
+    Ok(Some(hearthloom_core::secrets::unseal_node(
+        state.home.root(),
+        &sealed,
+    )?))
 }
 
 pub fn secret_delete(state: &AppState, name: &str, key: &str) -> bool {
@@ -979,12 +1030,18 @@ pub fn secret_list(state: &AppState, name: &str) -> Vec<Value> {
     };
     for entry in entries.flatten() {
         let file = entry.file_name().to_string_lossy().into_owned();
-        let Some(key) = file.strip_suffix(".sealed") else { continue };
+        let Some(key) = file.strip_suffix(".sealed") else {
+            continue;
+        };
         let set_at = entry
             .metadata()
             .ok()
             .and_then(|m| m.modified().ok())
-            .map(|t| chrono::DateTime::<chrono::Utc>::from(t).format("%Y-%m-%dT%H:%M:%SZ").to_string());
+            .map(|t| {
+                chrono::DateTime::<chrono::Utc>::from(t)
+                    .format("%Y-%m-%dT%H:%M:%SZ")
+                    .to_string()
+            });
         out.push(json!({"key": key, "set_at": set_at}));
     }
     out.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
@@ -992,21 +1049,21 @@ pub fn secret_list(state: &AppState, name: &str) -> Vec<Value> {
 }
 
 /* ————— the OAuth callback relay —————
-   A third-party sign-in needs a public HTTPS redirect address; an
-   ember has none of its own (it's a process behind the daemon). So the
-   daemon answers `/plugins/<name>/oauth/callback` for it:
-   1. the ember registers a PENDING sign-in {state, authorize_url} via
-      /v1/plugins/self/oauth/pending (its page or its sidecar);
-   2. the dashboard opens exactly that authorize_url (an ember page is
-      a sandboxed iframe without popups — it asks the shell, and the
-      shell opens only the URL the daemon holds);
-   3. the provider redirects back with ?code&state; the daemon checks
-      the state (single use, expiring), seals the code as the ember's
-      `__oauth_code` secret, and touches the bus;
-   4. the sidecar takes the code ONCE (/v1/plugins/self/oauth/take)
-      and exchanges it with its client secret.
-   Pending sign-ins live in memory on the node the redirect address
-   points at — start sign-in from that node's dashboard. */
+A third-party sign-in needs a public HTTPS redirect address; an
+ember has none of its own (it's a process behind the daemon). So the
+daemon answers `/plugins/<name>/oauth/callback` for it:
+1. the ember registers a PENDING sign-in {state, authorize_url} via
+   /v1/plugins/self/oauth/pending (its page or its sidecar);
+2. the dashboard opens exactly that authorize_url (an ember page is
+   a sandboxed iframe without popups — it asks the shell, and the
+   shell opens only the URL the daemon holds);
+3. the provider redirects back with ?code&state; the daemon checks
+   the state (single use, expiring), seals the code as the ember's
+   `__oauth_code` secret, and touches the bus;
+4. the sidecar takes the code ONCE (/v1/plugins/self/oauth/take)
+   and exchanges it with its client secret.
+Pending sign-ins live in memory on the node the redirect address
+points at — start sign-in from that node's dashboard. */
 
 pub struct PendingOAuth {
     pub state: String,
@@ -1015,8 +1072,9 @@ pub struct PendingOAuth {
 }
 
 fn oauth_pending() -> &'static std::sync::Mutex<std::collections::HashMap<String, PendingOAuth>> {
-    static MAP: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, PendingOAuth>>> =
-        std::sync::OnceLock::new();
+    static MAP: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, PendingOAuth>>,
+    > = std::sync::OnceLock::new();
     MAP.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -1025,7 +1083,8 @@ pub fn oauth_register(name: &str, state: &str, authorize_url: &str, ttl_secs: u6
     if state.len() < 16 || state.len() > 256 || !state.chars().all(|c| c.is_ascii_graphic()) {
         bail!("state must be 16-256 printable characters (use a random value)");
     }
-    let url = reqwest::Url::parse(authorize_url).map_err(|_| anyhow!("authorize_url isn't a URL"))?;
+    let url =
+        reqwest::Url::parse(authorize_url).map_err(|_| anyhow!("authorize_url isn't a URL"))?;
     if url.scheme() != "https" || url.host_str().is_none() {
         bail!("authorize_url must be an https address");
     }
@@ -1060,9 +1119,9 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 /// Consume the pending sign-in when `state` matches (single use).
 pub fn oauth_consume(name: &str, state: &str) -> bool {
     let mut map = oauth_pending().lock().unwrap();
-    let ok = map
-        .get(name)
-        .is_some_and(|p| p.expires > std::time::Instant::now() && ct_eq(p.state.as_bytes(), state.as_bytes()));
+    let ok = map.get(name).is_some_and(|p| {
+        p.expires > std::time::Instant::now() && ct_eq(p.state.as_bytes(), state.as_bytes())
+    });
     if ok {
         map.remove(name);
     }
@@ -1070,15 +1129,15 @@ pub fn oauth_consume(name: &str, state: &str) -> bool {
 }
 
 /* ————— the single-runner lease (peered setups) —————
-   A mirror-sync'd ember with a sidecar must run in ONE place across a
-   pair — two samplers double-ingest and fight over state. The lease
-   is a reserved `__runner` key in the ember's own MIRRORED KV (it
-   replicates over the existing /v1/sync/plugins leg): the running
-   node heartbeats {node, ts}; a peer seeing a fresh foreign lease
-   holds its sidecar back, and takes over when the lease goes stale
-   (>10 min — the LLM-delegation take-the-role-back shape). Plugin
-   self-storage rejects `__`-prefixed keys, so an ember can't forge
-   its own lease. */
+A mirror-sync'd ember with a sidecar must run in ONE place across a
+pair — two samplers double-ingest and fight over state. The lease
+is a reserved `__runner` key in the ember's own MIRRORED KV (it
+replicates over the existing /v1/sync/plugins leg): the running
+node heartbeats {node, ts}; a peer seeing a fresh foreign lease
+holds its sidecar back, and takes over when the lease goes stale
+(>10 min — the LLM-delegation take-the-role-back shape). Plugin
+self-storage rejects `__`-prefixed keys, so an ember can't forge
+its own lease. */
 
 pub const RUNNER_KEY: &str = "__runner";
 const LEASE_STALE_SECS: i64 = 600;
@@ -1105,7 +1164,9 @@ fn lease_of(state: &AppState, name: &str) -> Option<(String, String)> {
 
 fn lease_fresh(ts: &str) -> bool {
     chrono::DateTime::parse_from_rfc3339(ts)
-        .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds() < LEASE_STALE_SECS)
+        .map(|t| {
+            (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds() < LEASE_STALE_SECS
+        })
         .unwrap_or(false)
 }
 
@@ -1234,11 +1295,26 @@ mod tests {
         let ing = scopes(&["ingest"]);
         assert!(plugin_route_allowed("/v1/ingest", "POST", &ing));
         assert!(plugin_route_allowed("/v1/sources/virtual", "POST", &ing));
-        assert!(plugin_route_allowed("/v1/sources/virtual/x/promote", "POST", &ing));
+        assert!(plugin_route_allowed(
+            "/v1/sources/virtual/x/promote",
+            "POST",
+            &ing
+        ));
         assert!(plugin_route_allowed("/v1/ingest/movement", "POST", &ing));
-        assert!(!plugin_route_allowed("/v1/ingest/location", "POST", &ing), "the person's location stays core's");
-        assert!(!plugin_route_allowed("/v1/vehicles", "GET", &scopes(&["read"])));
-        assert!(!plugin_route_allowed("/v1/trips/questions", "GET", &scopes(&["read"])));
+        assert!(
+            !plugin_route_allowed("/v1/ingest/location", "POST", &ing),
+            "the person's location stays core's"
+        );
+        assert!(!plugin_route_allowed(
+            "/v1/vehicles",
+            "GET",
+            &scopes(&["read"])
+        ));
+        assert!(!plugin_route_allowed(
+            "/v1/trips/questions",
+            "GET",
+            &scopes(&["read"])
+        ));
         assert!(!plugin_route_allowed("/v1/search", "GET", &ing));
         assert!(!plugin_route_allowed("/v1/notifications", "POST", &ing));
         // read: broad GET minus the denied prefixes
@@ -1255,41 +1331,78 @@ mod tests {
 
     #[test]
     fn test_publish_paths() {
-        assert!(valid_publish_path("/.well-known/appspecific/com.tesla.3p.public-key.pem"));
+        assert!(valid_publish_path(
+            "/.well-known/appspecific/com.tesla.3p.public-key.pem"
+        ));
         assert!(valid_publish_path("/.well-known/security.txt"));
         for bad in [
-            "/.well-known/", "/.well-known/../x", "/.well-known/a//b", "/assets/x",
-            "/.well-known/a b", "/.well-known/./x", "/.well-known/%2e%2e/x",
+            "/.well-known/",
+            "/.well-known/../x",
+            "/.well-known/a//b",
+            "/assets/x",
+            "/.well-known/a b",
+            "/.well-known/./x",
+            "/.well-known/%2e%2e/x",
         ] {
             assert!(!valid_publish_path(bad), "{bad:?} should be refused");
         }
         let m = |publish: Value| -> Manifest {
-            serde_json::from_value(json!({"protocol": 1, "name": "x", "version": "1", "publish": publish})).unwrap()
+            serde_json::from_value(
+                json!({"protocol": 1, "name": "x", "version": "1", "publish": publish}),
+            )
+            .unwrap()
         };
-        m(json!([{"path": "/.well-known/appspecific/k.pem", "file": "pub/k.pem"}])).validate().unwrap();
-        assert!(m(json!([{"path": "/robots.txt", "file": "r"}])).validate().is_err(), "outside .well-known");
-        assert!(m(json!([{"path": "/.well-known/k", "file": "../key"}])).validate().is_err(), "file escapes data");
-        assert!(m(json!([
-            {"path": "/.well-known/k", "file": "a"}, {"path": "/.well-known/k", "file": "b"}
-        ])).validate().is_err(), "a path twice");
+        m(json!([{"path": "/.well-known/appspecific/k.pem", "file": "pub/k.pem"}]))
+            .validate()
+            .unwrap();
+        assert!(
+            m(json!([{"path": "/robots.txt", "file": "r"}]))
+                .validate()
+                .is_err(),
+            "outside .well-known"
+        );
+        assert!(
+            m(json!([{"path": "/.well-known/k", "file": "../key"}]))
+                .validate()
+                .is_err(),
+            "file escapes data"
+        );
+        assert!(
+            m(json!([
+                {"path": "/.well-known/k", "file": "a"}, {"path": "/.well-known/k", "file": "b"}
+            ]))
+            .validate()
+            .is_err(),
+            "a path twice"
+        );
     }
 
     #[test]
     fn test_launch_entry_prefers_exact_target() {
-        let os_key = if cfg!(target_os = "macos") { "darwin" } else { std::env::consts::OS };
+        let os_key = if cfg!(target_os = "macos") {
+            "darwin"
+        } else {
+            std::env::consts::OS
+        };
         let m: Manifest = serde_json::from_value(json!({
             "protocol": 1, "name": "x", "version": "1",
             "launch": {os_key: "bin/generic", host_target(): "bin/exact"}
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(launch_entry(&m).map(String::as_str), Some("bin/exact"));
         let m: Manifest = serde_json::from_value(json!({
             "protocol": 1, "name": "x", "version": "1", "launch": {os_key: "bin/generic"}
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(launch_entry(&m).map(String::as_str), Some("bin/generic"));
         let m: Manifest = serde_json::from_value(json!({
             "protocol": 1, "name": "x", "version": "1", "launch": {"plan9": "bin/p"}
-        })).unwrap();
-        assert!(launch_entry(&m).is_none(), "no binary for this platform = no sidecar");
+        }))
+        .unwrap();
+        assert!(
+            launch_entry(&m).is_none(),
+            "no binary for this platform = no sidecar"
+        );
     }
 
     #[test]
@@ -1297,12 +1410,30 @@ mod tests {
         let name = format!("oauth-{}", uuid::Uuid::new_v4().simple());
         let st = "s3cr3t-state-0123456789";
         let url = format!("https://auth.example.com/authorize?client_id=c&state={st}");
-        assert!(oauth_register(&name, st, "http://auth.example.com/a?state=s3cr3t-state-0123456789", 900).is_err(), "https only");
-        assert!(oauth_register(&name, st, "https://auth.example.com/a?state=other", 900).is_err(), "state must match");
-        assert!(oauth_register(&name, "short", "https://a.example.com/?state=short", 900).is_err(), "weak state");
+        assert!(
+            oauth_register(
+                &name,
+                st,
+                "http://auth.example.com/a?state=s3cr3t-state-0123456789",
+                900
+            )
+            .is_err(),
+            "https only"
+        );
+        assert!(
+            oauth_register(&name, st, "https://auth.example.com/a?state=other", 900).is_err(),
+            "state must match"
+        );
+        assert!(
+            oauth_register(&name, "short", "https://a.example.com/?state=short", 900).is_err(),
+            "weak state"
+        );
         oauth_register(&name, st, &url, 900).unwrap();
         assert_eq!(oauth_authorize_url(&name).as_deref(), Some(url.as_str()));
-        assert!(!oauth_consume(&name, "s3cr3t-state-0123456780"), "wrong state");
+        assert!(
+            !oauth_consume(&name, "s3cr3t-state-0123456780"),
+            "wrong state"
+        );
         assert!(oauth_consume(&name, st));
         assert!(!oauth_consume(&name, st), "single use");
         assert!(oauth_authorize_url(&name).is_none());
@@ -1314,7 +1445,9 @@ mod tests {
         let home = hearthloom_core::paths::Home::at(tmp.path());
         home.init().unwrap();
         let state = AppState {
-            store: std::sync::Arc::new(hearthloom_core::store::Store::open(&home.db_path()).unwrap()),
+            store: std::sync::Arc::new(
+                hearthloom_core::store::Store::open(&home.db_path()).unwrap(),
+            ),
             home,
             embedder: None,
             llm: None,
@@ -1324,20 +1457,39 @@ mod tests {
             running: Default::default(),
         };
         secret_put(&state, "demo", "client_secret", b"ta-secret.0123456789").unwrap();
-        let raw = std::fs::read(plugin_dir(&state, "demo").join("secrets/client_secret.sealed")).unwrap();
-        assert!(!raw.windows(9).any(|w| w == b"ta-secret"), "no plaintext on disk");
-        assert_eq!(secret_get(&state, "demo", "client_secret").unwrap().unwrap(), b"ta-secret.0123456789");
+        let raw =
+            std::fs::read(plugin_dir(&state, "demo").join("secrets/client_secret.sealed")).unwrap();
+        assert!(
+            !raw.windows(9).any(|w| w == b"ta-secret"),
+            "no plaintext on disk"
+        );
+        assert_eq!(
+            secret_get(&state, "demo", "client_secret")
+                .unwrap()
+                .unwrap(),
+            b"ta-secret.0123456789"
+        );
         assert!(secret_get(&state, "demo", "missing").unwrap().is_none());
-        assert!(secret_get(&state, "other", "client_secret").unwrap().is_none(), "per-ember namespaces");
+        assert!(
+            secret_get(&state, "other", "client_secret")
+                .unwrap()
+                .is_none(),
+            "per-ember namespaces"
+        );
         assert!(secret_put(&state, "demo", "../escape", b"x").is_err());
         assert!(secret_put(&state, "demo", ".hidden", b"x").is_err());
         assert!(secret_put(&state, "demo", "big", &vec![b'x'; SECRET_MAX_BYTES + 1]).is_err());
         let listed = secret_list(&state, "demo");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0]["key"], "client_secret");
-        assert!(listed[0].get("value").is_none(), "listing never carries values");
+        assert!(
+            listed[0].get("value").is_none(),
+            "listing never carries values"
+        );
         assert!(secret_delete(&state, "demo", "client_secret"));
-        assert!(secret_get(&state, "demo", "client_secret").unwrap().is_none());
+        assert!(secret_get(&state, "demo", "client_secret")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

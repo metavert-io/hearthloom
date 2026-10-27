@@ -147,7 +147,8 @@ pub(crate) fn safe_join(mount: &Path, rel: &str) -> Result<PathBuf> {
 pub(crate) fn mount_alive(path: &Path) -> bool {
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
-    static DEAD: OnceLock<Mutex<std::collections::HashMap<std::path::PathBuf, Instant>>> = OnceLock::new();
+    static DEAD: OnceLock<Mutex<std::collections::HashMap<std::path::PathBuf, Instant>>> =
+        OnceLock::new();
     let dead = DEAD.get_or_init(Default::default);
     if let Some(at) = dead.lock().unwrap().get(path) {
         if at.elapsed() < Duration::from_secs(30) {
@@ -190,7 +191,9 @@ fn probe_in_child(path: &Path) -> Option<bool> {
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => return Some(status.success()),
-                Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(25))
+                }
                 _ => {
                     // Not answering. Kill what can be killed and do NOT
                     // wait on it — a child wedged in the kernel never reaps.
@@ -215,7 +218,8 @@ fn probe_on_thread(path: &Path) -> bool {
     std::thread::spawn(move || {
         let _ = tx.send(std::fs::metadata(&probe).is_ok());
     });
-    rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap_or(false)
+    rx.recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap_or(false)
 }
 
 fn require_online(def: &VirtualSourceDef, mount: &Path) -> Result<()> {
@@ -420,7 +424,10 @@ pub fn query(
     let sidecar = sidecar_of(&def)?;
     let (vault_locked, _) = state.store.vault_status();
     if vault_locked && state.store.source_has_private(&def.name)? {
-        bail!("{}'s numbers are vault-locked (the source contains private material)", def.name);
+        bail!(
+            "{}'s numbers are vault-locked (the source contains private material)",
+            def.name
+        );
     }
     crate::health_index::query(&sidecar, sql, max_rows)
 }
@@ -450,7 +457,9 @@ pub fn promote(
     let content = fetch(&def, path, budget)?;
     let trust = trust_of(&def);
     let is_mail = def.adapter == "mbox";
-    let kind = kind.unwrap_or(if is_mail { "email" } else { "file" }).to_string();
+    let kind = kind
+        .unwrap_or(if is_mail { "email" } else { "file" })
+        .to_string();
     let (title, event_time) = if is_mail {
         email_meta(&content, path)
     } else {
@@ -601,7 +610,11 @@ fn email_meta(content: &str, path: &str) -> (String, EventTime) {
 }
 
 fn title_of(path: &str, content: &str) -> String {
-    let base = path.trim_end_matches('/').rsplit('/').next().unwrap_or(path);
+    let base = path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(path);
     if !base.is_empty() {
         return base.to_string();
     }
@@ -638,7 +651,10 @@ mod tests {
             "a/./../../b",
             "/../etc/passwd",
         ] {
-            assert!(safe_join(mount, escape).is_err(), "{escape:?} must be refused");
+            assert!(
+                safe_join(mount, escape).is_err(),
+                "{escape:?} must be refused"
+            );
         }
         // Absolute-path smuggling: joining must never yield a path
         // outside the mount even when the input starts absolute.
@@ -785,7 +801,10 @@ mod tests {
         assert!(section.contains("hearthfs"));
         assert!(section.contains("vsearch"));
         assert!(section.contains("vfetch"));
-        assert!(!section.contains("OFFLINE"), "live mount must not be flagged");
+        assert!(
+            !section.contains("OFFLINE"),
+            "live mount must not be flagged"
+        );
     }
 
     #[test]
@@ -843,8 +862,7 @@ mod tests {
         };
 
         // No private health episodes: vquery works even vault-locked.
-        let (cols, rows) =
-            query(&state, "apple-health", "SELECT day, avg FROM daily", 10).unwrap();
+        let (cols, rows) = query(&state, "apple-health", "SELECT day, avg FROM daily", 10).unwrap();
         assert_eq!(cols, vec!["day", "avg"]);
         assert_eq!(rows.len(), 1);
 
@@ -853,7 +871,10 @@ mod tests {
 
         // vsearch/vfetch point at vquery instead.
         let def = resolve(&state, "apple-health").unwrap();
-        assert!(search(&def, "x", 5).unwrap_err().to_string().contains("vquery"));
+        assert!(search(&def, "x", 5)
+            .unwrap_err()
+            .to_string()
+            .contains("vquery"));
 
         // One private episode from this source → the handle locks with
         // the vault, and unlocks with it.
@@ -942,7 +963,11 @@ mod tests {
         assert_eq!(episode.title, "sailing plans");
         assert_eq!(episode.source, "gmail-archive");
         assert!(
-            episode.event_time.as_deref().unwrap_or("").starts_with("2026-01-05"),
+            episode
+                .event_time
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("2026-01-05"),
             "promoted email carries its Date, got {:?}",
             episode.event_time
         );
@@ -956,7 +981,11 @@ mod tests {
             "sail1@x",
         );
         assert_eq!(title, "sailing plans");
-        assert!(time.utc.as_deref().unwrap_or("").starts_with("2026-01-05"), "got {:?}", time.utc);
+        assert!(
+            time.utc.as_deref().unwrap_or("").starts_with("2026-01-05"),
+            "got {:?}",
+            time.utc
+        );
         // Missing headers still fall back.
         assert_eq!(email_meta("\nbody", "m@x").0, "mail m@x");
     }

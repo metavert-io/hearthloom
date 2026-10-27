@@ -47,7 +47,9 @@ fn expand(p: &str) -> String {
 }
 
 fn plist_path() -> PathBuf {
-    PathBuf::from(home_path(&format!("Library/LaunchAgents/{AGENT_LABEL}.plist")))
+    PathBuf::from(home_path(&format!(
+        "Library/LaunchAgents/{AGENT_LABEL}.plist"
+    )))
 }
 
 fn uid() -> String {
@@ -92,7 +94,10 @@ pub fn hearthfs_status(state: &AppState) -> Result<HearthfsStatus> {
     let (registered, enabled, source_dir, port, binary_cfg) = match &def {
         Some(d) => (
             true,
-            d.config.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true),
+            d.config
+                .get("enabled")
+                .and_then(|e| e.as_bool())
+                .unwrap_or(true),
             d.config
                 .get("source_dir")
                 .and_then(|s| s.as_str())
@@ -126,7 +131,8 @@ pub fn hearthfs_status(state: &AppState) -> Result<HearthfsStatus> {
                 .unwrap_or(false);
             let _ = tx.send(alive);
         });
-        rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap_or(false)
+        rx.recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap_or(false)
     };
     let manual_command = match (&binary, &source_dir) {
         (Some(b), Some(s)) => Some(format!("{b} mount {s} {mountpoint} --port {port}")),
@@ -186,11 +192,12 @@ pub fn hearthfs_enable(
         bail!("source directory {source:?} does not exist — pick the folder HearthFS should index");
     }
     let port = port.unwrap_or(DEFAULT_PORT);
-    let binary = find_binary(binary)
-        .ok_or_else(|| anyhow!(
+    let binary = find_binary(binary).ok_or_else(|| {
+        anyhow!(
             "no hearthfs binary found (looked in HEARTHFS_BIN, ~/.local/bin and \
              ~/.cargo/bin) — install HearthFS first, or set HEARTHFS_BIN"
-        ))?;
+        )
+    })?;
     save_config(state, actor, &source, port, Some(&binary), true)?;
 
     let mountpoint = expand(MOUNTPOINT);
@@ -231,7 +238,9 @@ pub fn hearthfs_enable(
     let _ = Command::new("launchctl")
         .args(["bootout", &format!("gui/{uid}/{AGENT_LABEL}")])
         .output();
-    let _ = Command::new(&binary).args(["unmount", &mountpoint]).output();
+    let _ = Command::new(&binary)
+        .args(["unmount", &mountpoint])
+        .output();
     let boot = Command::new("launchctl")
         .args(["bootstrap", &format!("gui/{uid}"), &path.to_string_lossy()])
         .output()
@@ -314,7 +323,9 @@ pub async fn validate_endpoint(base_url: &str, key: &str) -> Result<()> {
 }
 
 pub fn provider_configured(provider: &str) -> bool {
-    std::env::var(provider_key_env(provider)).map(|k| !k.trim().is_empty()).unwrap_or(false)
+    std::env::var(provider_key_env(provider))
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false)
 }
 
 /// Back-compat shim (the old dashboard route).
@@ -336,14 +347,19 @@ pub async fn validate_key(provider: &str, key: &str) -> Result<()> {
             .get("https://api.anthropic.com/v1/models")
             .header("x-api-key", key)
             .header("anthropic-version", "2023-06-01"),
-        "openai" => client.get("https://api.openai.com/v1/models").bearer_auth(key),
+        "openai" => client
+            .get("https://api.openai.com/v1/models")
+            .bearer_auth(key),
         "grok" => client.get("https://api.x.ai/v1/models").bearer_auth(key),
         "gemini" => client
             .get("https://generativelanguage.googleapis.com/v1beta/models")
             .header("x-goog-api-key", key),
         other => bail!("unknown provider {other}"),
     };
-    let res = req.send().await.map_err(|e| anyhow!("couldn't reach {provider} to validate: {e}"))?;
+    let res = req
+        .send()
+        .await
+        .map_err(|e| anyhow!("couldn't reach {provider} to validate: {e}"))?;
     match res.status().as_u16() {
         401 | 403 => bail!("{provider} rejected that key — check it and try again"),
         s if (200..300).contains(&s) => Ok(()),
@@ -352,9 +368,16 @@ pub async fn validate_key(provider: &str, key: &str) -> Result<()> {
 }
 
 /// Persist a provider's API key (seal-aware; survives the sealed regime).
-pub async fn set_provider_key(home: &hearthloom_core::Home, provider: &str, key: &str) -> Result<()> {
+pub async fn set_provider_key(
+    home: &hearthloom_core::Home,
+    provider: &str,
+    key: &str,
+) -> Result<()> {
     validate_key(provider, key).await?;
-    hearthloom_core::secrets::set_env_vars(home.root(), &[(provider_key_env(provider), key.trim())])?;
+    hearthloom_core::secrets::set_env_vars(
+        home.root(),
+        &[(provider_key_env(provider), key.trim())],
+    )?;
     Ok(())
 }
 

@@ -85,8 +85,14 @@ pub struct StoredMovement {
     pub attrs: Value,
 }
 
-pub const MOVEMENT_MODES: &[&str] =
-    &["walking", "running", "cycling", "automotive", "stationary", "drive"];
+pub const MOVEMENT_MODES: &[&str] = &[
+    "walking",
+    "running",
+    "cycling",
+    "automotive",
+    "stationary",
+    "drive",
+];
 
 /// Per-car attribution settings.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -115,7 +121,8 @@ pub const SCOPES: &[&str] = &["work", "personal", "family", "health", "private"]
 pub const ASK_CAP_PER_WEEK: i64 = 3;
 
 fn day_of(t: &str, tz_offset_minutes: i32) -> Result<String> {
-    let at = chrono::DateTime::parse_from_rfc3339(t).map_err(|_| anyhow!("time must be RFC3339: {t:?}"))?;
+    let at = chrono::DateTime::parse_from_rfc3339(t)
+        .map_err(|_| anyhow!("time must be RFC3339: {t:?}"))?;
     let local = at.timestamp() + tz_offset_minutes as i64 * 60;
     chrono::DateTime::from_timestamp(local, 0)
         .map(|dt| dt.format("%Y-%m-%d").to_string())
@@ -214,7 +221,11 @@ impl Store {
                             attrs.to_string(), day, actor, now_utc()
                         ],
                     )?;
-                    if changed == 1 { accepted += 1 } else { duplicates += 1 }
+                    if changed == 1 {
+                        accepted += 1
+                    } else {
+                        duplicates += 1
+                    }
                 }
                 tx.commit()?;
             }
@@ -248,7 +259,8 @@ impl Store {
              ORDER BY d.day",
         )?;
         let rows = stmt.query_map([today_local], |row| row.get(0))?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// Every movement of one local day, time-ordered.
@@ -258,7 +270,8 @@ impl Store {
             "SELECT {MOVEMENT_COLS} FROM movement_observation WHERE day = ?1 ORDER BY t_start"
         ))?;
         let rows = stmt.query_map([day], row_to_movement)?;
-        rows.collect::<std::result::Result<_, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
     }
 
     /// Has the person's phone reported ANY motion since `since`? Without
@@ -289,7 +302,13 @@ impl Store {
         Ok(row.map(|(fp, minted)| (fp, serde_json::from_str(&minted).unwrap_or_default())))
     }
 
-    pub fn set_trip_day_state(&self, day: &str, obs_count: i64, fingerprint: &str, minted: &[String]) -> Result<()> {
+    pub fn set_trip_day_state(
+        &self,
+        day: &str,
+        obs_count: i64,
+        fingerprint: &str,
+        minted: &[String],
+    ) -> Result<()> {
         let conn = self.lock();
         conn.execute(
             "INSERT INTO trip_day (day, obs_count, fingerprint, minted, dirty, minted_at)
@@ -297,7 +316,13 @@ impl Store {
              ON CONFLICT(day) DO UPDATE SET obs_count=excluded.obs_count,
                  fingerprint=excluded.fingerprint, minted=excluded.minted,
                  dirty=0, minted_at=excluded.minted_at",
-            rusqlite::params![day, obs_count, fingerprint, serde_json::to_string(minted)?, now_utc()],
+            rusqlite::params![
+                day,
+                obs_count,
+                fingerprint,
+                serde_json::to_string(minted)?,
+                now_utc()
+            ],
         )?;
         Ok(())
     }
@@ -316,7 +341,10 @@ impl Store {
                AND superseded_by NOT LIKE 'retired:%'",
             [&ids],
         )?;
-        let absorbed_by = intended.first().cloned().unwrap_or_else(|| format!("trips:none:{day}"));
+        let absorbed_by = intended
+            .first()
+            .cloned()
+            .unwrap_or_else(|| format!("trips:none:{day}"));
         n += tx.execute(
             "UPDATE episodes SET superseded_by = ?3
              WHERE source = 'trips' AND superseded_by IS NULL
@@ -398,7 +426,8 @@ impl Store {
             "SELECT source_ref FROM location_observation WHERE source = 'trips' AND day = ?1",
         )?;
         let rows = stmt.query_map([day], |row| row.get(0))?;
-        rows.collect::<std::result::Result<_, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
     }
 
     /* ————— vehicle profiles ————— */
@@ -406,7 +435,12 @@ impl Store {
     /// Make sure a car has a profile (defaults: decide by phone evidence,
     /// you drive when aboard, others' drives are `family`, ask on Tend).
     /// Never overwrites the user's settings; refreshes name/descriptor.
-    pub fn vehicle_profile_ensure(&self, vehicle: &str, name: &str, descriptor: &Value) -> Result<()> {
+    pub fn vehicle_profile_ensure(
+        &self,
+        vehicle: &str,
+        name: &str,
+        descriptor: &Value,
+    ) -> Result<()> {
         let conn = self.lock();
         let existing: Option<(String, String)> = conn
             .query_row(
@@ -438,9 +472,12 @@ impl Store {
 
     pub fn vehicle_profiles(&self) -> Result<Vec<VehicleProfile>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(&format!("SELECT {PROFILE_COLS} FROM vehicle_profile ORDER BY name"))?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {PROFILE_COLS} FROM vehicle_profile ORDER BY name"
+        ))?;
         let rows = stmt.query_map([], profile_from_row)?;
-        rows.collect::<std::result::Result<_, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
     }
 
     pub fn vehicle_profile(&self, vehicle: &str) -> Result<Option<VehicleProfile>> {
@@ -481,8 +518,13 @@ impl Store {
             "UPDATE vehicle_profile SET attribution = ?2, aboard_driver = ?3, household = ?4,
                  others_scope = ?5, ask = ?6, updated_at = ?7 WHERE vehicle = ?1",
             rusqlite::params![
-                p.vehicle, p.attribution, driver, serde_json::to_string(&household)?,
-                p.others_scope, p.ask as i64, now_utc()
+                p.vehicle,
+                p.attribution,
+                driver,
+                serde_json::to_string(&household)?,
+                p.others_scope,
+                p.ask as i64,
+                now_utc()
             ],
         )?;
         if n == 0 {
@@ -513,10 +555,20 @@ impl Store {
 
     /// Ask about a drive unless already asked, answered or dismissed, and
     /// under the per-car weekly cap. Returns whether a question opened.
-    pub fn trip_question_open(&self, key: &str, vehicle: &str, day: &str, summary: &str) -> Result<bool> {
+    pub fn trip_question_open(
+        &self,
+        key: &str,
+        vehicle: &str,
+        day: &str,
+        summary: &str,
+    ) -> Result<bool> {
         let conn = self.lock();
         let exists: Option<i64> = conn
-            .query_row("SELECT 1 FROM trip_attribution WHERE key = ?1", [key], |row| row.get(0))
+            .query_row(
+                "SELECT 1 FROM trip_attribution WHERE key = ?1",
+                [key],
+                |row| row.get(0),
+            )
             .optional()?;
         if exists.is_some() {
             return Ok(false);
@@ -553,9 +605,15 @@ impl Store {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let day: Option<String> = tx
-            .query_row("SELECT day FROM trip_attribution WHERE key = ?1", [key], |row| row.get(0))
+            .query_row(
+                "SELECT day FROM trip_attribution WHERE key = ?1",
+                [key],
+                |row| row.get(0),
+            )
             .optional()?;
-        let Some(day) = day else { bail!("no question {key:?}") };
+        let Some(day) = day else {
+            bail!("no question {key:?}")
+        };
         let now = now_utc();
         tx.execute(
             "UPDATE trip_attribution SET status = ?2, answer = ?3, answered_at = ?4, updated_at = ?4 WHERE key = ?1",
@@ -584,12 +642,17 @@ impl Store {
                 "vehicle_name": row.get::<_, Option<String>>(5)?,
             }))
         })?;
-        rows.collect::<std::result::Result<_, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
     }
 
     pub fn trip_questions_pending_count(&self) -> Result<i64> {
         let conn = self.lock();
-        Ok(conn.query_row("SELECT COUNT(*) FROM trip_attribution WHERE status = 'pending'", [], |row| row.get(0))?)
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM trip_attribution WHERE status = 'pending'",
+            [],
+            |row| row.get(0),
+        )?)
     }
 
     /* ————— peer sync ————— */
@@ -617,7 +680,13 @@ impl Store {
             })?
             .collect::<std::result::Result<_, _>>()?;
         drop(stmt);
-        let next = super::page_cursor(&conn, "synced_at", "FROM movement_observation WHERE synced_at > ?1", since, limit)?;
+        let next = super::page_cursor(
+            &conn,
+            "synced_at",
+            "FROM movement_observation WHERE synced_at > ?1",
+            since,
+            limit,
+        )?;
         Ok(json!({ "items": items, "next": next }))
     }
 
@@ -625,15 +694,39 @@ impl Store {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let mut applied = 0usize;
-        for r in batch.get("items").and_then(|v| v.as_array()).into_iter().flatten() {
+        for r in batch
+            .get("items")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
             let s = |k: &str| r.get(k).and_then(|v| v.as_str());
             let f = |k: &str| r.get(k).and_then(|v| v.as_f64());
-            let (Some(id), Some(source), Some(source_ref), Some(subject), Some(mode), Some(t_start), Some(t_end), Some(day)) = (
-                s("id"), s("source"), s("source_ref"), s("subject"), s("mode"), s("t_start"), s("t_end"), s("day"),
-            ) else {
+            let (
+                Some(id),
+                Some(source),
+                Some(source_ref),
+                Some(subject),
+                Some(mode),
+                Some(t_start),
+                Some(t_end),
+                Some(day),
+            ) = (
+                s("id"),
+                s("source"),
+                s("source_ref"),
+                s("subject"),
+                s("mode"),
+                s("t_start"),
+                s("t_end"),
+                s("day"),
+            )
+            else {
                 continue;
             };
-            if !(subject == "me" || subject.starts_with("vehicle:")) || !MOVEMENT_MODES.contains(&mode) {
+            if !(subject == "me" || subject.starts_with("vehicle:"))
+                || !MOVEMENT_MODES.contains(&mode)
+            {
                 continue;
             }
             applied += tx.execute(
@@ -643,12 +736,30 @@ impl Store {
                       start_place, end_place, distance_m, attrs, day, actor, ingest_time)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
                 rusqlite::params![
-                    id, source, source_ref, subject, mode, t_start, t_end,
-                    r.get("tz_offset_minutes").and_then(|v| v.as_i64()).unwrap_or(0),
-                    f("start_lat"), f("start_lon"), f("end_lat"), f("end_lon"),
-                    s("start_place"), s("end_place"), f("distance_m"),
-                    r.get("attrs").cloned().unwrap_or_else(|| json!({})).to_string(),
-                    day, s("actor").unwrap_or("peer"), now_utc()
+                    id,
+                    source,
+                    source_ref,
+                    subject,
+                    mode,
+                    t_start,
+                    t_end,
+                    r.get("tz_offset_minutes")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    f("start_lat"),
+                    f("start_lon"),
+                    f("end_lat"),
+                    f("end_lon"),
+                    s("start_place"),
+                    s("end_place"),
+                    f("distance_m"),
+                    r.get("attrs")
+                        .cloned()
+                        .unwrap_or_else(|| json!({}))
+                        .to_string(),
+                    day,
+                    s("actor").unwrap_or("peer"),
+                    now_utc()
                 ],
             )?;
         }
@@ -685,8 +796,20 @@ impl Store {
             })?
             .collect::<std::result::Result<_, _>>()?;
         drop(stmt);
-        let a = super::page_cursor(&conn, "synced_at", "FROM vehicle_profile WHERE synced_at > ?1", since, limit)?;
-        let b = super::page_cursor(&conn, "synced_at", "FROM trip_attribution WHERE synced_at > ?1", since, limit)?;
+        let a = super::page_cursor(
+            &conn,
+            "synced_at",
+            "FROM vehicle_profile WHERE synced_at > ?1",
+            since,
+            limit,
+        )?;
+        let b = super::page_cursor(
+            &conn,
+            "synced_at",
+            "FROM trip_attribution WHERE synced_at > ?1",
+            since,
+            limit,
+        )?;
         // the slower table bounds the cursor so neither skips rows
         let next = match (profiles.len() >= limit, answers.len() >= limit) {
             (true, true) => a.min(b),
@@ -703,10 +826,21 @@ impl Store {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let mut applied = 0usize;
-        for p in batch.get("profiles").and_then(|v| v.as_array()).into_iter().flatten() {
-            let Ok(p) = serde_json::from_value::<VehicleProfile>(p.clone()) else { continue };
+        for p in batch
+            .get("profiles")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let Ok(p) = serde_json::from_value::<VehicleProfile>(p.clone()) else {
+                continue;
+            };
             let local: Option<String> = tx
-                .query_row("SELECT updated_at FROM vehicle_profile WHERE vehicle = ?1", [&p.vehicle], |row| row.get(0))
+                .query_row(
+                    "SELECT updated_at FROM vehicle_profile WHERE vehicle = ?1",
+                    [&p.vehicle],
+                    |row| row.get(0),
+                )
                 .optional()?;
             if local.as_deref().is_some_and(|l| l >= p.updated_at.as_str()) {
                 continue;
@@ -730,11 +864,20 @@ impl Store {
                 [&p.vehicle],
             )?;
         }
-        for a in batch.get("answers").and_then(|v| v.as_array()).into_iter().flatten() {
+        for a in batch
+            .get("answers")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
             let s = |k: &str| a.get(k).and_then(|v| v.as_str());
-            let (Some(key), Some(vehicle), Some(day), Some(status), Some(updated_at)) =
-                (s("key"), s("vehicle"), s("day"), s("status"), s("updated_at"))
-            else {
+            let (Some(key), Some(vehicle), Some(day), Some(status), Some(updated_at)) = (
+                s("key"),
+                s("vehicle"),
+                s("day"),
+                s("status"),
+                s("updated_at"),
+            ) else {
                 continue;
             };
             let local: Option<(String, String)> = tx
@@ -805,12 +948,52 @@ mod tests {
     fn test_movements_idempotent_and_validated() {
         let (s, _t) = store();
         let v = "vehicle:htesla:abc";
-        let rows = [mv("d1", "drive", "2026-10-20T12:00:00Z", "2026-10-20T12:30:00Z")];
-        assert_eq!(s.movements_add("plugin:htesla", v, "plugin:htesla", &rows).unwrap(), (1, 0));
-        assert_eq!(s.movements_add("plugin:htesla", v, "plugin:htesla", &rows).unwrap(), (0, 1));
-        assert!(s.movements_add("x", "someone", "a", &rows).is_err(), "subject vocabulary");
-        assert!(s.movements_add("x", "me", "a", &[mv("k", "teleport", "2026-10-20T12:00:00Z", "2026-10-20T12:01:00Z")]).is_err());
-        assert!(s.movements_add("x", "me", "a", &[mv("k", "walking", "2026-10-20T12:00:00Z", "2026-10-20T11:00:00Z")]).is_err());
+        let rows = [mv(
+            "d1",
+            "drive",
+            "2026-10-20T12:00:00Z",
+            "2026-10-20T12:30:00Z",
+        )];
+        assert_eq!(
+            s.movements_add("plugin:htesla", v, "plugin:htesla", &rows)
+                .unwrap(),
+            (1, 0)
+        );
+        assert_eq!(
+            s.movements_add("plugin:htesla", v, "plugin:htesla", &rows)
+                .unwrap(),
+            (0, 1)
+        );
+        assert!(
+            s.movements_add("x", "someone", "a", &rows).is_err(),
+            "subject vocabulary"
+        );
+        assert!(s
+            .movements_add(
+                "x",
+                "me",
+                "a",
+                &[mv(
+                    "k",
+                    "teleport",
+                    "2026-10-20T12:00:00Z",
+                    "2026-10-20T12:01:00Z"
+                )]
+            )
+            .is_err());
+        assert!(s
+            .movements_add(
+                "x",
+                "me",
+                "a",
+                &[mv(
+                    "k",
+                    "walking",
+                    "2026-10-20T12:00:00Z",
+                    "2026-10-20T11:00:00Z"
+                )]
+            )
+            .is_err());
         let day = s.movements_for_day("2026-10-20").unwrap();
         assert_eq!(day.len(), 1);
         assert_eq!(day[0].subject, v);
@@ -819,40 +1002,117 @@ mod tests {
     #[test]
     fn test_days_need_a_vehicle_and_regrow() {
         let (s, _t) = store();
-        s.movements_add("ios-motion", "me", "a", &[mv("p1", "automotive", "2026-10-20T12:00:00Z", "2026-10-20T12:30:00Z")]).unwrap();
-        assert!(s.movement_days_needing_trips("2026-10-22").unwrap().is_empty(), "phone-only days stay the phone's");
-        s.movements_add("plugin:htesla", "vehicle:htesla:a", "a", &[mv("d1", "drive", "2026-10-20T12:01:00Z", "2026-10-20T12:29:00Z")]).unwrap();
-        assert_eq!(s.movement_days_needing_trips("2026-10-22").unwrap(), vec!["2026-10-20"]);
-        assert!(s.movement_days_needing_trips("2026-10-20").unwrap().is_empty(), "today isn't closed");
+        s.movements_add(
+            "ios-motion",
+            "me",
+            "a",
+            &[mv(
+                "p1",
+                "automotive",
+                "2026-10-20T12:00:00Z",
+                "2026-10-20T12:30:00Z",
+            )],
+        )
+        .unwrap();
+        assert!(
+            s.movement_days_needing_trips("2026-10-22")
+                .unwrap()
+                .is_empty(),
+            "phone-only days stay the phone's"
+        );
+        s.movements_add(
+            "plugin:htesla",
+            "vehicle:htesla:a",
+            "a",
+            &[mv(
+                "d1",
+                "drive",
+                "2026-10-20T12:01:00Z",
+                "2026-10-20T12:29:00Z",
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            s.movement_days_needing_trips("2026-10-22").unwrap(),
+            vec!["2026-10-20"]
+        );
+        assert!(
+            s.movement_days_needing_trips("2026-10-20")
+                .unwrap()
+                .is_empty(),
+            "today isn't closed"
+        );
         s.set_trip_day_state("2026-10-20", 2, "fp", &[]).unwrap();
-        assert!(s.movement_days_needing_trips("2026-10-22").unwrap().is_empty());
-        s.movements_add("ios-motion", "me", "a", &[mv("p2", "walking", "2026-10-20T13:00:00Z", "2026-10-20T13:10:00Z")]).unwrap();
-        assert_eq!(s.movement_days_needing_trips("2026-10-22").unwrap(), vec!["2026-10-20"], "a new input re-opens");
+        assert!(s
+            .movement_days_needing_trips("2026-10-22")
+            .unwrap()
+            .is_empty());
+        s.movements_add(
+            "ios-motion",
+            "me",
+            "a",
+            &[mv(
+                "p2",
+                "walking",
+                "2026-10-20T13:00:00Z",
+                "2026-10-20T13:10:00Z",
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            s.movement_days_needing_trips("2026-10-22").unwrap(),
+            vec!["2026-10-20"],
+            "a new input re-opens"
+        );
     }
 
     #[test]
     fn test_profile_defaults_edits_and_lww_sync() {
         let (a, _ta) = store();
         let (b, _tb) = store();
-        a.vehicle_profile_ensure("vehicle:htesla:a", "Model Y", &json!({"make": "Tesla"})).unwrap();
+        a.vehicle_profile_ensure("vehicle:htesla:a", "Model Y", &json!({"make": "Tesla"}))
+            .unwrap();
         let p = a.vehicle_profile("vehicle:htesla:a").unwrap().unwrap();
-        assert_eq!((p.attribution.as_str(), p.aboard_driver.as_str(), p.others_scope.as_str(), p.ask),
-                   ("phone", "me", "family", true));
+        assert_eq!(
+            (
+                p.attribution.as_str(),
+                p.aboard_driver.as_str(),
+                p.others_scope.as_str(),
+                p.ask
+            ),
+            ("phone", "me", "family", true)
+        );
         let mut edit = p.clone();
         edit.household = vec!["Alex".into(), " ".into()];
         edit.others_scope = "private".into();
         a.vehicle_profile_set(&edit).unwrap();
-        assert!(a.vehicle_profile_set(&VehicleProfile { attribution: "maybe".into(), ..edit.clone() }).is_err());
+        assert!(a
+            .vehicle_profile_set(&VehicleProfile {
+                attribution: "maybe".into(),
+                ..edit.clone()
+            })
+            .is_err());
         // ensure never clobbers settings
-        a.vehicle_profile_ensure("vehicle:htesla:a", "Model Y", &json!({"make": "Tesla"})).unwrap();
+        a.vehicle_profile_ensure("vehicle:htesla:a", "Model Y", &json!({"make": "Tesla"}))
+            .unwrap();
         let p = a.vehicle_profile("vehicle:htesla:a").unwrap().unwrap();
         assert_eq!(p.household, vec!["Alex".to_string()]);
         assert_eq!(p.others_scope, "private");
         // sync to b
         let page = a.vehicles_since("", 100).unwrap();
         assert_eq!(b.vehicles_apply(&page).unwrap(), 1);
-        assert_eq!(b.vehicle_profile("vehicle:htesla:a").unwrap().unwrap().others_scope, "private");
-        assert_eq!(b.vehicles_apply(&page).unwrap(), 0, "unchanged rows don't count");
+        assert_eq!(
+            b.vehicle_profile("vehicle:htesla:a")
+                .unwrap()
+                .unwrap()
+                .others_scope,
+            "private"
+        );
+        assert_eq!(
+            b.vehicles_apply(&page).unwrap(),
+            0,
+            "unchanged rows don't count"
+        );
     }
 
     #[test]
@@ -862,28 +1122,66 @@ mod tests {
         let v = "vehicle:htesla:a";
         a.vehicle_profile_ensure(v, "Model Y", &json!({})).unwrap();
         for i in 0..5 {
-            a.trip_question_open(&format!("k{i}"), v, "2026-10-20", "a drive").unwrap();
+            a.trip_question_open(&format!("k{i}"), v, "2026-10-20", "a drive")
+                .unwrap();
         }
-        assert_eq!(a.trip_questions_pending_count().unwrap(), ASK_CAP_PER_WEEK, "weekly cap");
-        assert!(!a.trip_question_open("k0", v, "2026-10-20", "again").unwrap(), "asked once");
-        a.movements_add("plugin:htesla", v, "a", &[mv("k0", "drive", "2026-10-20T12:00:00Z", "2026-10-20T12:30:00Z")]).unwrap();
+        assert_eq!(
+            a.trip_questions_pending_count().unwrap(),
+            ASK_CAP_PER_WEEK,
+            "weekly cap"
+        );
+        assert!(
+            !a.trip_question_open("k0", v, "2026-10-20", "again")
+                .unwrap(),
+            "asked once"
+        );
+        a.movements_add(
+            "plugin:htesla",
+            v,
+            "a",
+            &[mv(
+                "k0",
+                "drive",
+                "2026-10-20T12:00:00Z",
+                "2026-10-20T12:30:00Z",
+            )],
+        )
+        .unwrap();
         a.set_trip_day_state("2026-10-20", 1, "fp", &[]).unwrap();
-        assert!(a.movement_days_needing_trips("2026-10-22").unwrap().is_empty());
+        assert!(a
+            .movement_days_needing_trips("2026-10-22")
+            .unwrap()
+            .is_empty());
         a.trip_question_answer("k0", "no").unwrap();
         assert_eq!(a.trip_answer("k0").unwrap().as_deref(), Some("not_me"));
-        assert_eq!(a.movement_days_needing_trips("2026-10-22").unwrap(), vec!["2026-10-20"], "an answer re-opens the day");
+        assert_eq!(
+            a.movement_days_needing_trips("2026-10-22").unwrap(),
+            vec!["2026-10-20"],
+            "an answer re-opens the day"
+        );
         assert!(a.trip_question_answer("k1", "perhaps").is_err());
-        b.vehicles_apply(&a.vehicles_since("", 100).unwrap()).unwrap();
-        assert_eq!(b.trip_answer("k0").unwrap().as_deref(), Some("not_me"), "answers sync");
+        b.vehicles_apply(&a.vehicles_since("", 100).unwrap())
+            .unwrap();
+        assert_eq!(
+            b.trip_answer("k0").unwrap().as_deref(),
+            Some("not_me"),
+            "answers sync"
+        );
     }
 
     #[test]
     fn test_movements_sync_roundtrip() {
         let (a, _ta) = store();
         let (b, _tb) = store();
-        let mut d = mv("d1", "drive", "2026-10-20T12:00:00Z", "2026-10-20T12:30:00Z");
+        let mut d = mv(
+            "d1",
+            "drive",
+            "2026-10-20T12:00:00Z",
+            "2026-10-20T12:30:00Z",
+        );
         d.attrs = Some(json!({"energy_kwh": 3.2}));
-        a.movements_add("plugin:htesla", "vehicle:htesla:a", "plugin:htesla", &[d]).unwrap();
+        a.movements_add("plugin:htesla", "vehicle:htesla:a", "plugin:htesla", &[d])
+            .unwrap();
         let page = a.movements_since("", 100).unwrap();
         assert_eq!(b.movements_apply(&page).unwrap(), 1);
         assert_eq!(b.movements_apply(&page).unwrap(), 0);

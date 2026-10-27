@@ -38,8 +38,9 @@ fn friend_conn(state: &AppState, friend: &str) -> Result<(String, String)> {
         .iter()
         .find(|(n, _, _)| n == friend)
         .ok_or_else(|| anyhow!("no connected brain named {friend:?}"))?;
-    let key = crate::network_keys::friend_key(friend)
-        .ok_or_else(|| anyhow!("the key for {friend:?} is missing — reconnect on the Network page"))?;
+    let key = crate::network_keys::friend_key(friend).ok_or_else(|| {
+        anyhow!("the key for {friend:?} is missing — reconnect on the Network page")
+    })?;
     Ok((url.clone(), key))
 }
 
@@ -86,7 +87,9 @@ pub fn search(state: &AppState, friend: &str, query: &str) -> Result<String> {
         .cloned()
         .unwrap_or_default();
     if hits.is_empty() {
-        return Ok(format!("no hits from {friend}'s brain (within what they share)"));
+        return Ok(format!(
+            "no hits from {friend}'s brain (within what they share)"
+        ));
     }
     let lines: Vec<String> = hits
         .iter()
@@ -142,7 +145,9 @@ fn post_json(state: &AppState, friend: &str, path: &str, body: &Value) -> Result
             let msg: Value = res.json().unwrap_or_default();
             return Err(anyhow!(
                 "their brain refused: {}",
-                msg.get("error").and_then(|e| e.as_str()).unwrap_or("unknown")
+                msg.get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("unknown")
             ));
         }
         Ok(res.json()?)
@@ -150,7 +155,11 @@ fn post_json(state: &AppState, friend: &str, path: &str, body: &Value) -> Result
 }
 
 pub fn tasks(state: &AppState, friend: &str, status: &str) -> Result<Value> {
-    get_json(state, friend, &format!("/v1/network/tasks?status={}", urlencoding_encode(status)))
+    get_json(
+        state,
+        friend,
+        &format!("/v1/network/tasks?status={}", urlencoding_encode(status)),
+    )
 }
 
 pub fn relationships(state: &AppState, friend: &str) -> Result<Value> {
@@ -162,7 +171,11 @@ pub fn notes(state: &AppState, friend: &str) -> Result<Value> {
 }
 
 pub fn note(state: &AppState, friend: &str, id: &str) -> Result<Value> {
-    get_json(state, friend, &format!("/v1/network/note/{}", urlencoding_encode(id)))
+    get_json(
+        state,
+        friend,
+        &format!("/v1/network/note/{}", urlencoding_encode(id)),
+    )
 }
 
 pub fn shared(state: &AppState, friend: &str) -> Result<Value> {
@@ -249,7 +262,9 @@ pub fn ensure_friend_card(state: &AppState, friend: &str) -> Result<Value> {
         None,
     );
     if existing_entity.as_deref() != Some(entity_id.as_str()) {
-        state.store.set_friend(&actor, friend, &url, Some(&entity_id))?;
+        state
+            .store
+            .set_friend(&actor, friend, &url, Some(&entity_id))?;
     }
     Ok(serde_json::json!({
         "friend": friend, "entity": entity_id, "name": display_name,
@@ -275,15 +290,30 @@ pub fn scan_friend_activity(state: &AppState, friend: &str, bundle: &Value) -> u
     let first_look = prev.is_null();
     let mut snapshot = serde_json::Map::new();
     let mut notified = 0usize;
-    for t in bundle.get("tasks").and_then(|v| v.as_array()).into_iter().flatten() {
-        let Some(id) = t.get("id").and_then(|v| v.as_str()) else { continue };
-        let desc = t.get("description").and_then(|v| v.as_str()).unwrap_or("a task");
+    for t in bundle
+        .get("tasks")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let Some(id) = t.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let desc = t
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("a task");
         let status = t.get("status").and_then(|v| v.as_str()).unwrap_or("open");
         let done_items = t
             .get("payload")
             .and_then(|p| p.get("items"))
             .and_then(|i| i.as_array())
-            .map(|items| items.iter().filter(|i| i["done"] == serde_json::json!(true)).count())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|i| i["done"] == serde_json::json!(true))
+                    .count()
+            })
             .unwrap_or(0);
         let sig = format!("{status}:{done_items}");
         snapshot.insert(id.to_string(), serde_json::json!(sig));
@@ -293,7 +323,8 @@ pub fn scan_friend_activity(state: &AppState, friend: &str, bundle: &Value) -> u
         match prev.get(id).and_then(|v| v.as_str()) {
             None => {
                 crate::provisioner::notify_system(
-                    state, "info",
+                    state,
+                    "info",
                     &format!("{friend} shared a task with you"),
                     &format!("\"{desc}\" is now on your shared rail"),
                     Some(&format!("fshare:{friend}:{id}")),
@@ -307,7 +338,8 @@ pub fn scan_friend_activity(state: &AppState, friend: &str, bundle: &Value) -> u
                     format!("\"{desc}\" — {done_items} item(s) now done")
                 };
                 crate::provisioner::notify_system(
-                    state, "info",
+                    state,
+                    "info",
                     &format!("{friend}'s shared task changed"),
                     &msg,
                     Some(&format!("fact:{friend}:{id}:{sig}")),
@@ -317,15 +349,26 @@ pub fn scan_friend_activity(state: &AppState, friend: &str, bundle: &Value) -> u
             _ => {}
         }
     }
-    for n in bundle.get("notes").and_then(|v| v.as_array()).into_iter().flatten() {
-        let Some(id) = n.get("id").and_then(|v| v.as_str()) else { continue };
+    for n in bundle
+        .get("notes")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let Some(id) = n.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
         let key = format!("note:{id}");
         snapshot.insert(key.clone(), serde_json::json!("shared"));
         if !first_look && prev.get(&key).is_none() {
             crate::provisioner::notify_system(
-                state, "info",
+                state,
+                "info",
                 &format!("{friend} shared a note with you"),
-                &format!("\"{}\"", n.get("title").and_then(|v| v.as_str()).unwrap_or("a note")),
+                &format!(
+                    "\"{}\"",
+                    n.get("title").and_then(|v| v.as_str()).unwrap_or("a note")
+                ),
                 Some(&format!("fshare:{friend}:{id}")),
             );
             notified += 1;
@@ -355,7 +398,9 @@ pub fn refresh_peer_groups(state: &AppState, friend: &str) {
 }
 
 pub fn friend_activity_scan(state: &AppState) -> usize {
-    let Ok(friends) = state.store.friends() else { return 0 };
+    let Ok(friends) = state.store.friends() else {
+        return 0;
+    };
     let mut total = 0usize;
     for (name, _, _) in friends {
         if let Ok(bundle) = shared(state, &name) {

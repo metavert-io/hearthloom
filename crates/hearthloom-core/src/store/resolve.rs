@@ -74,7 +74,11 @@ impl Store {
             id: id.into(),
             kind: "task".into(),
             label: description,
-            sub: if status == "open" { String::new() } else { status },
+            sub: if status == "open" {
+                String::new()
+            } else {
+                status
+            },
             route: "task".into(),
             arg: id.into(),
         }))
@@ -95,7 +99,11 @@ impl Store {
             id: id.into(),
             kind: "goal".into(),
             label: name,
-            sub: if status == "active" { String::new() } else { status },
+            sub: if status == "active" {
+                String::new()
+            } else {
+                status
+            },
             route: "goal".into(),
             arg: id.into(),
         }))
@@ -118,7 +126,9 @@ impl Store {
             id: id.into(),
             kind: "note".into(),
             label: title,
-            sub: updated.map(|d| d[..10.min(d.len())].to_string()).unwrap_or_default(),
+            sub: updated
+                .map(|d| d[..10.min(d.len())].to_string())
+                .unwrap_or_default(),
             route: "note".into(),
             arg: id.into(),
         }))
@@ -135,7 +145,9 @@ impl Store {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let Some((name, entity_type)) = hit else { return Ok(None) };
+        let Some((name, entity_type)) = hit else {
+            return Ok(None);
+        };
         // Person/Org/Group open the person card; Place → Atlas-ish
         // Memories on the name; anything else → Memories search.
         let (kind, route, arg) = match entity_type.as_str() {
@@ -174,7 +186,9 @@ impl Store {
                 },
             )
             .optional()?;
-        let Some((source, kind, title, event_time, source_ref)) = hit else { return Ok(None) };
+        let Some((source, kind, title, event_time, source_ref)) = hit else {
+            return Ok(None);
+        };
         let day = event_time
             .as_deref()
             .map(|t| t[..10.min(t.len())].to_string())

@@ -6,100 +6,110 @@
 //! append-only `mutations` log with actor identity and an idempotency
 //! key; the change feed is a cursor over that log.
 
+mod agents;
 mod api_keys;
 mod ask;
 mod auth;
 mod brain_fs;
-mod network;
-mod sync;
-mod telemetry;
 mod browse;
 mod cascades;
 mod connections;
-mod galaxy;
+mod contacts;
+mod device_state;
 mod episodes;
-mod projects;
-mod resolve;
-mod locations;
+mod export_all;
+mod galaxy;
 mod graph;
+mod groups;
+mod health;
 mod ingest_apply;
 mod ingest_log;
 mod intents;
 mod lint;
-mod health;
-mod photo;
-mod privacy;
-mod sharing;
-mod groups;
-mod agents;
-mod quarantine;
-mod opportunities;
+mod llm_usage;
+mod locations;
+mod movements;
+mod network;
 mod notes;
 mod notifications;
+mod observations;
+mod opportunities;
+mod photo;
 mod plugins;
-mod verdicts;
-mod export_all;
+mod privacy;
+mod projects;
+mod quarantine;
 mod recall;
 mod relationships;
+mod resolve;
+mod retire;
 mod search;
 mod self_model;
+mod sharing;
+mod sync;
 mod tasks;
+mod telemetry;
 mod vectors;
-mod llm_usage;
-mod observations;
-mod contacts;
-mod device_state;
-mod movements;
-mod retire;
+mod verdicts;
 
-pub use browse::{
-    EdgeBrowseRow, EdgeFacets, EdgePage, EntityBrowseRow, EntityFacets, EntityPage,
-    EpisodeFacets, EpisodeFilter, EpisodePage, FacetCount, IdentityBrowseRow, IdentityFacets,
-    IdentityPage, SourceRow, VirtualSourceDef,
+pub use agents::{
+    decide, decide_all, AgentIn, AgentRow, AgentTaskRow, Decision, Policy, ACTION_CLASSES,
+    HARNESSES, PRESETS,
 };
-pub use connections::ConnectionUpsert;
-pub use episodes::{EpisodeRow, PendingExtraction};
-pub use health::{HealthSampleRow, StoredHealthSample};
-pub use photo::{keys_hash as photo_keys_hash, PhotoPointIn, StoredPhotoPoint};
-pub use observations::{ObservationIn, StoredObservation};
-pub use contacts::{ContactCardIn, PendingContact};
-pub use device_state::DeviceStateIn;
-pub use movements::{MovementIn, StoredMovement, VehicleProfile, ATTRIBUTION_MODES, MOVEMENT_MODES, SCOPES as MOVEMENT_SCOPES};
-pub use sharing::{EffectiveGrant, DEFAULT_FRIEND, SHAREABLE_KINDS, SHARE_CLASSES};
-pub use groups::{FriendAccess, GroupRow, GROUP_PREFIX};
-pub use agents::{decide, decide_all, AgentIn, AgentRow, AgentTaskRow, Decision, Policy, ACTION_CLASSES, HARNESSES, PRESETS};
-pub use notes::{NoteImport, NoteWriter, AGENT_ORIGIN, NATIVE_ORIGIN, RECIPE_KIND};
-pub use lint::ReviewInputs;
-pub use retire::{base_ref, RetireCounts, RetirementRow, RewriteJob, RETIRED_PREFIX, SUMMARY_KINDS};
-pub use graph::{
-    ClaimOutcome, DossierEdge, EntityDossier, EntityRow, MergeRecord, ReviewItem, TraverseHop,
+pub use api_keys::{
+    Access, ApiKeyClaims, ApiKeyRow, GrantVerdict, KeyGrants, API_KEY_SCOPES, REQUEST_WINDOW_SECS,
 };
-pub use api_keys::{Access, ApiKeyClaims, ApiKeyRow, GrantVerdict, KeyGrants, API_KEY_SCOPES, REQUEST_WINDOW_SECS};
 pub use ask::AskRecord;
 pub use auth::SESSION_DAYS;
 pub use brain_fs::{BrainFsHit, BrainFsItem};
-pub use network::{GrantRow, NetworkHit, GRANTABLE_SPHERES};
-pub use sync::SyncPage;
-pub use telemetry::{HealthBucket, LogRow};
+pub use browse::{
+    EdgeBrowseRow, EdgeFacets, EdgePage, EntityBrowseRow, EntityFacets, EntityPage, EpisodeFacets,
+    EpisodeFilter, EpisodePage, FacetCount, IdentityBrowseRow, IdentityFacets, IdentityPage,
+    SourceRow, VirtualSourceDef,
+};
 pub use cascades::{CascadeContext, CascadeSeed};
-pub use intents::{IntentMatch, IntentRow};
-pub use privacy::PrivacyRule;
+pub use connections::ConnectionUpsert;
+pub use contacts::{ContactCardIn, PendingContact};
+pub use device_state::DeviceStateIn;
+pub use episodes::{EpisodeRow, PendingExtraction};
+pub use export_all::{is_internal_table, TableClass, TABLE_CLASSES};
+pub use graph::{
+    ClaimOutcome, DossierEdge, EntityDossier, EntityRow, MergeRecord, ReviewItem, TraverseHop,
+};
+pub use groups::{FriendAccess, GroupRow, GROUP_PREFIX};
+pub use health::{HealthSampleRow, StoredHealthSample};
 pub use ingest_apply::OWNER_ONLY_SOURCES;
-pub use quarantine::{outside_proposal, QuarantineEntry, PROPOSAL_KINDS};
+pub use intents::{IntentMatch, IntentRow};
+pub use lint::ReviewInputs;
+pub use movements::{
+    MovementIn, StoredMovement, VehicleProfile, ATTRIBUTION_MODES, MOVEMENT_MODES,
+    SCOPES as MOVEMENT_SCOPES,
+};
+pub use network::{GrantRow, NetworkHit, GRANTABLE_SPHERES};
+pub use notes::{note_prefill_for_task, parse_template, render_template, NoteRow, TemplateDef};
+pub use notes::{NoteImport, NoteWriter, AGENT_ORIGIN, NATIVE_ORIGIN, RECIPE_KIND};
+pub use notifications::{validate_link, NotificationRow};
+pub use observations::{ObservationIn, StoredObservation};
 pub use opportunities::OpportunityRow;
+pub use photo::{keys_hash as photo_keys_hash, PhotoPointIn, StoredPhotoPoint};
+pub use plugins::PluginRow;
+pub use privacy::PrivacyRule;
+pub use quarantine::{outside_proposal, QuarantineEntry, PROPOSAL_KINDS};
 pub use recall::DayView;
 pub use relationships::{DirectoryRow, RelationshipRow, RELATIONSHIP_KINDS};
+pub use retire::{
+    base_ref, RetireCounts, RetirementRow, RewriteJob, RETIRED_PREFIX, SUMMARY_KINDS,
+};
 pub use search::SearchHit;
-pub use notifications::{validate_link, NotificationRow};
-pub use plugins::PluginRow;
-pub use export_all::{is_internal_table, TableClass, TABLE_CLASSES};
-pub use notes::{note_prefill_for_task, parse_template, render_template, NoteRow, TemplateDef};
 pub use self_model::{Proposition, PROPOSITION_KINDS, SPHERES};
+pub use sharing::{EffectiveGrant, DEFAULT_FRIEND, SHAREABLE_KINDS, SHARE_CLASSES};
+pub use sync::SyncPage;
 pub use tasks::{CompletionOutcome, TaskRow, TaskTemplate, TASK_FREQUENCIES, TASK_KINDS};
+pub use telemetry::{HealthBucket, LogRow};
 pub use vectors::VectorHit;
 
-use std::path::Path;
 use parking_lot::FairMutex;
+use std::path::Path;
 use std::sync::Mutex;
 
 use anyhow::Result;
@@ -188,8 +198,11 @@ impl Drop for AreaFilterGuard {
 /// ever reaches SQL. The filter is per-THREAD: work handed to another
 /// thread (spawn_blocking) must enter it again there.
 pub fn enter_area_filter(areas: &[String]) -> AreaFilterGuard {
-    let allowed: Vec<&'static str> =
-        LIFE_AREAS.iter().copied().filter(|a| areas.iter().any(|x| x == a)).collect();
+    let allowed: Vec<&'static str> = LIFE_AREAS
+        .iter()
+        .copied()
+        .filter(|a| areas.iter().any(|x| x == a))
+        .collect();
     let previous = AREA_FILTER.with(|f| f.borrow_mut().replace(allowed));
     AreaFilterGuard { previous }
 }
@@ -244,7 +257,10 @@ pub struct ReadScope {
 
 /// The read scope in force on this thread.
 pub fn capture_read_scope() -> ReadScope {
-    ReadScope { viewer: VIEWER.with(|v| v.borrow().clone()), areas: area_filter() }
+    ReadScope {
+        viewer: VIEWER.with(|v| v.borrow().clone()),
+        areas: area_filter(),
+    }
 }
 
 impl ReadScope {
@@ -252,16 +268,27 @@ impl ReadScope {
     /// key may see (unknown labels dropped, as in `enter_area_filter`).
     pub fn new(viewer: &str, areas: Option<&[String]>) -> Self {
         let areas = areas.map(|areas| {
-            LIFE_AREAS.iter().copied().filter(|a| areas.iter().any(|x| x == a)).collect()
+            LIFE_AREAS
+                .iter()
+                .copied()
+                .filter(|a| areas.iter().any(|x| x == a))
+                .collect()
         });
-        ReadScope { viewer: Some(viewer.to_string()), areas }
+        ReadScope {
+            viewer: Some(viewer.to_string()),
+            areas,
+        }
     }
 
     /// Make this the read scope of the current thread until the guard drops.
     pub fn enter(&self) -> ReadScopeGuard {
         let viewer = VIEWER.with(|v| std::mem::replace(&mut *v.borrow_mut(), self.viewer.clone()));
-        let areas = AREA_FILTER.with(|f| std::mem::replace(&mut *f.borrow_mut(), self.areas.clone()));
-        ReadScopeGuard { viewer: Some(viewer), areas: Some(areas) }
+        let areas =
+            AREA_FILTER.with(|f| std::mem::replace(&mut *f.borrow_mut(), self.areas.clone()));
+        ReadScopeGuard {
+            viewer: Some(viewer),
+            areas: Some(areas),
+        }
     }
 }
 
@@ -600,9 +627,7 @@ impl Store {
             // v2: identities can carry a context — the scope material
             // flowing through that identity should default to (e.g. a
             // company email is `work`, a personal one `personal`).
-            conn.execute_batch(
-                "ALTER TABLE entity_attributes ADD COLUMN scope TEXT;",
-            )?;
+            conn.execute_batch("ALTER TABLE entity_attributes ADD COLUMN scope TEXT;")?;
         }
         if version < 3 {
             // v3: intents — standing queries watched by the consolidation
@@ -1111,9 +1136,7 @@ impl Store {
             // v28: a goal may reference a PROJECT (the Project entity it
             // advances) — the goals rail shows "project: X"; projects
             // are containers, goals are aims (kept distinct, Jon).
-            conn.execute_batch(
-                "ALTER TABLE intents ADD COLUMN project_id TEXT;",
-            )?;
+            conn.execute_batch("ALTER TABLE intents ADD COLUMN project_id TEXT;")?;
         }
         if version < 29 {
             // v29: goals ↔ projects is MANY-TO-MANY (a goal can advance
@@ -1212,9 +1235,7 @@ impl Store {
             // effect on both; the FRIEND boundary still never carries
             // private). scope_changed_at is the LWW timestamp every
             // scope-writing path stamps; sync exchanges stamped rows.
-            conn.execute_batch(
-                "ALTER TABLE episodes ADD COLUMN scope_changed_at TEXT;",
-            )?;
+            conn.execute_batch("ALTER TABLE episodes ADD COLUMN scope_changed_at TEXT;")?;
         }
         if version < 35 {
             // v35: observability (Jon, 2026-07-12). syslog = structured
@@ -1413,7 +1434,7 @@ impl Store {
             // (tasks first, then notes/goals/self-model/privacy). Unlike the
             // `mutations` breadcrumb log, `post_image` carries the WHOLE row,
             // so operational state is reconstructable and a lost/edited/
-            // purged task can be restored. 
+            // purged task can be restored.
             conn.execute_batch(
                 "CREATE TABLE op_journal (
                      seq INTEGER PRIMARY KEY,
@@ -1471,9 +1492,7 @@ impl Store {
             // (q=hello) ground a hosted tenant into a full wedge on
             // 2026-07-28. With the index both join directions are
             // point probes.
-            conn.execute_batch(
-                "CREATE INDEX idx_episodes_fts_rowid ON episodes(fts_rowid);",
-            )?;
+            conn.execute_batch("CREATE INDEX idx_episodes_fts_rowid ON episodes(fts_rowid);")?;
         }
         if version < 46 {
             // v46: granular friend sharing (design log 2026-07-28).
@@ -1761,7 +1780,9 @@ impl Store {
             // `items` = chunks embedded, model `local:<name>`, priced $0.
             // Rides the existing /v1/sync/llm_usage leg as an additive
             // field (an older peer ignores it; a missing one reads 0).
-            conn.execute_batch("ALTER TABLE llm_usage ADD COLUMN items INTEGER NOT NULL DEFAULT 0;")?;
+            conn.execute_batch(
+                "ALTER TABLE llm_usage ADD COLUMN items INTEGER NOT NULL DEFAULT 0;",
+            )?;
         }
         if version < 54 {
             // v54: FRIEND GROUPS (store/groups.rs). `friend_groups` — a
@@ -1897,7 +1918,10 @@ impl Store {
             }
             // episodes: only scope changes travel on the scope leg
             conn.execute_batch(&relay_stamp_sql(
-                "episodes", "scope_synced_at", "scope_changed_at", "OF scope",
+                "episodes",
+                "scope_synced_at",
+                "scope_changed_at",
+                "OF scope",
             ))?;
         }
         if version < 58 {
@@ -1977,7 +2001,12 @@ impl Store {
                  ALTER TABLE sources ADD COLUMN retired_by TEXT;
                  CREATE INDEX idx_edge_provenance_episode ON edge_provenance(episode_id);",
             )?;
-            conn.execute_batch(&relay_stamp_sql("retirements", "synced_at", "updated_at", ""))?;
+            conn.execute_batch(&relay_stamp_sql(
+                "retirements",
+                "synced_at",
+                "updated_at",
+                "",
+            ))?;
             conn.execute_batch(&relay_stamp_sql("summary_inputs", "synced_at", "ts", ""))?;
         }
         if version < 60 {
@@ -2045,9 +2074,24 @@ impl Store {
                      minted_at TEXT NOT NULL
                  );",
             )?;
-            conn.execute_batch(&relay_stamp_sql("movement_observation", "synced_at", "ingest_time", ""))?;
-            conn.execute_batch(&relay_stamp_sql("vehicle_profile", "synced_at", "updated_at", ""))?;
-            conn.execute_batch(&relay_stamp_sql("trip_attribution", "synced_at", "updated_at", ""))?;
+            conn.execute_batch(&relay_stamp_sql(
+                "movement_observation",
+                "synced_at",
+                "ingest_time",
+                "",
+            ))?;
+            conn.execute_batch(&relay_stamp_sql(
+                "vehicle_profile",
+                "synced_at",
+                "updated_at",
+                "",
+            ))?;
+            conn.execute_batch(&relay_stamp_sql(
+                "trip_attribution",
+                "synced_at",
+                "updated_at",
+                "",
+            ))?;
         }
         if version < SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -2068,7 +2112,10 @@ impl Store {
         let now = std::time::Instant::now();
         let mut unlocks = self.vault_unlocks.lock().unwrap();
         unlocks.retain(|_, until| *until > now);
-        unlocks.insert(current_viewer(), now + std::time::Duration::from_secs(minutes * 60));
+        unlocks.insert(
+            current_viewer(),
+            now + std::time::Duration::from_secs(minutes * 60),
+        );
     }
 
     /// Lock the vault for the current viewer.
@@ -2092,7 +2139,12 @@ impl Store {
     /// (locked, seconds_remaining) for the CURRENT viewer. Locked mode is
     /// the default state.
     pub fn vault_status(&self) -> (bool, u64) {
-        let until = self.vault_unlocks.lock().unwrap().get(&current_viewer()).copied();
+        let until = self
+            .vault_unlocks
+            .lock()
+            .unwrap()
+            .get(&current_viewer())
+            .copied();
         match until {
             Some(deadline) => {
                 let now = std::time::Instant::now();
@@ -2137,7 +2189,11 @@ impl Store {
             if areas.is_empty() {
                 clause.push_str(" AND 0");
             } else {
-                let list = areas.iter().map(|a| format!("'{a}'")).collect::<Vec<_>>().join(",");
+                let list = areas
+                    .iter()
+                    .map(|a| format!("'{a}'"))
+                    .collect::<Vec<_>>()
+                    .join(",");
                 clause.push_str(&format!(" AND {column} IN ({list})"));
             }
         }
@@ -2156,7 +2212,9 @@ impl Store {
         let areas = area_filter();
         move |scope: &str| {
             (hide_private && scope == "private")
-                || areas.as_ref().is_some_and(|allowed| !allowed.contains(&scope))
+                || areas
+                    .as_ref()
+                    .is_some_and(|allowed| !allowed.contains(&scope))
         }
     }
 
@@ -2188,8 +2246,7 @@ impl Store {
                 actor: row.get(2)?,
                 session_id: row.get(3)?,
                 kind: row.get(4)?,
-                payload: serde_json::from_str(&row.get::<_, String>(5)?)
-                    .unwrap_or(JsonValue::Null),
+                payload: serde_json::from_str(&row.get::<_, String>(5)?).unwrap_or(JsonValue::Null),
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -2242,11 +2299,17 @@ impl Store {
         // The shadow views know the vault, not life areas — raw SQL is
         // never served under an area filter.
         if area_filter().is_some() {
-            return Err(anyhow::anyhow!("raw SQL is not available to an area-limited key"));
+            return Err(anyhow::anyhow!(
+                "raw SQL is not available to an area-limited key"
+            ));
         }
         let conn = self.lock();
         let shadowed = always_exclude_private || !self.private_visible();
-        conn.execute_batch(if shadowed { VAULT_SHADOW_VIEWS } else { LIVE_SHADOW_VIEWS })?;
+        conn.execute_batch(if shadowed {
+            VAULT_SHADOW_VIEWS
+        } else {
+            LIVE_SHADOW_VIEWS
+        })?;
         let result = Self::run_read_query(&conn, trimmed, max_rows);
         conn.execute_batch(VAULT_SHADOW_DROP)?;
         result
@@ -2261,11 +2324,7 @@ impl Store {
         if !stmt.readonly() {
             return Err(anyhow::anyhow!("only read-only queries are allowed"));
         }
-        let columns: Vec<String> = stmt
-            .column_names()
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let columns: Vec<String> = stmt.column_names().into_iter().map(String::from).collect();
         let column_count = columns.len();
         let mut rows_out = Vec::new();
         let mut rows = stmt.query([])?;
@@ -2507,7 +2566,10 @@ pub(crate) const RELAY_STAMPED: &[(&str, &str)] = &[
     ("device_state", "ingest_time"),
     ("location_observation", "ingest_time"),
     ("llm_usage", "ts"),
-    ("notifications", "MAX(ts, COALESCE(read_at, ''), COALESCE(dismissed_at, ''))"),
+    (
+        "notifications",
+        "MAX(ts, COALESCE(read_at, ''), COALESCE(dismissed_at, ''))",
+    ),
     ("plugin_kv", "updated_at"),
     ("syslog", "ts"),
     ("health_points", "ts"),
@@ -2528,7 +2590,12 @@ pub(crate) const RELAY_NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 /// stamps padded to .000Z so they order correctly against new ones), an
 /// index, and the two triggers. `on_update` narrows the update trigger
 /// (e.g. "OF scope").
-pub(crate) fn relay_stamp_sql(table: &str, column: &str, backfill: &str, on_update: &str) -> String {
+pub(crate) fn relay_stamp_sql(
+    table: &str,
+    column: &str,
+    backfill: &str,
+    on_update: &str,
+) -> String {
     format!(
         "ALTER TABLE {table} ADD COLUMN {column} TEXT;
          UPDATE {table} SET {column} = CASE
@@ -2550,9 +2617,17 @@ pub(crate) fn relay_stamp_sql(table: &str, column: &str, backfill: &str, on_upda
 /// The cursor after one page of a relay-stamped export: the largest
 /// stamp among the first `limit` rows past `since`, with the page's own
 /// filter (`from_where` must use ?1 for `since`) and order.
-pub(crate) fn page_cursor(conn: &Connection, column: &str, from_where: &str, since: &str, limit: usize) -> Result<String> {
+pub(crate) fn page_cursor(
+    conn: &Connection,
+    column: &str,
+    from_where: &str,
+    since: &str,
+    limit: usize,
+) -> Result<String> {
     let max: Option<String> = conn.query_row(
-        &format!("SELECT MAX(s) FROM (SELECT {column} AS s {from_where} ORDER BY {column} LIMIT ?2)"),
+        &format!(
+            "SELECT MAX(s) FROM (SELECT {column} AS s {from_where} ORDER BY {column} LIMIT ?2)"
+        ),
         rusqlite::params![since, limit as i64],
         |row| row.get(0),
     )?;
@@ -2616,7 +2691,10 @@ mod tests {
         {
             let _a = enter_viewer("session:a");
             store.vault_unlock(15);
-            assert!(!store.vault_status().0, "the viewer who unlocked sees private");
+            assert!(
+                !store.vault_status().0,
+                "the viewer who unlocked sees private"
+            );
             assert_eq!(store.scope_guard("e.scope"), "");
         }
         {
@@ -2641,9 +2719,16 @@ mod tests {
         let areas = ReadScope::new("key:c", Some(&["work".to_string(), "bogus".to_string()]));
         {
             let _g = areas.enter();
-            assert_eq!(store.scope_guard("e.scope"), " AND e.scope != 'private' AND e.scope IN ('work')");
+            assert_eq!(
+                store.scope_guard("e.scope"),
+                " AND e.scope != 'private' AND e.scope IN ('work')"
+            );
         }
-        assert_eq!(store.scope_guard("e.scope"), " AND e.scope != 'private'", "the guard restores");
+        assert_eq!(
+            store.scope_guard("e.scope"),
+            " AND e.scope != 'private'",
+            "the guard restores"
+        );
 
         // Locking, or the session ending, closes only that viewer's view.
         store.vault_forget("session:a");
@@ -2682,7 +2767,9 @@ mod tests {
         assert!(store
             .read_query("UPDATE episodes SET scope='x'", 10)
             .is_err());
-        assert!(store.read_query("SELECT 1; DROP TABLE episodes", 10).is_err());
+        assert!(store
+            .read_query("SELECT 1; DROP TABLE episodes", 10)
+            .is_err());
         assert_eq!(store.counts().unwrap().episodes, 0);
     }
 
@@ -2715,36 +2802,107 @@ mod tests {
     #[test]
     fn test_relay_through_a_hub_reaches_a_third_node() {
         use crate::provider::Usage;
-        let (a, hub, c) = (Store::open_in_memory().unwrap(), Store::open_in_memory().unwrap(),
-                           Store::open_in_memory().unwrap());
+        let (a, hub, c) = (
+            Store::open_in_memory().unwrap(),
+            Store::open_in_memory().unwrap(),
+            Store::open_in_memory().unwrap(),
+        );
         let me = Actor::new("human:test");
         // A writes first (older stamps)…
-        a.record_llm_usage("local", "ask", None, "anthropic", "claude-opus-4-8", "high",
-            &Usage { input_tokens: 7, ..Default::default() }, 1, "ok").unwrap();
-        a.notify(&me, "test:a", "info", "from A", "", None, Some("a1")).unwrap();
-        let task = a.create_agent_task(&me, None, None, "from A", "brief", &["read".into()], None, false).unwrap();
+        a.record_llm_usage(
+            "local",
+            "ask",
+            None,
+            "anthropic",
+            "claude-opus-4-8",
+            "high",
+            &Usage {
+                input_tokens: 7,
+                ..Default::default()
+            },
+            1,
+            "ok",
+        )
+        .unwrap();
+        a.notify(&me, "test:a", "info", "from A", "", None, Some("a1"))
+            .unwrap();
+        let task = a
+            .create_agent_task(
+                &me,
+                None,
+                None,
+                "from A",
+                "brief",
+                &["read".into()],
+                None,
+                false,
+            )
+            .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
         // …then the hub has something newer of its own, and C syncs it,
         // so C's cursors sit past A's stamps.
-        hub.notify(&me, "test:hub", "info", "from hub", "", None, Some("h1")).unwrap();
-        hub.record_llm_usage("cloud", "ask", None, "anthropic", "claude-opus-4-8", "high",
-            &Usage::default(), 1, "ok").unwrap();
-        let c_notif = { let p = hub.notifications_since("", 500).unwrap(); c.apply_notifications(&p).unwrap(); p["next"].as_str().unwrap().to_string() };
-        let c_usage = { let p = hub.llm_usage_since("", 500).unwrap(); c.apply_llm_usage(&p).unwrap(); p["next"].as_str().unwrap().to_string() };
-        let c_agents = { let p = hub.agents_sync_export("").unwrap(); c.agents_sync_apply(&p).unwrap(); p["next"].as_str().unwrap().to_string() };
+        hub.notify(&me, "test:hub", "info", "from hub", "", None, Some("h1"))
+            .unwrap();
+        hub.record_llm_usage(
+            "cloud",
+            "ask",
+            None,
+            "anthropic",
+            "claude-opus-4-8",
+            "high",
+            &Usage::default(),
+            1,
+            "ok",
+        )
+        .unwrap();
+        let c_notif = {
+            let p = hub.notifications_since("", 500).unwrap();
+            c.apply_notifications(&p).unwrap();
+            p["next"].as_str().unwrap().to_string()
+        };
+        let c_usage = {
+            let p = hub.llm_usage_since("", 500).unwrap();
+            c.apply_llm_usage(&p).unwrap();
+            p["next"].as_str().unwrap().to_string()
+        };
+        let c_agents = {
+            let p = hub.agents_sync_export("").unwrap();
+            c.agents_sync_apply(&p).unwrap();
+            p["next"].as_str().unwrap().to_string()
+        };
         std::thread::sleep(std::time::Duration::from_millis(20));
         // The hub now receives A's older rows.
-        hub.apply_notifications(&a.notifications_since("", 500).unwrap()).unwrap();
-        hub.apply_llm_usage(&a.llm_usage_since("", 500).unwrap()).unwrap();
-        hub.agents_sync_apply(&a.agents_sync_export("").unwrap()).unwrap();
+        hub.apply_notifications(&a.notifications_since("", 500).unwrap())
+            .unwrap();
+        hub.apply_llm_usage(&a.llm_usage_since("", 500).unwrap())
+            .unwrap();
+        hub.agents_sync_apply(&a.agents_sync_export("").unwrap())
+            .unwrap();
         // C pulls from the hub with its existing cursors and gets them.
-        c.apply_notifications(&hub.notifications_since(&c_notif, 500).unwrap()).unwrap();
-        c.apply_llm_usage(&hub.llm_usage_since(&c_usage, 500).unwrap()).unwrap();
-        c.agents_sync_apply(&hub.agents_sync_export(&c_agents).unwrap()).unwrap();
-        let titles: Vec<String> = c.notifications(true, 50).unwrap().into_iter().map(|n| n.title).collect();
+        c.apply_notifications(&hub.notifications_since(&c_notif, 500).unwrap())
+            .unwrap();
+        c.apply_llm_usage(&hub.llm_usage_since(&c_usage, 500).unwrap())
+            .unwrap();
+        c.agents_sync_apply(&hub.agents_sync_export(&c_agents).unwrap())
+            .unwrap();
+        let titles: Vec<String> = c
+            .notifications(true, 50)
+            .unwrap()
+            .into_iter()
+            .map(|n| n.title)
+            .collect();
         assert!(titles.contains(&"from A".to_string()), "{titles:?}");
-        assert_eq!(c.llm_usage_since("", 500).unwrap()["items"].as_array().unwrap().len(), 2);
-        assert!(c.agent_task(&task.id).unwrap().is_some(), "an agent task relays too");
+        assert_eq!(
+            c.llm_usage_since("", 500).unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            c.agent_task(&task.id).unwrap().is_some(),
+            "an agent task relays too"
+        );
         // and a page from an idle exporter doesn't move the cursor backwards
         let idle = hub.notifications_since("9999", 500).unwrap();
         assert_eq!(idle["next"], "9999");
@@ -2759,17 +2917,41 @@ mod tests {
         home.init().unwrap();
         let a = Store::open(&home.db_path()).unwrap();
         let hub = Store::open_in_memory().unwrap();
-        let id = a.add_task(&Actor::new("human:a"), "plain", "from the laptop", None, None,
-            "one-time", "personal", None, None, &[]).unwrap();
+        let id = a
+            .add_task(
+                &Actor::new("human:a"),
+                "plain",
+                "from the laptop",
+                None,
+                None,
+                "one-time",
+                "personal",
+                None,
+                None,
+                &[],
+            )
+            .unwrap();
         let pushed = a.journal_export(0, 500).unwrap();
-        hub.apply_journal(&Actor::new("peer:laptop"), &pushed).unwrap();
+        hub.apply_journal(&Actor::new("peer:laptop"), &pushed)
+            .unwrap();
         // the Mac mini (key "mini") gets the laptop's entry through the hub…
         let for_mini = hub.journal_export_for(0, 500, Some("mini")).unwrap();
-        assert!(for_mini["entries"].as_array().unwrap().iter().any(|e| e["entity_id"] == serde_json::json!(id)));
+        assert!(for_mini["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["entity_id"] == serde_json::json!(id)));
         // …and the laptop doesn't get its own entry echoed back
         let for_laptop = hub.journal_export_for(0, 500, Some("laptop")).unwrap();
-        assert!(for_laptop["entries"].as_array().unwrap().iter().all(|e| e["entity_id"] != serde_json::json!(id)));
+        assert!(for_laptop["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["entity_id"] != serde_json::json!(id)));
         // a spoke pushing to its hub still sends only its own entries
-        assert!(hub.journal_export(0, 500).unwrap()["entries"].as_array().unwrap().is_empty());
+        assert!(hub.journal_export(0, 500).unwrap()["entries"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 }

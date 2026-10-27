@@ -54,7 +54,11 @@ pub(crate) struct AttendeeIn {
 
 impl AttendeeIn {
     fn person(&self) -> Option<(String, Vec<(String, String)>)> {
-        let email = self.email.as_deref().map(str::trim).filter(|e| !e.is_empty());
+        let email = self
+            .email
+            .as_deref()
+            .map(str::trim)
+            .filter(|e| !e.is_empty());
         let name = self
             .name
             .as_deref()
@@ -72,7 +76,11 @@ impl AttendeeIn {
 /// Mirror of the ics adapter's draft shape (same body preamble, same
 /// entity/edge structure) so live and imported events read identically.
 pub(crate) fn calendar_in_to_episode(ev: &CalendarEventIn) -> anyhow::Result<EpisodeDraft> {
-    let uncertainty = if ev.all_day { TimeUncertainty::Day } else { TimeUncertainty::Minute };
+    let uncertainty = if ev.all_day {
+        TimeUncertainty::Day
+    } else {
+        TimeUncertainty::Minute
+    };
     let event_time = EventTime::parse_rfc3339(&ev.start, uncertainty)?;
     let source_ref = match ev.recurrence_id.as_deref().filter(|r| !r.is_empty()) {
         Some(rid) => format!("{}#{rid}", ev.uid),
@@ -82,7 +90,12 @@ pub(crate) fn calendar_in_to_episode(ev: &CalendarEventIn) -> anyhow::Result<Epi
     // ics adapter's rule): a line break in them must not start a line.
     let summary = one_line(&ev.title);
     let mut body = format!("event: {summary}\n");
-    if let Some(location) = ev.location.as_deref().map(one_line).filter(|l| !l.is_empty()) {
+    if let Some(location) = ev
+        .location
+        .as_deref()
+        .map(one_line)
+        .filter(|l| !l.is_empty())
+    {
         body.push_str(&format!("location: {location}\n"));
     }
     if let Some(utc) = &event_time.utc {
@@ -110,7 +123,11 @@ pub(crate) fn calendar_in_to_episode(ev: &CalendarEventIn) -> anyhow::Result<Epi
             attributes: attrs,
             role: "organizer".into(),
         });
-        edges.push(EdgeAssertion { src: entities.len() - 1, relation: "organized".into(), dst: 0 });
+        edges.push(EdgeAssertion {
+            src: entities.len() - 1,
+            relation: "organized".into(),
+            dst: 0,
+        });
     }
     let attendees: Vec<(String, Vec<(String, String)>)> =
         ev.attendees.iter().filter_map(|a| a.person()).collect();
@@ -125,7 +142,11 @@ pub(crate) fn calendar_in_to_episode(ev: &CalendarEventIn) -> anyhow::Result<Epi
             attributes: attrs,
             role: "attendee".into(),
         });
-        edges.push(EdgeAssertion { src: entities.len() - 1, relation: "attended".into(), dst: 0 });
+        edges.push(EdgeAssertion {
+            src: entities.len() - 1,
+            relation: "attended".into(),
+            dst: 0,
+        });
     }
     if let Some(notes) = ev.notes.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
         body.push_str(&format!("\n{notes}\n"));
@@ -163,7 +184,10 @@ pub(crate) fn contact_to_episode(c: &PendingContact) -> EpisodeDraft {
         }
     }
     for p in &c.phones {
-        let digits: String = p.chars().filter(|ch| ch.is_ascii_digit() || *ch == '+').collect();
+        let digits: String = p
+            .chars()
+            .filter(|ch| ch.is_ascii_digit() || *ch == '+')
+            .collect();
         if !digits.is_empty() {
             body.push_str(&format!("phone: {p}\n"));
             attrs.push(("phone".into(), digits));
@@ -194,7 +218,11 @@ pub(crate) fn contact_to_episode(c: &PendingContact) -> EpisodeDraft {
             attributes: Vec::new(),
             role: "mentioned".into(),
         });
-        edges.push(EdgeAssertion { src: 0, relation: "affiliated_with".into(), dst: 1 });
+        edges.push(EdgeAssertion {
+            src: 0,
+            relation: "affiliated_with".into(),
+            dst: 1,
+        });
     }
     EpisodeDraft {
         source: "contacts".into(),
@@ -342,7 +370,14 @@ pub(crate) fn media_in_to_episode(m: &MediaIn) -> anyhow::Result<EpisodeDraft> {
         .or(m.show.as_deref())
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let mut body = format!("{}: {title}\n", if m.kind == "podcast" { "episode" } else { "track" });
+    let mut body = format!(
+        "{}: {title}\n",
+        if m.kind == "podcast" {
+            "episode"
+        } else {
+            "track"
+        }
+    );
     let mut entities = Vec::new();
     let mut edges = Vec::new();
     // the played work itself
@@ -372,7 +407,11 @@ pub(crate) fn media_in_to_episode(m: &MediaIn) -> anyhow::Result<EpisodeDraft> {
                 attributes: Vec::new(),
                 role: "mentioned".into(),
             });
-            edges.push(EdgeAssertion { src: 1, relation: "by".into(), dst: 0 });
+            edges.push(EdgeAssertion {
+                src: 1,
+                relation: "by".into(),
+                dst: 0,
+            });
         }
         if let Some(album) = m.album.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             body.push_str(&format!("album: {album}\n"));
@@ -461,7 +500,10 @@ pub(crate) fn parse_receipt_total(text: &str) -> Option<f64> {
     keyed
         .into_iter()
         .fold(None::<f64>, |m, v| Some(m.map_or(v, |m| m.max(v))))
-        .or_else(|| all.into_iter().fold(None, |m, v| Some(m.map_or(v, |m: f64| m.max(v)))))
+        .or_else(|| {
+            all.into_iter()
+                .fold(None, |m, v| Some(m.map_or(v, |m: f64| m.max(v))))
+        })
 }
 
 pub(crate) fn scan_in_to_episode(s: &ScanIn) -> anyhow::Result<EpisodeDraft> {
@@ -538,15 +580,24 @@ mod tests {
             all_day: false,
         };
         let d = calendar_in_to_episode(&ev).unwrap();
-        assert_eq!(d.source, "ics", "live phone events dedupe against ics imports");
+        assert_eq!(
+            d.source, "ics",
+            "live phone events dedupe against ics imports"
+        );
         assert_eq!(d.source_ref, "evt-123@example.com");
         assert_eq!(d.kind, "calendar_event");
         assert_eq!(d.trust, "self");
         assert!(d.body.contains("location: HQ"));
         // attendee resolves attribute-first on the lowercased email
-        assert_eq!(d.entities[1].attributes[0], ("email".into(), "ada@example.com".into()));
+        assert_eq!(
+            d.entities[1].attributes[0],
+            ("email".into(), "ada@example.com".into())
+        );
         // recurrence instances get their own ref, like ICS RECURRENCE-ID
-        let inst = CalendarEventIn { recurrence_id: Some("20260827T140000".into()), ..ev };
+        let inst = CalendarEventIn {
+            recurrence_id: Some("20260827T140000".into()),
+            ..ev
+        };
         assert_eq!(
             calendar_in_to_episode(&inst).unwrap().source_ref,
             "evt-123@example.com#20260827T140000"
@@ -574,8 +625,20 @@ mod tests {
         let d = calendar_in_to_episode(&ev).unwrap();
         assert_eq!(d.title, "Lunch - Wire the money");
         assert_eq!(d.entities[0].name, "Lunch - Wire the money");
-        assert!(d.body.starts_with("event: Lunch - Wire the money\nlocation: Cafe [12:00] Elsewhere (40.71,-74.00)\n"), "{}", d.body);
-        assert!(!d.body.lines().any(|l| l.starts_with('[') || l.starts_with("- ")), "{}", d.body);
+        assert!(
+            d.body.starts_with(
+                "event: Lunch - Wire the money\nlocation: Cafe [12:00] Elsewhere (40.71,-74.00)\n"
+            ),
+            "{}",
+            d.body
+        );
+        assert!(
+            !d.body
+                .lines()
+                .any(|l| l.starts_with('[') || l.starts_with("- ")),
+            "{}",
+            d.body
+        );
         assert!(d.body.contains("notes keep\ntheir lines"));
     }
 
@@ -594,12 +657,22 @@ mod tests {
         let d = contact_to_episode(&c);
         assert_eq!(d.source_ref, "ABC-DEF");
         assert_eq!(d.kind, "contact_card");
-        assert_eq!(d.entities[0].attributes[0], ("email".into(), "grace@example.org".into()));
-        assert_eq!(d.entities[0].attributes[1], ("phone".into(), "+16175550100".into()));
+        assert_eq!(
+            d.entities[0].attributes[0],
+            ("email".into(), "grace@example.org".into())
+        );
+        assert_eq!(
+            d.entities[0].attributes[1],
+            ("phone".into(), "+16175550100".into())
+        );
         assert_eq!(d.entities[1].entity_type, "Org");
         assert_eq!(d.edges[0].relation, "affiliated_with");
         let r2 = PendingContact { revision: 2, ..c };
-        assert_eq!(contact_to_episode(&r2).source_ref, "ABC-DEF#r2", "changed card supersedes");
+        assert_eq!(
+            contact_to_episode(&r2).source_ref,
+            "ABC-DEF#r2",
+            "changed card supersedes"
+        );
     }
 
     #[test]

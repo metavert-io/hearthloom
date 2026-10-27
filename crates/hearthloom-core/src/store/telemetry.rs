@@ -220,8 +220,20 @@ impl Store {
         // Both pages advance together: the cursor is the SMALLER of the two
         // page ends when a page came back full (the rest of that table is
         // still to come), else the larger.
-        let logs_end = super::page_cursor(&conn, "synced_at", "FROM syslog WHERE synced_at > ?1", since, limit)?;
-        let points_end = super::page_cursor(&conn, "synced_at", "FROM health_points WHERE synced_at > ?1", since, limit)?;
+        let logs_end = super::page_cursor(
+            &conn,
+            "synced_at",
+            "FROM syslog WHERE synced_at > ?1",
+            since,
+            limit,
+        )?;
+        let points_end = super::page_cursor(
+            &conn,
+            "synced_at",
+            "FROM health_points WHERE synced_at > ?1",
+            since,
+            limit,
+        )?;
         let max_ts = match (logs.len() >= limit, points.len() >= limit) {
             (true, false) => logs_end,
             (false, true) => points_end,
@@ -236,7 +248,11 @@ impl Store {
     pub fn apply_telemetry(&self, batch: &Value) -> Result<usize> {
         let conn = self.lock();
         let mut applied = 0usize;
-        for l in batch.get("logs").and_then(|v| v.as_array()).unwrap_or(&vec![]) {
+        for l in batch
+            .get("logs")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&vec![])
+        {
             applied += conn.execute(
                 "INSERT OR IGNORE INTO syslog (id, ts, node, level, event, message, meta)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -251,7 +267,11 @@ impl Store {
                 ],
             )?;
         }
-        for p in batch.get("points").and_then(|v| v.as_array()).unwrap_or(&vec![]) {
+        for p in batch
+            .get("points")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&vec![])
+        {
             applied += conn.execute(
                 "INSERT OR IGNORE INTO health_points (ts, node, check_name, ok, value, unit)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -278,10 +298,20 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::open(&tmp.path().join("t.db")).unwrap();
         store
-            .log_event("local", "info", "startup", "daemon started", Some(json!({"v": "0.1.0"})))
+            .log_event(
+                "local",
+                "info",
+                "startup",
+                "daemon started",
+                Some(json!({"v": "0.1.0"})),
+            )
             .unwrap();
-        store.record_health("local", "daemon", Some(true), None, None).unwrap();
-        store.record_health("local", "mem", None, Some(512.0), Some("mb")).unwrap();
+        store
+            .record_health("local", "daemon", Some(true), None, None)
+            .unwrap();
+        store
+            .record_health("local", "mem", None, Some(512.0), Some("mb"))
+            .unwrap();
         let (rows, total) = store.logs(Some("local"), None, "ts", true, 0, 10).unwrap();
         assert_eq!(total, 1);
         assert_eq!(rows[0].event, "startup");

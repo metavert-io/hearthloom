@@ -44,11 +44,7 @@ impl LabelFilter {
     /// live and archived materialization stay one policy.
     pub fn core_strata() -> Self {
         Self {
-            include_any: vec![
-                "Sent".into(),
-                "Category Personal".into(),
-                "Starred".into(),
-            ],
+            include_any: vec!["Sent".into(), "Category Personal".into(), "Starred".into()],
             exclude_any: vec![],
         }
     }
@@ -139,8 +135,7 @@ pub fn ingest_batched_filtered(
     mut sink: impl FnMut(Vec<EpisodeDraft>) -> Result<()>,
 ) -> Result<usize> {
     use std::io::BufRead;
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("opening {}", path.display()))?;
+    let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     // 1MB buffer: mbox lines are short but plentiful.
     let reader = std::io::BufReader::with_capacity(1 << 20, file);
 
@@ -150,25 +145,24 @@ pub fn ingest_batched_filtered(
     let mut batch: Vec<EpisodeDraft> = Vec::new();
     let mut total = 0usize;
 
-    let flush_message =
-        |current: &mut String, batch: &mut Vec<EpisodeDraft>, total: &mut usize| {
-            if current.is_empty() {
-                return;
-            }
-            let labels = gmail_labels(current);
-            if !filter.keeps(&labels) {
-                current.clear();
-                return;
-            }
-            match message_to_draft(current, &labels, scope) {
-                Ok(draft) => {
-                    batch.push(draft);
-                    *total += 1;
-                }
-                Err(err) => tracing::warn!("skipping message: {err}"),
-            }
+    let flush_message = |current: &mut String, batch: &mut Vec<EpisodeDraft>, total: &mut usize| {
+        if current.is_empty() {
+            return;
+        }
+        let labels = gmail_labels(current);
+        if !filter.keeps(&labels) {
             current.clear();
-        };
+            return;
+        }
+        match message_to_draft(current, &labels, scope) {
+            Ok(draft) => {
+                batch.push(draft);
+                *total += 1;
+            }
+            Err(err) => tracing::warn!("skipping message: {err}"),
+        }
+        current.clear();
+    };
 
     for line in reader.split(b'\n') {
         let line = line?;
@@ -353,11 +347,7 @@ fn extract_text(headers: &Headers<'_>) -> String {
     body.to_string()
 }
 
-fn message_to_draft(
-    message: &str,
-    labels: &[String],
-    scope: Option<&str>,
-) -> Result<EpisodeDraft> {
+fn message_to_draft(message: &str, labels: &[String], scope: Option<&str>) -> Result<EpisodeDraft> {
     let headers = parse_headers(message);
     let subject = headers.get("Subject").unwrap_or("(no subject)").to_string();
     let date = headers
@@ -491,15 +481,15 @@ Content-Type: text/html\n\
         assert_eq!(draft.source_ref, "abc123@mail.example.com");
         assert_eq!(draft.kind, "email");
         // 09:30 -0400 = 13:30 UTC.
-        assert_eq!(draft.event_time.utc.as_deref(), Some("2026-03-16T13:30:00Z"));
+        assert_eq!(
+            draft.event_time.utc.as_deref(),
+            Some("2026-03-16T13:30:00Z")
+        );
         assert_eq!(draft.event_time.tz_offset_minutes, Some(-240));
         // Author + 2 recipients, corresponded_with edges.
         assert_eq!(draft.entities.len(), 3);
         assert_eq!(draft.entities[0].role, "author");
-        assert_eq!(
-            draft.entities[0].attributes[0].1,
-            "jon@harbor.example"
-        );
+        assert_eq!(draft.entities[0].attributes[0].1, "jon@harbor.example");
         assert_eq!(draft.entities[2].name, "sam");
         assert_eq!(draft.edges.len(), 2);
         assert!(draft.body.contains("Sounds good"));
@@ -575,11 +565,7 @@ send money\n";
 
         // Core filter: only the Category Personal message survives.
         let core = LabelFilter {
-            include_any: vec![
-                "Sent".into(),
-                "Category Personal".into(),
-                "Starred".into(),
-            ],
+            include_any: vec!["Sent".into(), "Category Personal".into(), "Starred".into()],
             exclude_any: vec![],
         };
         let mut kept = Vec::new();
@@ -591,7 +577,9 @@ send money\n";
         assert_eq!(total, 1);
         assert_eq!(kept[0].source_ref, "keep1@x");
         // Labels are recorded in the body for later strata reasoning.
-        assert!(kept[0].body.contains("labels: Archived, Category Personal, Opened"));
+        assert!(kept[0]
+            .body
+            .contains("labels: Archived, Category Personal, Opened"));
     }
 
     #[test]
@@ -616,14 +604,14 @@ send money\n";
             include_any: vec!["Spam".into()],
             exclude_any: vec![],
         };
-        let total = ingest_batched_filtered(&path, None, &filter, usize::MAX, |_| Ok(()))
-            .unwrap();
+        let total = ingest_batched_filtered(&path, None, &filter, usize::MAX, |_| Ok(())).unwrap();
         assert_eq!(total, 0);
     }
 
     #[test]
     fn test_gmail_labels_folded_header() {
-        let msg = "Subject: x\nX-Gmail-Labels: Inbox,Category Promotions,\n Unread\nDate: y\n\nbody";
+        let msg =
+            "Subject: x\nX-Gmail-Labels: Inbox,Category Promotions,\n Unread\nDate: y\n\nbody";
         assert_eq!(
             gmail_labels(msg),
             vec!["Inbox", "Category Promotions", "Unread"]

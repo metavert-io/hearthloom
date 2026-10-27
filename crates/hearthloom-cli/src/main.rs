@@ -18,7 +18,11 @@ use client::Client;
 use hearthloom_core::Home;
 
 #[derive(Parser)]
-#[command(name = "hearthloom", version, about = "A local-first personal second brain")]
+#[command(
+    name = "hearthloom",
+    version,
+    about = "A local-first personal second brain"
+)]
 struct Cli {
     /// Target another node, e.g. https://brain.example.com
     /// (remote targets are never auto-spawned).
@@ -128,10 +132,7 @@ enum Cmd {
         command: NoteCmd,
     },
     /// Ring the dashboard bell (for scripts and cron jobs).
-    Notify {
-        title: String,
-        body: Option<String>,
-    },
+    Notify { title: String, body: Option<String> },
     /// Hybrid peer sync: pairing status, cursors, last outcome.
     Peer {
         #[command(subcommand)]
@@ -270,7 +271,9 @@ enum KeyCmd {
         scopes: Vec<String>,
     },
     List,
-    Revoke { id: String },
+    Revoke {
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -593,11 +596,17 @@ async fn main() -> Result<()> {
             let suites = eval::scaffold(home.root())?;
             println!("initialized {}", home.root().display());
             for path in &suites {
-                println!("  eval:   {} (example — replace with your own ground truth)", path.display());
+                println!(
+                    "  eval:   {} (example — replace with your own ground truth)",
+                    path.display()
+                );
             }
             println!("  db:     {}", home.db_path().display());
             println!("  raw:    {}", home.raw_dir().display());
-            println!("  config: {}", home.config_dir().join("development.yaml").display());
+            println!(
+                "  config: {}",
+                home.config_dir().join("development.yaml").display()
+            );
             println!(
                 "  settings: optional ones (registry, provisioner, HearthFS…) go in {} — see README → Configuration",
                 home.root().join(".env").display()
@@ -618,9 +627,7 @@ async fn main() -> Result<()> {
             // TCC-gated sources: if this process can't read them, the
             // daemon (which can hold its own Full Disk Access grant) tries.
             if let Some((adapter, path, scope)) = match &source {
-                IngestCmd::Imessage { db, scope } => {
-                    Some(("imessage", db.clone(), scope.clone()))
-                }
+                IngestCmd::Imessage { db, scope } => Some(("imessage", db.clone(), scope.clone())),
                 IngestCmd::Photos { library, scope } => {
                     Some(("photos", library.clone(), scope.clone()))
                 }
@@ -792,7 +799,10 @@ async fn main() -> Result<()> {
             let query = query.join(" ");
             let client = Client::new(home)?;
             let result = client
-                .get("/v1/search", &[("q", query.clone()), ("limit", limit.to_string())])
+                .get(
+                    "/v1/search",
+                    &[("q", query.clone()), ("limit", limit.to_string())],
+                )
                 .await?;
             let hits = result["hits"].as_array().cloned().unwrap_or_default();
             if hits.is_empty() {
@@ -801,7 +811,10 @@ async fn main() -> Result<()> {
             for hit in hits {
                 println!(
                     "{}  [{}/{}]  {}",
-                    hit["event_time"].as_str().map(|t| &t[..10]).unwrap_or("????-??-??"),
+                    hit["event_time"]
+                        .as_str()
+                        .map(|t| &t[..10])
+                        .unwrap_or("????-??-??"),
                     hit["source"].as_str().unwrap_or("?"),
                     hit["kind"].as_str().unwrap_or("?"),
                     hit["title"].as_str().unwrap_or(""),
@@ -812,7 +825,12 @@ async fn main() -> Result<()> {
                 println!("    id: {}", hit["episode_id"].as_str().unwrap_or(""));
             }
         }
-        Cmd::Recall { on, from, to, entity } => {
+        Cmd::Recall {
+            on,
+            from,
+            to,
+            entity,
+        } => {
             let client = Client::new(home)?;
             let mut query: Vec<(&str, String)> = Vec::new();
             if let Some(on) = on {
@@ -845,7 +863,12 @@ async fn main() -> Result<()> {
             let client = Client::new(home)?;
             handle_identity(&client, command).await?;
         }
-        Cmd::Scope { target, scope, cascade, by_source } => {
+        Cmd::Scope {
+            target,
+            scope,
+            cascade,
+            by_source,
+        } => {
             let client = Client::new(home)?;
             let mut body = json!({
                 "actor": "human:cli",
@@ -877,7 +900,10 @@ async fn main() -> Result<()> {
                 PeerCmd::Status => client.get("/v1/peer", &[]).await?,
                 PeerCmd::Sync { full } => {
                     client
-                        .post("/v1/peer/sync-now", &serde_json::json!({"actor": "human:cli", "full": full}))
+                        .post(
+                            "/v1/peer/sync-now",
+                            &serde_json::json!({"actor": "human:cli", "full": full}),
+                        )
                         .await?
                 }
             };
@@ -902,8 +928,14 @@ async fn main() -> Result<()> {
             }
             println!("next cursor: {}", result["next_cursor"]);
         }
-        Cmd::Eval { file, ask, suite, only } => {
-            let name = suite.unwrap_or_else(|| if ask { "ask-eval" } else { "personal-eval" }.to_string());
+        Cmd::Eval {
+            file,
+            ask,
+            suite,
+            only,
+        } => {
+            let name =
+                suite.unwrap_or_else(|| if ask { "ask-eval" } else { "personal-eval" }.to_string());
             let path = eval::resolve(home.root(), &name, file)?;
             let client = Client::new(home)?;
             if ask {
@@ -924,7 +956,10 @@ async fn main() -> Result<()> {
             let client = Client::new(home)?;
             eprintln!("(thinking across the brain — this spends tokens…)");
             let result = client
-                .post("/v1/query", &json!({"actor": "human:cli", "question": question}))
+                .post(
+                    "/v1/query",
+                    &json!({"actor": "human:cli", "question": question}),
+                )
                 .await?;
             if verbose {
                 for step in result["transcript"].as_array().cloned().unwrap_or_default() {
@@ -966,7 +1001,11 @@ async fn main() -> Result<()> {
                             entry["id"].as_str().unwrap_or("?"),
                             entry["proposed_at"].as_str().unwrap_or(""),
                             entry["actor"].as_str().unwrap_or("?"),
-                            entry["content"].to_string().chars().take(100).collect::<String>(),
+                            entry["content"]
+                                .to_string()
+                                .chars()
+                                .take(100)
+                                .collect::<String>(),
                         );
                     }
                 }
@@ -1009,7 +1048,11 @@ async fn main() -> Result<()> {
                 summary["embedding_coverage"]["embedded"],
                 summary["embedding_coverage"]["total"],
             );
-            for fired in summary["intents_fired"].as_array().cloned().unwrap_or_default() {
+            for fired in summary["intents_fired"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+            {
                 println!(
                     "intent {} fired: {} new matches",
                     fired["intent"].as_str().unwrap_or("?"),
@@ -1018,7 +1061,9 @@ async fn main() -> Result<()> {
             }
             match (
                 summary["llm_configured"].as_bool().unwrap_or(false),
-                summary["semantic_summary_written"].as_bool().unwrap_or(false),
+                summary["semantic_summary_written"]
+                    .as_bool()
+                    .unwrap_or(false),
             ) {
                 (false, _) => println!("semantic digest: no LLM provider configured"),
                 (true, true) => println!("semantic digest: written"),
@@ -1101,7 +1146,11 @@ async fn main() -> Result<()> {
             ops::upgrade(&client, check).await?;
         }
         Cmd::Ember { command } => match command {
-            EmberCmd::Search { query, registry, cloud } => {
+            EmberCmd::Search {
+                query,
+                registry,
+                cloud,
+            } => {
                 let reg = registry::Registry::connect(registry).await?;
                 reg.search(&query.join(" "), cloud).await?;
             }
@@ -1109,12 +1158,24 @@ async fn main() -> Result<()> {
                 let reg = registry::Registry::connect(registry).await?;
                 reg.info(&name).await?;
             }
-            EmberCmd::Install { name, version, registry, yes, upgrade_host } => {
+            EmberCmd::Install {
+                name,
+                version,
+                registry,
+                yes,
+                upgrade_host,
+            } => {
                 let client = Client::with_url(home, url.clone())?;
                 let reg = registry::Registry::connect(registry).await?;
-                reg.install(&client, &name, version, yes, upgrade_host).await?;
+                reg.install(&client, &name, version, yes, upgrade_host)
+                    .await?;
             }
-            EmberCmd::Update { name, check, registry, yes } => {
+            EmberCmd::Update {
+                name,
+                check,
+                registry,
+                yes,
+            } => {
                 let client = Client::with_url(home, url.clone())?;
                 let reg = registry::Registry::connect(registry).await?;
                 reg.update(&client, name, check, yes).await?;
@@ -1141,7 +1202,12 @@ async fn main() -> Result<()> {
             let shell: clap_complete::Shell = shell
                 .parse()
                 .map_err(|_| anyhow::anyhow!("shell must be bash|zsh|fish"))?;
-            clap_complete::generate(shell, &mut Cli::command(), "hearthloom", &mut std::io::stdout());
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                "hearthloom",
+                &mut std::io::stdout(),
+            );
         }
     }
     Ok(())
@@ -1263,7 +1329,10 @@ async fn handle_intent(client: &Client, command: IntentCmd) -> Result<()> {
         }
         IntentCmd::Rm { name } => {
             client
-                .delete(&format!("/v1/intents/{}", urlencode(&name)), &[("actor", "human:cli".into())])
+                .delete(
+                    &format!("/v1/intents/{}", urlencode(&name)),
+                    &[("actor", "human:cli".into())],
+                )
                 .await?;
             println!("removed intent {name:?}");
         }
@@ -1282,11 +1351,18 @@ async fn handle_intent(client: &Client, command: IntentCmd) -> Result<()> {
                 let episode = &m["episode"];
                 println!(
                     "{}  [{}/{}]  {}{}",
-                    episode["event_time"].as_str().map(|t| &t[..10]).unwrap_or("????-??-??"),
+                    episode["event_time"]
+                        .as_str()
+                        .map(|t| &t[..10])
+                        .unwrap_or("????-??-??"),
                     episode["source"].as_str().unwrap_or("?"),
                     episode["kind"].as_str().unwrap_or("?"),
                     episode["title"].as_str().unwrap_or(""),
-                    if m["seen"].as_bool().unwrap_or(false) { "" } else { "  [new]" },
+                    if m["seen"].as_bool().unwrap_or(false) {
+                        ""
+                    } else {
+                        "  [new]"
+                    },
                 );
             }
         }
@@ -1370,7 +1446,12 @@ async fn ingest_tcc_source(
 
 async fn handle_identity(client: &Client, command: IdentityCmd) -> Result<()> {
     match command {
-        IdentityCmd::Claim { kind, value, entity, scope } => {
+        IdentityCmd::Claim {
+            kind,
+            value,
+            entity,
+            scope,
+        } => {
             let result = client
                 .post(
                     "/v1/identity/claim",
@@ -1412,7 +1493,11 @@ async fn handle_identity(client: &Client, command: IdentityCmd) -> Result<()> {
                 );
             }
         }
-        IdentityCmd::Resolve { review_id, same, distinct } => {
+        IdentityCmd::Resolve {
+            review_id,
+            same,
+            distinct,
+        } => {
             if same == distinct {
                 anyhow::bail!("pass exactly one of --same or --distinct");
             }
@@ -1464,7 +1549,11 @@ async fn handle_identity(client: &Client, command: IdentityCmd) -> Result<()> {
                     merge["winner"]["name"].as_str().unwrap_or("?"),
                     merge["loser_name"].as_str().unwrap_or("?"),
                     merge["reason"].as_str().unwrap_or(""),
-                    if merge["reverted_at"].is_string() { "  [reverted]" } else { "" },
+                    if merge["reverted_at"].is_string() {
+                        "  [reverted]"
+                    } else {
+                        ""
+                    },
                 );
             }
         }
@@ -1492,11 +1581,9 @@ fn print_recall(result: &Value) {
             println!("{time}  [{source}/{kind}]  {title}");
             if let Some(entities) = episode["entities"].as_array() {
                 for entity in entities {
-                    if let (Some(name), Some(etype), Some(role)) = (
-                        entity[0].as_str(),
-                        entity[1].as_str(),
-                        entity[2].as_str(),
-                    ) {
+                    if let (Some(name), Some(etype), Some(role)) =
+                        (entity[0].as_str(), entity[1].as_str(), entity[2].as_str())
+                    {
                         println!("    {role}: {name} ({etype})");
                     }
                 }
@@ -1541,7 +1628,11 @@ fn print_dossier(dossier: &Value) {
             println!("\nrelations:");
         }
         for edge in edges {
-            let arrow = if edge["direction"] == "out" { "→" } else { "←" };
+            let arrow = if edge["direction"] == "out" {
+                "→"
+            } else {
+                "←"
+            };
             println!(
                 "  {arrow} {} {} ({} citing episodes)",
                 edge["relation"].as_str().unwrap_or("?"),
@@ -1550,14 +1641,18 @@ fn print_dossier(dossier: &Value) {
             );
         }
     }
-    println!(
-        "\ncited by {} episodes; recent:",
-        dossier["episode_count"]
-    );
-    for episode in dossier["recent_episodes"].as_array().cloned().unwrap_or_default() {
+    println!("\ncited by {} episodes; recent:", dossier["episode_count"]);
+    for episode in dossier["recent_episodes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+    {
         println!(
             "  {}  [{}]  {}  ({})",
-            episode[3].as_str().map(|t| &t[..10]).unwrap_or("????-??-??"),
+            episode[3]
+                .as_str()
+                .map(|t| &t[..10])
+                .unwrap_or("????-??-??"),
             episode[1].as_str().unwrap_or("?"),
             episode[2].as_str().unwrap_or(""),
             episode[0].as_str().unwrap_or(""),

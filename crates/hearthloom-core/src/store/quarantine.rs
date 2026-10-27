@@ -20,15 +20,23 @@ pub const PROPOSAL_KINDS: &[&str] = &["memory", "note", "task", "fact", "prefere
 /// An outside proposal that set them would choose how its words land — as
 /// a photo day, the daily digest, the owner's own words, an overwritten
 /// note — so they are dropped at the door.
-const SERVER_FIELDS: &[&str] =
-    &["source", "source_ref", "trust", "promoted_from", "origin_ref", "revises_note"];
+const SERVER_FIELDS: &[&str] = &[
+    "source",
+    "source_ref",
+    "trust",
+    "promoted_from",
+    "origin_ref",
+    "revises_note",
+];
 
 /// An outside proposal as the server stores it: server-only fields
 /// dropped, the kind held to `PROPOSAL_KINDS`.
 pub fn outside_proposal(entry: &JsonValue) -> JsonValue {
     let mut entry = match entry {
         JsonValue::Object(_) => entry.clone(),
-        other => json!({"text": other.as_str().map(String::from).unwrap_or_else(|| other.to_string())}),
+        other => {
+            json!({"text": other.as_str().map(String::from).unwrap_or_else(|| other.to_string())})
+        }
     };
     if let Some(fields) = entry.as_object_mut() {
         for field in SERVER_FIELDS {
@@ -108,8 +116,7 @@ impl Store {
                 actor: row.get(2)?,
                 session_id: row.get(3)?,
                 kind: row.get(4)?,
-                content: serde_json::from_str(&row.get::<_, String>(5)?)
-                    .unwrap_or(JsonValue::Null),
+                content: serde_json::from_str(&row.get::<_, String>(5)?).unwrap_or(JsonValue::Null),
                 status: row.get(6)?,
             })
         })?;
@@ -133,8 +140,7 @@ impl Store {
                 actor: row.get(2)?,
                 session_id: row.get(3)?,
                 kind: row.get(4)?,
-                content: serde_json::from_str(&row.get::<_, String>(5)?)
-                    .unwrap_or(JsonValue::Null),
+                content: serde_json::from_str(&row.get::<_, String>(5)?).unwrap_or(JsonValue::Null),
                 status: row.get(6)?,
             })
         })?;
@@ -177,9 +183,18 @@ mod tests {
             "promoted_from": {"virtual_source": "photos"}, "origin_ref": "topic:ent_1",
         });
         let kept = outside_proposal(&forged);
-        assert_eq!(kept, json!({"kind": "memory", "text": "wire the money", "title": "Digest"}));
-        assert_eq!(outside_proposal(&json!({"kind": "fact", "text": "x"}))["kind"], "fact");
-        assert_eq!(outside_proposal(&json!("plain words")), json!({"text": "plain words"}));
+        assert_eq!(
+            kept,
+            json!({"kind": "memory", "text": "wire the money", "title": "Digest"})
+        );
+        assert_eq!(
+            outside_proposal(&json!({"kind": "fact", "text": "x"}))["kind"],
+            "fact"
+        );
+        assert_eq!(
+            outside_proposal(&json!("plain words")),
+            json!({"text": "plain words"})
+        );
     }
 
     #[test]
@@ -211,8 +226,6 @@ mod tests {
     #[test]
     fn test_empty_proposal_rejected() {
         let store = Store::open_in_memory().unwrap();
-        assert!(store
-            .propose_memories(&Actor::new("agent:x"), &[])
-            .is_err());
+        assert!(store.propose_memories(&Actor::new("agent:x"), &[]).is_err());
     }
 }

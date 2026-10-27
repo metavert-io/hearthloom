@@ -49,8 +49,17 @@ pub const SUMMARY_KINDS: &[&str] = &["summary", "review", "chapter"];
 
 /// The only tables an undo replays into.
 const TOUCHABLE: &[&str] = &[
-    "episodes", "episode_entities", "edge_provenance", "edges", "intent_matches",
-    "opportunities", "location_points", "semantic_pairs", "entities", "self_model", "sources",
+    "episodes",
+    "episode_entities",
+    "edge_provenance",
+    "edges",
+    "intent_matches",
+    "opportunities",
+    "location_points",
+    "semantic_pairs",
+    "entities",
+    "self_model",
+    "sources",
 ];
 
 /// Episodes per transaction when applying (the store-lock rule).
@@ -199,11 +208,19 @@ fn rows_json(conn: &Connection, sql: &str, param: &str) -> Result<Vec<Value>> {
         }
         Ok(Value::Object(obj))
     })?;
-    rows.collect::<std::result::Result<_, _>>().map_err(Into::into)
+    rows.collect::<std::result::Result<_, _>>()
+        .map_err(Into::into)
 }
 
 /// One line of the undo record.
-fn record(conn: &Connection, rid: &str, tbl: &str, op: &str, key: &str, prior: &Value) -> Result<()> {
+fn record(
+    conn: &Connection,
+    rid: &str,
+    tbl: &str,
+    op: &str,
+    key: &str,
+    prior: &Value,
+) -> Result<()> {
     conn.execute(
         "INSERT INTO retirement_rows (retirement_id, tbl, op, row_key, prior)
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -213,8 +230,18 @@ fn record(conn: &Connection, rid: &str, tbl: &str, op: &str, key: &str, prior: &
 }
 
 /// Delete the rows `filter` selects (one `?1`), saving each one first.
-fn delete_saved(conn: &Connection, rid: &str, table: &str, filter: &str, param: &str) -> Result<usize> {
-    let rows = rows_json(conn, &format!("SELECT * FROM {table} WHERE {filter}"), param)?;
+fn delete_saved(
+    conn: &Connection,
+    rid: &str,
+    table: &str,
+    filter: &str,
+    param: &str,
+) -> Result<usize> {
+    let rows = rows_json(
+        conn,
+        &format!("SELECT * FROM {table} WHERE {filter}"),
+        param,
+    )?;
     for r in &rows {
         record(conn, rid, table, "deleted", "", r)?;
     }
@@ -331,10 +358,20 @@ fn retire_episode(
         )
         .optional()?;
     let Some(prior) = prior else { return Ok(c) };
-    if prior.as_deref().is_some_and(|p| p.starts_with(RETIRED_PREFIX)) {
+    if prior
+        .as_deref()
+        .is_some_and(|p| p.starts_with(RETIRED_PREFIX))
+    {
         return Ok(c);
     }
-    record(conn, rid, "episodes", "updated", episode_id, &json!({"superseded_by": prior}))?;
+    record(
+        conn,
+        rid,
+        "episodes",
+        "updated",
+        episode_id,
+        &json!({"superseded_by": prior}),
+    )?;
     conn.execute(
         "UPDATE episodes SET superseded_by = ?1 WHERE id = ?2",
         params![format!("{RETIRED_PREFIX}{rid}"), episode_id],
@@ -354,7 +391,10 @@ fn retire_episode(
         }
     }
     if !links.is_empty() {
-        conn.execute("DELETE FROM episode_entities WHERE episode_id = ?1", [episode_id])?;
+        conn.execute(
+            "DELETE FROM episode_entities WHERE episode_id = ?1",
+            [episode_id],
+        )?;
     }
     c.links = links.len();
 
@@ -370,7 +410,11 @@ fn retire_episode(
     drop(stmt);
     for edge_id in &edges {
         record(
-            conn, rid, "edge_provenance", "deleted", "",
+            conn,
+            rid,
+            "edge_provenance",
+            "deleted",
+            "",
             &json!({"edge_id": edge_id, "episode_id": episode_id}),
         )?;
         conn.execute(
@@ -378,9 +422,11 @@ fn retire_episode(
             params![edge_id, episode_id],
         )?;
         let Some((strength, expired)) = conn
-            .query_row("SELECT strength, t_expired FROM edges WHERE id = ?1", [edge_id], |r| {
-                Ok((r.get::<_, f64>(0)?, r.get::<_, Option<String>>(1)?))
-            })
+            .query_row(
+                "SELECT strength, t_expired FROM edges WHERE id = ?1",
+                [edge_id],
+                |r| Ok((r.get::<_, f64>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
             .optional()?
         else {
             continue;
@@ -394,7 +440,11 @@ fn retire_episode(
         let lowered = (strength - 1.0).max(1.0);
         let retract = remaining == 0 && expired.is_none();
         record(
-            conn, rid, "edges", "updated", edge_id,
+            conn,
+            rid,
+            "edges",
+            "updated",
+            edge_id,
             &json!({
                 "strength_delta": strength - lowered,
                 "t_expired": expired,
@@ -428,7 +478,8 @@ struct OrphanContext {
 
 impl OrphanContext {
     fn load(conn: &Connection) -> Result<Self> {
-        let mut stmt = conn.prepare("SELECT DISTINCT merged_into FROM entities WHERE merged_into IS NOT NULL")?;
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT merged_into FROM entities WHERE merged_into IS NOT NULL")?;
         let merge_targets = stmt
             .query_map([], |r| r.get(0))?
             .collect::<std::result::Result<_, _>>()?;
@@ -437,7 +488,10 @@ impl OrphanContext {
         let goal_projects = stmt
             .query_map([], |r| r.get(0))?
             .collect::<std::result::Result<_, _>>()?;
-        Ok(OrphanContext { merge_targets, goal_projects })
+        Ok(OrphanContext {
+            merge_targets,
+            goal_projects,
+        })
     }
 
     /// Would this entity have nothing left — no live evidence beyond
@@ -469,12 +523,27 @@ impl OrphanContext {
 
 /// Hide the entities in `candidates` that have nothing left. Hidden,
 /// never deleted; a new live link un-hides (ingest_apply).
-fn hide_orphans(conn: &Connection, rid: &str, candidates: &HashSet<String>, ctx: &OrphanContext) -> Result<usize> {
+fn hide_orphans(
+    conn: &Connection,
+    rid: &str,
+    candidates: &HashSet<String>,
+    ctx: &OrphanContext,
+) -> Result<usize> {
     let mut hidden = 0;
     for id in candidates {
         if ctx.orphan(conn, id, 0)? {
-            record(conn, rid, "entities", "updated", id, &json!({"hidden_by": null}))?;
-            conn.execute("UPDATE entities SET hidden_by = ?1 WHERE id = ?2", params![rid, id])?;
+            record(
+                conn,
+                rid,
+                "entities",
+                "updated",
+                id,
+                &json!({"hidden_by": null}),
+            )?;
+            conn.execute(
+                "UPDATE entities SET hidden_by = ?1 WHERE id = ?2",
+                params![rid, id],
+            )?;
             hidden += 1;
         }
     }
@@ -484,7 +553,13 @@ fn hide_orphans(conn: &Connection, rid: &str, candidates: &HashSet<String>, ctx:
 /// About-me beliefs citing anything in `cited` go back to Tend (confirmed
 /// → proposed), prior state saved and journaled — self_model is
 /// operational state and syncs.
-fn beliefs_back(conn: &Connection, rid: &str, actor: &Actor, cited: &HashSet<String>, now: &str) -> Result<usize> {
+fn beliefs_back(
+    conn: &Connection,
+    rid: &str,
+    actor: &Actor,
+    cited: &HashSet<String>,
+    now: &str,
+) -> Result<usize> {
     let mut stmt = conn.prepare(
         "SELECT id, status, confirmed_at, evidence FROM self_model
          WHERE status = 'confirmed' AND evidence IS NOT NULL",
@@ -499,7 +574,14 @@ fn beliefs_back(conn: &Connection, rid: &str, actor: &Actor, cited: &HashSet<Str
         if !evidence.iter().any(|e| cited.contains(e)) {
             continue;
         }
-        record(conn, rid, "self_model", "updated", &id, &json!({"status": status, "confirmed_at": confirmed_at}))?;
+        record(
+            conn,
+            rid,
+            "self_model",
+            "updated",
+            &id,
+            &json!({"status": status, "confirmed_at": confirmed_at}),
+        )?;
         conn.execute(
             "UPDATE self_model SET status = 'proposed', confirmed_at = NULL, updated_at = ?1
              WHERE id = ?2",
@@ -530,16 +612,24 @@ fn restore_row(
     }
     match (op, tbl) {
         ("deleted", _) => {
-            let Some(obj) = prior.as_object() else { return Ok(()) };
+            let Some(obj) = prior.as_object() else {
+                return Ok(());
+            };
             if obj.is_empty()
-                || obj.keys().any(|c| !c.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_'))
+                || obj
+                    .keys()
+                    .any(|c| !c.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_'))
             {
                 return Ok(());
             }
             let cols: Vec<&str> = obj.keys().map(String::as_str).collect();
             let marks: Vec<String> = (1..=cols.len()).map(|i| format!("?{i}")).collect();
             let inserted = conn.execute(
-                &format!("INSERT OR IGNORE INTO {tbl} ({}) VALUES ({})", cols.join(", "), marks.join(", ")),
+                &format!(
+                    "INSERT OR IGNORE INTO {tbl} ({}) VALUES ({})",
+                    cols.join(", "),
+                    marks.join(", ")
+                ),
                 rusqlite::params_from_iter(obj.values().map(sql_value)),
             )?;
             // A link coming back is live evidence again: an entity another
@@ -556,7 +646,11 @@ fn restore_row(
         ("updated", "episodes") => {
             conn.execute(
                 "UPDATE episodes SET superseded_by = ?1 WHERE id = ?2 AND superseded_by = ?3",
-                params![prior["superseded_by"].as_str(), key, format!("{RETIRED_PREFIX}{rid}")],
+                params![
+                    prior["superseded_by"].as_str(),
+                    key,
+                    format!("{RETIRED_PREFIX}{rid}")
+                ],
             )?;
         }
         ("updated", "edges") => {
@@ -616,7 +710,10 @@ fn hide_rewrites(conn: &Connection, rid: &str) -> Result<usize> {
         .collect::<std::result::Result<_, _>>()?;
     drop(stmt);
     for (id, source_ref) in &rows {
-        let replaced = source_ref.rsplit_once('@').map(|(r, _)| r).unwrap_or(source_ref);
+        let replaced = source_ref
+            .rsplit_once('@')
+            .map(|(r, _)| r)
+            .unwrap_or(source_ref);
         conn.execute(
             "UPDATE episodes SET superseded_by = ?1 WHERE id = ?2",
             params![ids::episode_id("consolidation", replaced), id],
@@ -649,9 +746,12 @@ pub(crate) struct ArrivalRules {
 impl ArrivalRules {
     pub(crate) fn load(conn: &Connection) -> Result<Self> {
         let mut rules = ArrivalRules::default();
-        let mut stmt = conn.prepare("SELECT id, kind, target, regenerate, undone_at FROM retirements")?;
+        let mut stmt =
+            conn.prepare("SELECT id, kind, target, regenerate, undone_at FROM retirements")?;
         let rows: Vec<(String, String, String, String, Option<String>)> = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?
             .collect::<std::result::Result<_, _>>()?;
         for (id, kind, target, regenerate, undone) in rows {
             if undone.is_some() {
@@ -686,7 +786,11 @@ impl ArrivalRules {
         if self.live.is_empty() && self.undone.is_empty() {
             return Ok(Arrival::Live);
         }
-        if let Some(rid) = self.sources.get(source).or_else(|| self.memories.get(episode_id)) {
+        if let Some(rid) = self
+            .sources
+            .get(source)
+            .or_else(|| self.memories.get(episode_id))
+        {
             return Ok(Arrival::Retire(rid.clone()));
         }
         // A fuller revision of a retired memory (`<base>#r<n>` — photos
@@ -851,7 +955,14 @@ impl Store {
                     if superseded.is_some_and(|s| s.starts_with(RETIRED_PREFIX)) {
                         bail!("that memory is already retired");
                     }
-                    (if title.trim().is_empty() { target.to_string() } else { title }, scope == "private")
+                    (
+                        if title.trim().is_empty() {
+                            target.to_string()
+                        } else {
+                            title
+                        },
+                        scope == "private",
+                    )
                 }
                 "source" => {
                     let (n, private): (i64, i64) = conn.query_row(
@@ -901,7 +1012,8 @@ impl Store {
                 &json!({"id": id, "kind": kind, "target": target, "regenerate": regenerate.len()}),
             )?;
         }
-        self.retirement(&id)?.ok_or_else(|| anyhow!("retirement {id} vanished"))
+        self.retirement(&id)?
+            .ok_or_else(|| anyhow!("retirement {id} vanished"))
     }
 
     /// Beliefs a live retirement sent back to Tend: proposition id → what
@@ -915,11 +1027,24 @@ impl Store {
              JOIN retirements r ON r.id = rr.retirement_id AND r.undone_at IS NULL
              WHERE rr.tbl = 'self_model'",
         )?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?;
         let mut out = HashMap::new();
         for row in rows {
             let (id, label, private) = row?;
-            out.insert(id, if hide_private && private != 0 { "a memory you retired".to_string() } else { label });
+            out.insert(
+                id,
+                if hide_private && private != 0 {
+                    "a memory you retired".to_string()
+                } else {
+                    label
+                },
+            );
         }
         Ok(out)
     }
@@ -933,7 +1058,9 @@ impl Store {
     /// retired is skipped, so a crash mid-way resumes cleanly. Batched:
     /// ≤200 episodes per lock hold, 40ms between holds.
     pub fn retirement_apply(&self, rid: &str) -> Result<RetireCounts> {
-        let r = self.retirement(rid)?.ok_or_else(|| anyhow!("no retirement {rid}"))?;
+        let r = self
+            .retirement(rid)?
+            .ok_or_else(|| anyhow!("no retirement {rid}"))?;
         if r.undone_at.is_some() {
             return Ok(RetireCounts::default());
         }
@@ -995,11 +1122,25 @@ impl Store {
             counts.beliefs += beliefs_back(&tx, rid, &actor, &retired, &now)?;
             if r.kind == "source" {
                 let prior: Option<Option<String>> = tx
-                    .query_row("SELECT retired_by FROM sources WHERE name = ?1", [&r.target], |row| row.get(0))
+                    .query_row(
+                        "SELECT retired_by FROM sources WHERE name = ?1",
+                        [&r.target],
+                        |row| row.get(0),
+                    )
                     .optional()?;
                 if let Some(None) = prior {
-                    record(&tx, rid, "sources", "updated", &r.target, &json!({"retired_by": null}))?;
-                    tx.execute("UPDATE sources SET retired_by = ?1 WHERE name = ?2", params![rid, r.target])?;
+                    record(
+                        &tx,
+                        rid,
+                        "sources",
+                        "updated",
+                        &r.target,
+                        &json!({"retired_by": null}),
+                    )?;
+                    tx.execute(
+                        "UPDATE sources SET retired_by = ?1 WHERE name = ?2",
+                        params![rid, r.target],
+                    )?;
                 }
             }
             tx.commit()?;
@@ -1021,7 +1162,13 @@ impl Store {
             if changed == 0 {
                 bail!("no retirement {rid} to undo");
             }
-            record_mutation(&conn, actor, "retirement_undone", &format!("retirement_undone:{rid}"), &json!({"id": rid}))?;
+            record_mutation(
+                &conn,
+                actor,
+                "retirement_undone",
+                &format!("retirement_undone:{rid}"),
+                &json!({"id": rid}),
+            )?;
         }
         self.retirement_undo_local(rid)
     }
@@ -1042,7 +1189,9 @@ impl Store {
                          WHERE retirement_id = ?1 ORDER BY seq DESC LIMIT 500",
                     )?;
                     let rows = stmt
-                        .query_map([rid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+                        .query_map([rid], |r| {
+                            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                        })?
                         .collect::<std::result::Result<Vec<_>, _>>()?;
                     rows
                 };
@@ -1073,7 +1222,8 @@ impl Store {
     pub fn retirements_pending_here(&self) -> Result<Vec<(String, bool)>> {
         let rows: Vec<(String, Option<String>)> = {
             let conn = self.lock();
-            let mut stmt = conn.prepare("SELECT id, undone_at FROM retirements ORDER BY created_at")?;
+            let mut stmt =
+                conn.prepare("SELECT id, undone_at FROM retirements ORDER BY created_at")?;
             let rows = stmt
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1140,7 +1290,8 @@ impl Store {
         let mut entity_links: HashMap<String, i64> = HashMap::new();
         let mut live_links: HashMap<String, i64> = HashMap::new();
         let mut edge_support: HashMap<String, i64> = HashMap::new();
-        let (mut links, mut matches, mut opportunities, mut map_points, mut pairs) = (0i64, 0i64, 0i64, 0i64, 0i64);
+        let (mut links, mut matches, mut opportunities, mut map_points, mut pairs) =
+            (0i64, 0i64, 0i64, 0i64, 0i64);
         for chunk in ids.chunks(500) {
             let conn = self.lock();
             let marks = vec!["?"; chunk.len()].join(",");
@@ -1151,7 +1302,11 @@ impl Store {
                  GROUP BY ee.entity_id"
             ))?;
             for row in stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
             })? {
                 let (entity, n, live) = row?;
                 links += n;
@@ -1232,7 +1387,13 @@ impl Store {
                 hidden_total += 1;
                 if hidden.len() < 40 {
                     if let Some((name, kind, scope)) = stmt
-                        .query_row([entity], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+                        .query_row([entity], |r| {
+                            Ok((
+                                r.get::<_, String>(0)?,
+                                r.get::<_, String>(1)?,
+                                r.get::<_, String>(2)?,
+                            ))
+                        })
                         .optional()?
                     {
                         if !hide(&scope) {
@@ -1265,7 +1426,10 @@ impl Store {
                 }
                 let evidence: Vec<String> = serde_json::from_str(&evidence).unwrap_or_default();
                 let direct = evidence.iter().any(|e| set.contains(e));
-                let via: Vec<&String> = evidence.iter().filter(|e| summary_ids.contains(*e)).collect();
+                let via: Vec<&String> = evidence
+                    .iter()
+                    .filter(|e| summary_ids.contains(*e))
+                    .collect();
                 if direct || !via.is_empty() {
                     beliefs.push(json!({"id": id, "text": text, "always": direct, "via": via}));
                 }
@@ -1301,7 +1465,10 @@ impl Store {
                     .into(),
             );
         }
-        if covered.iter().any(|c| matches!(c.source.as_str(), "photos" | "visits")) {
+        if covered
+            .iter()
+            .any(|c| matches!(c.source.as_str(), "photos" | "visits"))
+        {
             untraceable.push(
                 "Location observations from your devices stay — they are device data, not part of \
                  the memory — and still feed visits."
@@ -1358,12 +1525,20 @@ impl Store {
                  WHERE s.episode_id IN ({marks}) AND e.superseded_by IS NULL"
             ))?;
             for row in stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
             })? {
                 let (id, kind, title, day) = row?;
                 if SUMMARY_KINDS.contains(&kind.as_str()) {
-                    hits.insert(id.clone(), json!({"id": id, "kind": kind, "title": title,
-                        "day": &day[..day.len().min(10)], "exact": true, "why": "it read this"}));
+                    hits.insert(
+                        id.clone(),
+                        json!({"id": id, "kind": kind, "title": title,
+                        "day": &day[..day.len().min(10)], "exact": true, "why": "it read this"}),
+                    );
                 }
             }
         }
@@ -1384,9 +1559,15 @@ impl Store {
         //    listed one more). Titles compare `one_line`d, as
         //    consolidate.rs chapter_draft now writes them.
         let mut by_month: HashMap<String, HashSet<String>> = HashMap::new();
-        for c in covered.iter().filter(|c| !is_summary(c) && c.scope != "private") {
+        for c in covered
+            .iter()
+            .filter(|c| !is_summary(c) && c.scope != "private")
+        {
             if c.event_key.len() >= 7 {
-                by_month.entry(c.event_key[..7].to_string()).or_default().insert(one_line(&c.title));
+                by_month
+                    .entry(c.event_key[..7].to_string())
+                    .or_default()
+                    .insert(one_line(&c.title));
             }
         }
         let mut stmt = conn.prepare(
@@ -1407,7 +1588,12 @@ impl Store {
                 // not at the first "written from:" (a heading could say it)
                 let read: Vec<String> = body
                     .split_once("\n\nwritten from:\n")
-                    .map(|(_, list)| list.lines().filter_map(|l| l.trim().strip_prefix("- ")).map(one_line).collect())
+                    .map(|(_, list)| {
+                        list.lines()
+                            .filter_map(|l| l.trim().strip_prefix("- "))
+                            .map(one_line)
+                            .collect()
+                    })
                     .unwrap_or_default();
                 if let Some(title) = read.iter().find(|t| titles.contains(*t)) {
                     hits.insert(id.clone(), json!({"id": id, "kind": "chapter", "title": heading,
@@ -1419,7 +1605,12 @@ impl Store {
         // 3. weekly reviews: what arrived in the 7 days before it was written
         let mut arrivals: Vec<&str> = covered
             .iter()
-            .filter(|c| !is_summary(c) && c.scope != "private" && c.kind != "health_day" && !c.title.is_empty())
+            .filter(|c| {
+                !is_summary(c)
+                    && c.scope != "private"
+                    && c.kind != "health_day"
+                    && !c.title.is_empty()
+            })
             .map(|c| c.ingest_time.as_str())
             .collect();
         arrivals.sort_unstable();
@@ -1430,7 +1621,9 @@ impl Store {
                    AND ingest_time >= ?1",
             )?;
             let rows: Vec<(String, String, String, String)> = stmt
-                .query_map([first], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                .query_map([first], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })?
                 .collect::<std::result::Result<_, _>>()?;
             for (id, title, written, day) in rows {
                 if hits.contains_key(&id) || recorded.contains(&id) {
@@ -1477,11 +1670,15 @@ impl Store {
                 else {
                     continue;
                 };
-                let ahead: i64 = newer.query_row(params![candidate.event_key, written], |r| r.get(0))?;
+                let ahead: i64 =
+                    newer.query_row(params![candidate.event_key, written], |r| r.get(0))?;
                 if ahead < 120 {
-                    hits.insert(id.clone(), json!({"id": id, "kind": "summary", "title": title,
+                    hits.insert(
+                        id.clone(),
+                        json!({"id": id, "kind": "summary", "title": title,
                         "day": &written[..written.len().min(10)], "exact": false,
-                        "why": "among the newest things when it was written"}));
+                        "why": "among the newest things when it was written"}),
+                    );
                 }
             }
         }
@@ -1538,7 +1735,9 @@ impl Store {
                         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                     )
                     .optional()?;
-                let Some((kind, source_ref, superseded, event_time, ingest_time)) = row else { continue };
+                let Some((kind, source_ref, superseded, event_time, ingest_time)) = row else {
+                    continue;
+                };
                 if !SUMMARY_KINDS.contains(&kind.as_str())
                     || superseded.as_deref() != Some(format!("{RETIRED_PREFIX}{rid}").as_str())
                 {
@@ -1639,12 +1838,28 @@ impl Store {
         )?;
         let inputs: Vec<Value> = stmt
             .query_map([since], |r| {
-                Ok(json!([r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?]))
+                Ok(json!([
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?
+                ]))
             })?
             .collect::<std::result::Result<_, _>>()?;
         drop(stmt);
-        let a = super::page_cursor(&conn, "synced_at", "FROM retirements WHERE synced_at > ?1", since, 500)?;
-        let b = super::page_cursor(&conn, "synced_at", "FROM summary_inputs WHERE synced_at > ?1", since, 2000)?;
+        let a = super::page_cursor(
+            &conn,
+            "synced_at",
+            "FROM retirements WHERE synced_at > ?1",
+            since,
+            500,
+        )?;
+        let b = super::page_cursor(
+            &conn,
+            "synced_at",
+            "FROM summary_inputs WHERE synced_at > ?1",
+            since,
+            2000,
+        )?;
         let mut full = Vec::new();
         if retirements.len() >= 500 {
             full.push(a.clone());
@@ -1663,7 +1878,12 @@ impl Store {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let mut changed = Vec::new();
-        for r in batch.get("retirements").and_then(|v| v.as_array()).into_iter().flatten() {
+        for r in batch
+            .get("retirements")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
             let (Some(id), Some(kind), Some(target), Some(updated)) = (
                 r["id"].as_str(),
                 r["kind"].as_str(),
@@ -1676,14 +1896,22 @@ impl Store {
                 continue;
             }
             let local: Option<String> = tx
-                .query_row("SELECT updated_at FROM retirements WHERE id = ?1", [id], |row| row.get(0))
+                .query_row(
+                    "SELECT updated_at FROM retirements WHERE id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
                 .optional()?;
             if local.as_deref().is_some_and(|l| l >= updated) {
                 continue;
             }
             let regenerate: Vec<String> = r["regenerate"]
                 .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             tx.execute(
                 "INSERT INTO retirements
@@ -1709,8 +1937,15 @@ impl Store {
             )?;
             changed.push(id.to_string());
         }
-        for input in batch.get("summary_inputs").and_then(|v| v.as_array()).into_iter().flatten() {
-            let (Some(summary), Some(episode)) = (input[0].as_str(), input[1].as_str()) else { continue };
+        for input in batch
+            .get("summary_inputs")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let (Some(summary), Some(episode)) = (input[0].as_str(), input[1].as_str()) else {
+                continue;
+            };
             tx.execute(
                 "INSERT OR IGNORE INTO summary_inputs (summary_id, episode_id, ts) VALUES (?1, ?2, ?3)",
                 params![summary, episode, input[2].as_str().unwrap_or("")],
@@ -1724,7 +1959,11 @@ impl Store {
 /// An RFC 3339 stamp moved by whole days (text compare stays valid).
 fn shift_days(stamp: &str, days: i64) -> String {
     chrono::DateTime::parse_from_rfc3339(stamp)
-        .map(|t| (t.with_timezone(&chrono::Utc) + chrono::Duration::days(days)).format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .map(|t| {
+            (t.with_timezone(&chrono::Utc) + chrono::Duration::days(days))
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string()
+        })
         .unwrap_or_else(|_| stamp.to_string())
 }
 
@@ -1735,7 +1974,13 @@ mod tests {
     use crate::time::{EventTime, TimeUncertainty};
     use crate::Home;
 
-    fn draft(source: &str, source_ref: &str, title: &str, entities: Vec<EntityRef>, edges: Vec<EdgeAssertion>) -> EpisodeDraft {
+    fn draft(
+        source: &str,
+        source_ref: &str,
+        title: &str,
+        entities: Vec<EntityRef>,
+        edges: Vec<EdgeAssertion>,
+    ) -> EpisodeDraft {
         EpisodeDraft {
             source: source.into(),
             source_ref: source_ref.into(),
@@ -1765,7 +2010,14 @@ mod tests {
 
     fn ingest(store: &Store, home: &Home, episodes: Vec<EpisodeDraft>) {
         store
-            .apply_batch(home, &IngestBatch { actor: "adapter:test".into(), session_id: None, episodes })
+            .apply_batch(
+                home,
+                &IngestBatch {
+                    actor: "adapter:test".into(),
+                    session_id: None,
+                    episodes,
+                },
+            )
             .unwrap();
     }
 
@@ -1775,10 +2027,15 @@ mod tests {
         let conn = store.lock();
         let mut out = Vec::new();
         for (table, order) in [
-            ("episodes", "id"), ("episode_entities", "episode_id, entity_id, role"),
-            ("edge_provenance", "edge_id, episode_id"), ("edges", "id"),
-            ("intent_matches", "intent_id, episode_id"), ("location_points", "episode_id, lat"),
-            ("entities", "id"), ("self_model", "id"), ("sources", "name"),
+            ("episodes", "id"),
+            ("episode_entities", "episode_id, entity_id, role"),
+            ("edge_provenance", "edge_id, episode_id"),
+            ("edges", "id"),
+            ("intent_matches", "intent_id, episode_id"),
+            ("location_points", "episode_id, lat"),
+            ("entities", "id"),
+            ("self_model", "id"),
+            ("sources", "name"),
         ] {
             let cols = match table {
                 "episodes" => "id, superseded_by",
@@ -1822,11 +2079,30 @@ mod tests {
     fn test_retire_and_undo_put_everything_back() {
         let (_tmp, home, store) = setup();
         // A (poisoned) introduces Mallory and links her to Ada; B also cites Ada.
-        ingest(&store, &home, vec![
-            draft("mbox", "<a@x>", "Wire the money", vec![person("Mallory", "author"), person("Ada", "recipient")],
-                  vec![EdgeAssertion { src: 0, relation: "knows".into(), dst: 1 }]),
-            draft("mbox", "<b@x>", "Lunch", vec![person("Ada", "author")], vec![]),
-        ]);
+        ingest(
+            &store,
+            &home,
+            vec![
+                draft(
+                    "mbox",
+                    "<a@x>",
+                    "Wire the money",
+                    vec![person("Mallory", "author"), person("Ada", "recipient")],
+                    vec![EdgeAssertion {
+                        src: 0,
+                        relation: "knows".into(),
+                        dst: 1,
+                    }],
+                ),
+                draft(
+                    "mbox",
+                    "<b@x>",
+                    "Lunch",
+                    vec![person("Ada", "author")],
+                    vec![],
+                ),
+            ],
+        );
         let a = id_of("mbox", "<a@x>");
         let b = id_of("mbox", "<b@x>");
         {
@@ -1865,24 +2141,59 @@ mod tests {
         assert_eq!(counts.beliefs, 1);
         {
             let conn = store.lock();
-            let sup: String = conn.query_row("SELECT superseded_by FROM episodes WHERE id = ?1", [&a], |r| r.get(0)).unwrap();
+            let sup: String = conn
+                .query_row(
+                    "SELECT superseded_by FROM episodes WHERE id = ?1",
+                    [&a],
+                    |r| r.get(0),
+                )
+                .unwrap();
             assert_eq!(sup, format!("retired:{}", r.id));
-            let live: Option<String> = conn.query_row("SELECT superseded_by FROM episodes WHERE id = ?1", [&b], |r| r.get(0)).unwrap();
+            let live: Option<String> = conn
+                .query_row(
+                    "SELECT superseded_by FROM episodes WHERE id = ?1",
+                    [&b],
+                    |r| r.get(0),
+                )
+                .unwrap();
             assert!(live.is_none());
-            let mallory: Option<String> = conn.query_row("SELECT hidden_by FROM entities WHERE name = 'Mallory'", [], |r| r.get(0)).unwrap();
+            let mallory: Option<String> = conn
+                .query_row(
+                    "SELECT hidden_by FROM entities WHERE name = 'Mallory'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
             assert_eq!(mallory.as_deref(), Some(r.id.as_str()));
-            let ada: Option<String> = conn.query_row("SELECT hidden_by FROM entities WHERE name = 'Ada'", [], |r| r.get(0)).unwrap();
+            let ada: Option<String> = conn
+                .query_row(
+                    "SELECT hidden_by FROM entities WHERE name = 'Ada'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
             assert!(ada.is_none(), "Ada still has live evidence");
-            let status: String = conn.query_row("SELECT status FROM self_model WHERE id = 'sm_1'", [], |r| r.get(0)).unwrap();
+            let status: String = conn
+                .query_row("SELECT status FROM self_model WHERE id = 'sm_1'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
             assert_eq!(status, "proposed");
         }
         // Tend can say why the belief is asking again.
         assert_eq!(
-            store.beliefs_sent_back().unwrap().get("sm_1").map(String::as_str),
+            store
+                .beliefs_sent_back()
+                .unwrap()
+                .get("sm_1")
+                .map(String::as_str),
             Some("Wire the money")
         );
         // Applying again changes nothing.
-        assert_eq!(store.retirement_apply(&r.id).unwrap(), RetireCounts::default());
+        assert_eq!(
+            store.retirement_apply(&r.id).unwrap(),
+            RetireCounts::default()
+        );
 
         store.retirement_undo(&actor, &r.id).unwrap();
         assert_eq!(snapshot(&store), before);
@@ -1893,22 +2204,56 @@ mod tests {
     #[test]
     fn test_a_retired_source_keeps_its_late_arrivals_retired() {
         let (_tmp, home, store) = setup();
-        ingest(&store, &home, vec![draft("facebook", "p1", "post one", vec![person("Eve", "author")], vec![])]);
+        ingest(
+            &store,
+            &home,
+            vec![draft(
+                "facebook",
+                "p1",
+                "post one",
+                vec![person("Eve", "author")],
+                vec![],
+            )],
+        );
         let actor = Actor::new("human:test");
         let r = store.retire(&actor, "source", "facebook", &[], "").unwrap();
         store.retirement_apply(&r.id).unwrap();
         // a later import of the same source lands retired, its new entity hidden
-        ingest(&store, &home, vec![draft("facebook", "p2", "post two", vec![person("Trent", "author")], vec![])]);
+        ingest(
+            &store,
+            &home,
+            vec![draft(
+                "facebook",
+                "p2",
+                "post two",
+                vec![person("Trent", "author")],
+                vec![],
+            )],
+        );
         let conn = store.lock();
         let sup: String = conn
-            .query_row("SELECT superseded_by FROM episodes WHERE id = ?1", [id_of("facebook", "p2")], |r| r.get(0))
+            .query_row(
+                "SELECT superseded_by FROM episodes WHERE id = ?1",
+                [id_of("facebook", "p2")],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(sup, format!("retired:{}", r.id));
         let links: i64 = conn
-            .query_row("SELECT COUNT(*) FROM episode_entities WHERE episode_id = ?1", [id_of("facebook", "p2")], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM episode_entities WHERE episode_id = ?1",
+                [id_of("facebook", "p2")],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(links, 0);
-        let trent: Option<String> = conn.query_row("SELECT hidden_by FROM entities WHERE name = 'Trent'", [], |r| r.get(0)).unwrap();
+        let trent: Option<String> = conn
+            .query_row(
+                "SELECT hidden_by FROM entities WHERE name = 'Trent'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(trent.as_deref(), Some(r.id.as_str()));
     }
 
@@ -1927,18 +2272,40 @@ mod tests {
         ingest(&store, &home, vec![day]);
         let conn = store.lock();
         let state = |id: &str| -> Option<String> {
-            conn.query_row("SELECT superseded_by FROM episodes WHERE id = ?1", [id], |r| r.get(0)).unwrap()
+            conn.query_row(
+                "SELECT superseded_by FROM episodes WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
         };
-        assert_eq!(state(&first), Some(format!("retired:{}", r.id)), "the retired copy keeps its mark");
-        assert_eq!(state(&id_of("photos", "photos:2026-09-03#r2")), Some(format!("retired:{}", r.id)));
+        assert_eq!(
+            state(&first),
+            Some(format!("retired:{}", r.id)),
+            "the retired copy keeps its mark"
+        );
+        assert_eq!(
+            state(&id_of("photos", "photos:2026-09-03#r2")),
+            Some(format!("retired:{}", r.id))
+        );
     }
 
     #[test]
     fn test_cascades_and_kept_opportunities_retire_with_their_seed() {
         let (_tmp, home, store) = setup();
-        ingest(&store, &home, vec![draft("mbox", "<s@x>", "seed", vec![], vec![])]);
+        ingest(
+            &store,
+            &home,
+            vec![draft("mbox", "<s@x>", "seed", vec![], vec![])],
+        );
         let seed = id_of("mbox", "<s@x>");
-        let mut cascade = draft("consolidation", &format!("cascade:in_1:{seed}"), "brief", vec![], vec![]);
+        let mut cascade = draft(
+            "consolidation",
+            &format!("cascade:in_1:{seed}"),
+            "brief",
+            vec![],
+            vec![],
+        );
         cascade.kind = "cascade".into();
         ingest(&store, &home, vec![cascade]);
         let actor = Actor::new("human:test");
@@ -1946,12 +2313,22 @@ mod tests {
         let counts = store.retirement_apply(&r.id).unwrap();
         assert_eq!(counts.episodes, 2);
         // a second cascade of the same seed arriving later lands retired too
-        let mut late = draft("consolidation", &format!("cascade:in_2:{seed}"), "late brief", vec![], vec![]);
+        let mut late = draft(
+            "consolidation",
+            &format!("cascade:in_2:{seed}"),
+            "late brief",
+            vec![],
+            vec![],
+        );
         late.kind = "cascade".into();
         ingest(&store, &home, vec![late]);
         let conn = store.lock();
         let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM episodes WHERE superseded_by = ?1", [format!("retired:{}", r.id)], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM episodes WHERE superseded_by = ?1",
+                [format!("retired:{}", r.id)],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(n, 3);
     }
@@ -1960,7 +2337,13 @@ mod tests {
     fn test_a_retirement_travels_to_the_peer_and_so_does_its_undo() {
         let (_tmp, home, a) = setup();
         let b = Store::open_in_memory().unwrap();
-        let episodes = vec![draft("mbox", "<p@x>", "Wire the money", vec![person("Mallory", "author")], vec![])];
+        let episodes = vec![draft(
+            "mbox",
+            "<p@x>",
+            "Wire the money",
+            vec![person("Mallory", "author")],
+            vec![],
+        )];
         ingest(&a, &home, episodes.clone());
         ingest(&b, &home, episodes);
         let target = id_of("mbox", "<p@x>");
@@ -1968,23 +2351,42 @@ mod tests {
         let r = a.retire(&actor, "memory", &target, &[], "").unwrap();
         a.retirement_apply(&r.id).unwrap();
 
-        let changed = b.retirements_sync_apply(&a.retirements_sync_export("").unwrap()).unwrap();
+        let changed = b
+            .retirements_sync_apply(&a.retirements_sync_export("").unwrap())
+            .unwrap();
         assert_eq!(changed, vec![r.id.clone()]);
-        assert_eq!(b.retirements_pending_here().unwrap(), vec![(r.id.clone(), false)]);
+        assert_eq!(
+            b.retirements_pending_here().unwrap(),
+            vec![(r.id.clone(), false)]
+        );
         b.retirement_apply(&r.id).unwrap();
         let retired = |s: &Store| -> Option<String> {
-            s.lock().query_row("SELECT superseded_by FROM episodes WHERE id = ?1", [&target], |r| r.get(0)).unwrap()
+            s.lock()
+                .query_row(
+                    "SELECT superseded_by FROM episodes WHERE id = ?1",
+                    [&target],
+                    |r| r.get(0),
+                )
+                .unwrap()
         };
         assert_eq!(retired(&b), Some(format!("retired:{}", r.id)));
         // nothing new to apply: the same page again changes nothing
-        assert!(b.retirements_sync_apply(&a.retirements_sync_export("").unwrap()).unwrap().is_empty());
+        assert!(b
+            .retirements_sync_apply(&a.retirements_sync_export("").unwrap())
+            .unwrap()
+            .is_empty());
 
         // stamps are compared as text; make sure the undo is strictly newer
         std::thread::sleep(std::time::Duration::from_millis(1100));
         a.retirement_undo(&actor, &r.id).unwrap();
-        let changed = b.retirements_sync_apply(&a.retirements_sync_export("").unwrap()).unwrap();
+        let changed = b
+            .retirements_sync_apply(&a.retirements_sync_export("").unwrap())
+            .unwrap();
         assert_eq!(changed, vec![r.id.clone()]);
-        assert_eq!(b.retirements_pending_here().unwrap(), vec![(r.id.clone(), true)]);
+        assert_eq!(
+            b.retirements_pending_here().unwrap(),
+            vec![(r.id.clone(), true)]
+        );
         b.retirement_undo_local(&r.id).unwrap();
         assert_eq!(retired(&b), None);
         assert!(b.retirements_pending_here().unwrap().is_empty());
@@ -1993,22 +2395,39 @@ mod tests {
     #[test]
     fn test_summaries_are_found_rewritten_and_put_back() {
         let (_tmp, home, store) = setup();
-        ingest(&store, &home, vec![
-            draft("mbox", "<m@x>", "Wire the money", vec![], vec![]),
-            draft("mbox", "<n@x>", "Lunch", vec![], vec![]),
-        ]);
+        ingest(
+            &store,
+            &home,
+            vec![
+                draft("mbox", "<m@x>", "Wire the money", vec![], vec![]),
+                draft("mbox", "<n@x>", "Lunch", vec![], vec![]),
+            ],
+        );
         let memory = id_of("mbox", "<m@x>");
         let other = id_of("mbox", "<n@x>");
-        let mut chapter = draft("consolidation", "chapter:2026-09", "A month of money",
-            vec![], vec![]);
+        let mut chapter = draft(
+            "consolidation",
+            "chapter:2026-09",
+            "A month of money",
+            vec![],
+            vec![],
+        );
         chapter.kind = "chapter".into();
         chapter.body = "chapter heading for 2026-09: A month of money\n\nwritten from:\n- Wire the money\n- Lunch".into();
-        let mut digest = draft("consolidation", "summary:2026-09-11", "Consolidation digest 2026-09-11", vec![], vec![]);
+        let mut digest = draft(
+            "consolidation",
+            "summary:2026-09-11",
+            "Consolidation digest 2026-09-11",
+            vec![],
+            vec![],
+        );
         digest.kind = "summary".into();
         ingest(&store, &home, vec![chapter, digest]);
         let chapter_id = id_of("consolidation", "chapter:2026-09");
         let digest_id = id_of("consolidation", "summary:2026-09-11");
-        store.record_summary_inputs(&digest_id, &[memory.clone(), other.clone()]).unwrap();
+        store
+            .record_summary_inputs(&digest_id, &[memory.clone(), other.clone()])
+            .unwrap();
 
         let preview = store.retirement_preview("memory", &memory).unwrap();
         let found: Vec<(&str, bool)> = preview["summaries"]
@@ -2021,7 +2440,15 @@ mod tests {
         assert!(found.contains(&("summary", true)), "{found:?}");
 
         let actor = Actor::new("human:test");
-        let r = store.retire(&actor, "memory", &memory, std::slice::from_ref(&digest_id), "").unwrap();
+        let r = store
+            .retire(
+                &actor,
+                "memory",
+                &memory,
+                std::slice::from_ref(&digest_id),
+                "",
+            )
+            .unwrap();
         store.retirement_apply(&r.id).unwrap();
         let jobs = store.rewrite_jobs(10).unwrap();
         assert_eq!(jobs.len(), 1, "only the ticked summary is rewritten");
@@ -2029,10 +2456,19 @@ mod tests {
         assert_eq!(jobs[0].new_ref, format!("summary:2026-09-11@{}", r.id));
         // its recorded inputs, minus what was retired
         let inputs = store.recorded_inputs(&digest_id).unwrap().unwrap();
-        assert_eq!(inputs.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), vec![other.as_str()]);
+        assert_eq!(
+            inputs.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            vec![other.as_str()]
+        );
 
         // the rewrite lands; nothing is left to do
-        let mut rewrite = draft("consolidation", &jobs[0].new_ref, "Consolidation digest 2026-09-11", vec![], vec![]);
+        let mut rewrite = draft(
+            "consolidation",
+            &jobs[0].new_ref,
+            "Consolidation digest 2026-09-11",
+            vec![],
+            vec![],
+        );
         rewrite.kind = "summary".into();
         ingest(&store, &home, vec![rewrite]);
         assert!(store.rewrite_jobs(10).unwrap().is_empty());
@@ -2041,11 +2477,19 @@ mod tests {
         store.retirement_undo(&actor, &r.id).unwrap();
         let conn = store.lock();
         let state = |id: &str| -> Option<String> {
-            conn.query_row("SELECT superseded_by FROM episodes WHERE id = ?1", [id], |r| r.get(0)).unwrap()
+            conn.query_row(
+                "SELECT superseded_by FROM episodes WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
         };
         assert_eq!(state(&digest_id), None);
         assert_eq!(state(&memory), None);
-        assert_eq!(state(&id_of("consolidation", &jobs[0].new_ref)), Some(digest_id.clone()));
+        assert_eq!(
+            state(&id_of("consolidation", &jobs[0].new_ref)),
+            Some(digest_id.clone())
+        );
         assert_eq!(state(&chapter_id), None);
     }
 
@@ -2057,21 +2501,48 @@ mod tests {
     #[test]
     fn test_chapter_provenance_prefers_recorded_inputs() {
         let (_tmp, home, store) = setup();
-        ingest(&store, &home, vec![
-            draft("mbox", "<m@x>", "Wire the money", vec![], vec![]),
-            draft("ics", "lunch-1", "Lunch", vec![], vec![]),
-            draft("mbox", "<p@x>", "Payroll", vec![], vec![]),
-        ]);
-        let (memory, lunch, payroll) = (id_of("mbox", "<m@x>"), id_of("ics", "lunch-1"), id_of("mbox", "<p@x>"));
-        let mut recorded = draft("consolidation", "chapter:2026-09", "Lunches", vec![], vec![]);
+        ingest(
+            &store,
+            &home,
+            vec![
+                draft("mbox", "<m@x>", "Wire the money", vec![], vec![]),
+                draft("ics", "lunch-1", "Lunch", vec![], vec![]),
+                draft("mbox", "<p@x>", "Payroll", vec![], vec![]),
+            ],
+        );
+        let (memory, lunch, payroll) = (
+            id_of("mbox", "<m@x>"),
+            id_of("ics", "lunch-1"),
+            id_of("mbox", "<p@x>"),
+        );
+        let mut recorded = draft(
+            "consolidation",
+            "chapter:2026-09",
+            "Lunches",
+            vec![],
+            vec![],
+        );
         recorded.kind = "chapter".into();
-        recorded.body = "chapter heading for 2026-09: Lunches\n\nwritten from:\n- Lunch\n- Wire the money".into();
-        let mut legacy = draft("consolidation", "chapter:2026-09@rt_old", "Pay day", vec![], vec![]);
+        recorded.body =
+            "chapter heading for 2026-09: Lunches\n\nwritten from:\n- Lunch\n- Wire the money"
+                .into();
+        let mut legacy = draft(
+            "consolidation",
+            "chapter:2026-09@rt_old",
+            "Pay day",
+            vec![],
+            vec![],
+        );
         legacy.kind = "chapter".into();
         legacy.body = "chapter heading for 2026-09: Pay day written from: - Wire the money\n\nwritten from:\n- Payroll".into();
         ingest(&store, &home, vec![recorded, legacy]);
-        let (recorded, legacy) = (id_of("consolidation", "chapter:2026-09"), id_of("consolidation", "chapter:2026-09@rt_old"));
-        store.record_summary_inputs(&recorded, std::slice::from_ref(&lunch)).unwrap();
+        let (recorded, legacy) = (
+            id_of("consolidation", "chapter:2026-09"),
+            id_of("consolidation", "chapter:2026-09@rt_old"),
+        );
+        store
+            .record_summary_inputs(&recorded, std::slice::from_ref(&lunch))
+            .unwrap();
 
         let reading = |target: &str| -> Vec<(String, String)> {
             let preview = store.retirement_preview("memory", target).unwrap();
@@ -2079,14 +2550,31 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|s| (s["id"].as_str().unwrap().to_string(), s["why"].as_str().unwrap().to_string()))
+                .map(|s| {
+                    (
+                        s["id"].as_str().unwrap().to_string(),
+                        s["why"].as_str().unwrap().to_string(),
+                    )
+                })
                 .collect();
             found.sort();
             found
         };
-        assert!(reading(&memory).is_empty(), "the forged entries tick no chapter");
-        assert_eq!(reading(&lunch), vec![(recorded.clone(), "it read this".to_string())]);
-        assert_eq!(reading(&payroll), vec![(legacy.clone(), "its heading was written from “Payroll”".to_string())]);
+        assert!(
+            reading(&memory).is_empty(),
+            "the forged entries tick no chapter"
+        );
+        assert_eq!(
+            reading(&lunch),
+            vec![(recorded.clone(), "it read this".to_string())]
+        );
+        assert_eq!(
+            reading(&payroll),
+            vec![(
+                legacy.clone(),
+                "its heading was written from “Payroll”".to_string()
+            )]
+        );
     }
 
     /// THE RETIREMENT CONTRACT (D.12): every SQL statement that READS the
@@ -2100,8 +2588,14 @@ mod tests {
     #[test]
     fn test_every_reader_honours_supersession() {
         const TABLES: &[&str] = &[
-            "episodes", "episode_entities", "edge_provenance", "chunks", "episode_fts",
-            "intent_matches", "semantic_pairs", "opportunities",
+            "episodes",
+            "episode_entities",
+            "edge_provenance",
+            "chunks",
+            "episode_fts",
+            "intent_matches",
+            "semantic_pairs",
+            "opportunities",
         ];
         fn reads_record(literal: &str) -> bool {
             let words: Vec<&str> = literal.split_whitespace().collect();
@@ -2115,7 +2609,9 @@ mod tests {
         }
         fn is_write(literal: &str) -> bool {
             let head = literal.trim_start().to_ascii_uppercase();
-            ["UPDATE", "DELETE", "CREATE", "ALTER", "DROP"].iter().any(|w| head.starts_with(w))
+            ["UPDATE", "DELETE", "CREATE", "ALTER", "DROP"]
+                .iter()
+                .any(|w| head.starts_with(w))
                 || (head.starts_with("INSERT") && !head.contains("SELECT"))
         }
         /// (line, text) of every "…" and r#"…"# literal outside comments.
@@ -2134,7 +2630,9 @@ mod tests {
                         closing.extend(std::iter::repeat_n(b'#', j - i - 1));
                         let start = j + 1;
                         let mut k = start;
-                        while k + closing.len() <= bytes.len() && bytes[k..k + closing.len()] != closing[..] {
+                        while k + closing.len() <= bytes.len()
+                            && bytes[k..k + closing.len()] != closing[..]
+                        {
                             k += 1;
                         }
                         let line = src[..i].matches('\n').count() + 1;
@@ -2179,7 +2677,8 @@ mod tests {
             concat!(env!("CARGO_MANIFEST_DIR"), "/src"),
             concat!(env!("CARGO_MANIFEST_DIR"), "/../hearthloom-daemon/src"),
         ];
-        let mut stack: Vec<std::path::PathBuf> = roots.iter().map(std::path::PathBuf::from).collect();
+        let mut stack: Vec<std::path::PathBuf> =
+            roots.iter().map(std::path::PathBuf::from).collect();
         let mut files = 0;
         while let Some(dir) = stack.pop() {
             for entry in std::fs::read_dir(&dir).unwrap() {
@@ -2206,8 +2705,18 @@ mod tests {
                     if above.contains("// all-episodes:") {
                         continue;
                     }
-                    let name = path.strip_prefix(env!("CARGO_MANIFEST_DIR")).unwrap_or(&path).display().to_string();
-                    let snippet: String = literal.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(110).collect();
+                    let name = path
+                        .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                        .unwrap_or(&path)
+                        .display()
+                        .to_string();
+                    let snippet: String = literal
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .chars()
+                        .take(110)
+                        .collect();
                     offenders.push(format!("{name}:{line}: {snippet}"));
                 }
             }

@@ -10,25 +10,55 @@
 
 /// Local-part markers that mean "a machine sent this".
 const MACHINE_LOCAL_MARKERS: &[&str] = &[
-    "noreply", "no-reply", "no_reply", "donotreply", "do-not-reply",
-    "do_not_reply", "mailer-daemon", "mailerdaemon", "postmaster",
-    "bounce", "bounces", "notification", "notifications", "notify",
-    "alerts", "newsletter", "newsletters", "digest", "marketing",
-    "mailings", "email-updates", "emailupdates", "auto-confirm",
-    "autoconfirm", "unsubscribe", "undisclosed-recipients",
+    "noreply",
+    "no-reply",
+    "no_reply",
+    "donotreply",
+    "do-not-reply",
+    "do_not_reply",
+    "mailer-daemon",
+    "mailerdaemon",
+    "postmaster",
+    "bounce",
+    "bounces",
+    "notification",
+    "notifications",
+    "notify",
+    "alerts",
+    "newsletter",
+    "newsletters",
+    "digest",
+    "marketing",
+    "mailings",
+    "email-updates",
+    "emailupdates",
+    "auto-confirm",
+    "autoconfirm",
+    "unsubscribe",
+    "undisclosed-recipients",
     // transactional order-tracking senders (orders@shop, order-status@…)
-    "order", "orders",
+    "order",
+    "orders",
     // hotel/travel reservation desks — a different guest each time
-    "reservation", "reservations",
+    "reservation",
+    "reservations",
 ];
 
 /// Domains that only ever relay machine mail (ESPs, gateways,
 /// comment/notification bridges).
 const MACHINE_DOMAIN_MARKERS: &[&str] = &[
-    "amazonses.com", "sendgrid.net", "mailgun", "mandrillapp.com",
-    "sparkpostmail", "pm-bounces", "bounces.google.com",
-    "docs.google.com", "calendar-server.bounces.google.com",
-    "txt.voice.google.com", "mail-relay", "email.mg",
+    "amazonses.com",
+    "sendgrid.net",
+    "mailgun",
+    "mandrillapp.com",
+    "sparkpostmail",
+    "pm-bounces",
+    "bounces.google.com",
+    "docs.google.com",
+    "calendar-server.bounces.google.com",
+    "txt.voice.google.com",
+    "mail-relay",
+    "email.mg",
     // Google Calendar machinery: opaque resource/room/group attendee
     // addresses (group./resource./import.calendar.google.com). Catches
     // the ones whose local part is too short for the entropy rule.
@@ -51,9 +81,7 @@ pub fn is_machine_email(address: &str) -> bool {
     }
     // marker must be a whole segment or prefix/suffix of one, not an
     // accidental substring of a real name ("cannotreplytoday" stays)
-    let segments: Vec<&str> = local
-        .split(['.', '+', '-', '_', '='])
-        .collect();
+    let segments: Vec<&str> = local.split(['.', '+', '-', '_', '=']).collect();
     let joined = segments.join("-"); // normalized for two-word markers
     for marker in MACHINE_LOCAL_MARKERS {
         if segments.contains(marker) || joined.contains(marker) {
@@ -146,7 +174,7 @@ mod tests {
             "priya.nair@ledger.example",
             "ada.lovelace+lists@gmail.com",
             "cannotreplytoday@example.com", // marker only as a substring of a word
-            "abc123@gmail.com",          // short token — below the entropy bar
+            "abc123@gmail.com",             // short token — below the entropy bar
         ] {
             assert!(!is_machine_email(addr), "{addr} should be human");
         }

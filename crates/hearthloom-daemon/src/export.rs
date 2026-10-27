@@ -52,18 +52,42 @@ pub const DIR_CLASSES: &[(&str, DirClass)] = &[
     // secret (plugins/<name>/key) is carved out in walk() — secrets
     // never export, and a restored node re-mints keys on reinstall.
     ("plugins", DirClass::Exported),
-    ("archives", DirClass::Excluded("original third-party exports — re-obtainable, often multi-GB")),
+    (
+        "archives",
+        DirClass::Excluded("original third-party exports — re-obtainable, often multi-GB"),
+    ),
     ("inbox", DirClass::Excluded("transient drop folder")),
-    ("models", DirClass::Excluded("embedding model — re-downloadable")),
-    ("mounts", DirClass::Excluded("virtual-source mountpoints — data lives at origin")),
+    (
+        "models",
+        DirClass::Excluded("embedding model — re-downloadable"),
+    ),
+    (
+        "mounts",
+        DirClass::Excluded("virtual-source mountpoints — data lives at origin"),
+    ),
     ("exports", DirClass::Excluded("the export output itself")),
-    ("BRAIN.md", DirClass::Excluded("derived — regenerates from the store")),
-    ("SKILL.md", DirClass::Excluded("derived — regenerates from the store")),
-    ("daemon.log", DirClass::Excluded("diagnostics, not record data")),
+    (
+        "BRAIN.md",
+        DirClass::Excluded("derived — regenerates from the store"),
+    ),
+    (
+        "SKILL.md",
+        DirClass::Excluded("derived — regenerates from the store"),
+    ),
+    (
+        "daemon.log",
+        DirClass::Excluded("diagnostics, not record data"),
+    ),
     (".env", DirClass::Excluded("secrets never export")),
     (".env.sealed", DirClass::Excluded("secrets never export")),
-    (".ember-secrets.key", DirClass::Excluded("the key ember secrets are sealed with — secrets never export")),
-    ("hearthloom.db", DirClass::Excluded("live db — the zip carries a consistent snapshot instead")),
+    (
+        ".ember-secrets.key",
+        DirClass::Excluded("the key ember secrets are sealed with — secrets never export"),
+    ),
+    (
+        "hearthloom.db",
+        DirClass::Excluded("live db — the zip carries a consistent snapshot instead"),
+    ),
     ("hearthloom.db-wal", DirClass::Excluded("live db journal")),
     ("hearthloom.db-shm", DirClass::Excluded("live db journal")),
 ];
@@ -72,7 +96,9 @@ const KEY_PROGRESS: &str = "export.progress";
 const PAGE: i64 = 1000;
 
 fn set_progress(state: &AppState, v: Value) {
-    let _ = state.store.set_consolidation_state(KEY_PROGRESS, &v.to_string());
+    let _ = state
+        .store
+        .set_consolidation_state(KEY_PROGRESS, &v.to_string());
 }
 
 pub fn progress(state: &AppState) -> Value {
@@ -96,12 +122,15 @@ pub async fn run_export(state: AppState) {
     let result = build(&state, started).await;
     match result {
         Ok((path, bytes)) => {
-            set_progress(&state, json!({
-                "phase": "ready", "pct": 100, "eta_seconds": 0,
-                "file": path.file_name().map(|f| f.to_string_lossy().into_owned()),
-                "bytes": bytes,
-                "finished": hearthloom_core::time::now_utc(),
-            }));
+            set_progress(
+                &state,
+                json!({
+                    "phase": "ready", "pct": 100, "eta_seconds": 0,
+                    "file": path.file_name().map(|f| f.to_string_lossy().into_owned()),
+                    "bytes": bytes,
+                    "finished": hearthloom_core::time::now_utc(),
+                }),
+            );
             crate::provisioner::notify_system(
                 &state, "info", "Your export is ready",
                 "download it from the Privacy page — it can rebuild your whole record on a fresh node",
@@ -109,7 +138,10 @@ pub async fn run_export(state: AppState) {
             );
         }
         Err(err) => {
-            set_progress(&state, json!({"phase": "error", "error": format!("{err:#}")}));
+            set_progress(
+                &state,
+                json!({"phase": "error", "error": format!("{err:#}")}),
+            );
         }
     }
 }
@@ -298,7 +330,9 @@ fn collect_files(home: &hearthloom_core::Home) -> (Vec<String>, Vec<String>) {
 }
 
 fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -307,8 +341,7 @@ fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
             let rel = rel.to_string_lossy().into_owned();
             // plugins/<name>/key = that plugin's PAT secret — the one
             // file inside an Exported dir that must never leave.
-            if rel.starts_with("plugins/") && rel.ends_with("/key")
-                && rel.matches('/').count() == 2
+            if rel.starts_with("plugins/") && rel.ends_with("/key") && rel.matches('/').count() == 2
             {
                 continue;
             }
@@ -343,8 +376,11 @@ pub fn apply_incoming_restore(home: &hearthloom_core::Home) -> Result<()> {
     let _ = std::fs::remove_file(home.root().join("hearthloom.db-wal"));
     let _ = std::fs::remove_file(home.root().join("hearthloom.db-shm"));
     std::fs::rename(&incoming, &db).context("placing the restored db")?;
-    tracing::info!("restore applied: {} → hearthloom.db (previous db kept as {})",
-        "hearthloom.db.incoming", backup.display());
+    tracing::info!(
+        "restore applied: {} → hearthloom.db (previous db kept as {})",
+        "hearthloom.db.incoming",
+        backup.display()
+    );
     Ok(())
 }
 
@@ -393,7 +429,9 @@ pub fn stage_restore(state: &AppState, zip_path: &Path) -> Result<Value> {
         extracted += 1;
     }
     if !has_db {
-        return Err(anyhow!("that zip has no hearthloom.db — not a Hearthloom export"));
+        return Err(anyhow!(
+            "that zip has no hearthloom.db — not a Hearthloom export"
+        ));
     }
     Ok(json!({
         "staged": true,
@@ -410,10 +448,21 @@ mod tests {
     #[test]
     fn test_restore_lands_only_inside_the_home() {
         let root = Path::new("/srv/hl");
-        assert_eq!(restore_dest(root, "hearthloom.db"), Some(root.join("hearthloom.db.incoming")));
-        assert_eq!(restore_dest(root, "files/notes/a.md"), Some(root.join("notes/a.md")));
+        assert_eq!(
+            restore_dest(root, "hearthloom.db"),
+            Some(root.join("hearthloom.db.incoming"))
+        );
+        assert_eq!(
+            restore_dest(root, "files/notes/a.md"),
+            Some(root.join("notes/a.md"))
+        );
         assert_eq!(restore_dest(root, "manifest.json"), None);
-        for evil in ["files/../../etc/x", "files//etc/passwd", "files/./x", "files/a/../../b"] {
+        for evil in [
+            "files/../../etc/x",
+            "files//etc/passwd",
+            "files/./x",
+            "files/a/../../b",
+        ] {
             assert_eq!(restore_dest(root, evil), None, "{evil:?} must be skipped");
         }
     }
@@ -435,9 +484,17 @@ mod tests {
         let mut out = Vec::new();
         walk(&root.join("plugins"), root, &mut out);
         out.sort();
-        assert_eq!(out, vec!["plugins/demo/data/state.json", "plugins/demo/pkg/hearthember.json"]);
-        assert!(DIR_CLASSES.iter().any(|(n, c)| *n == hearthloom_core::secrets::NODE_SEAL_KEY_FILE
-            && matches!(c, DirClass::Excluded(_))));
+        assert_eq!(
+            out,
+            vec![
+                "plugins/demo/data/state.json",
+                "plugins/demo/pkg/hearthember.json"
+            ]
+        );
+        assert!(DIR_CLASSES
+            .iter()
+            .any(|(n, c)| *n == hearthloom_core::secrets::NODE_SEAL_KEY_FILE
+                && matches!(c, DirClass::Excluded(_))));
     }
 
     #[test]
@@ -474,7 +531,10 @@ mod tests {
         std::fs::write(home.root().join("somenewfeature/data.bin"), "keep me").unwrap();
         let (files, warnings) = collect_files(&home);
         assert!(files.iter().any(|f| f == "raw/x.txt"));
-        assert!(!files.iter().any(|f| f.starts_with("archives/")), "excluded dir leaked");
+        assert!(
+            !files.iter().any(|f| f.starts_with("archives/")),
+            "excluded dir leaked"
+        );
         // the safe default: unknown dirs EXPORT, loudly
         assert!(files.iter().any(|f| f == "somenewfeature/data.bin"));
         assert_eq!(warnings.len(), 1);

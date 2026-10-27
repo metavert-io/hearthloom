@@ -186,9 +186,15 @@ fn html_to_text(html: &str) -> String {
             }
             '>' if in_tag => {
                 in_tag = false;
-                let t = tag.trim_start_matches('/').split_whitespace().next().unwrap_or("");
-                if matches!(t, "p" | "br" | "div" | "h1" | "h2" | "h3" | "h4" | "li" | "blockquote" | "tr")
-                    && !out.ends_with("\n\n")
+                let t = tag
+                    .trim_start_matches('/')
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("");
+                if matches!(
+                    t,
+                    "p" | "br" | "div" | "h1" | "h2" | "h3" | "h4" | "li" | "blockquote" | "tr"
+                ) && !out.ends_with("\n\n")
                 {
                     out.push('\n');
                     if tag.starts_with('/') && matches!(t, "p" | "h1" | "h2" | "h3" | "h4") {

@@ -48,7 +48,11 @@ impl Store {
                      WHERE device_state.t_end IS NULL AND excluded.t_end IS NOT NULL",
                 rusqlite::params![source, s.key, s.state, s.since, s.until, device, now_utc()],
             )?;
-            if changed == 1 { accepted += 1 } else { duplicates += 1 }
+            if changed == 1 {
+                accepted += 1
+            } else {
+                duplicates += 1
+            }
         }
         tx.commit()?;
         Ok((accepted, duplicates))
@@ -86,7 +90,13 @@ impl Store {
             })?
             .collect::<std::result::Result<_, _>>()?;
         drop(stmt);
-        let next = super::page_cursor(&conn, "synced_at", "FROM device_state WHERE synced_at > ?1", since, limit)?;
+        let next = super::page_cursor(
+            &conn,
+            "synced_at",
+            "FROM device_state WHERE synced_at > ?1",
+            since,
+            limit,
+        )?;
         Ok(json!({ "items": items, "next": next }))
     }
 
@@ -96,7 +106,12 @@ impl Store {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let mut applied = 0usize;
-        for r in batch.get("items").and_then(|v| v.as_array()).into_iter().flatten() {
+        for r in batch
+            .get("items")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
             let (Some(source), Some(key), Some(state), Some(t_start)) = (
                 r.get("source").and_then(|v| v.as_str()),
                 r.get("key").and_then(|v| v.as_str()),
@@ -111,7 +126,10 @@ impl Store {
                  ON CONFLICT(source, key) DO UPDATE SET t_end = excluded.t_end
                      WHERE device_state.t_end IS NULL AND excluded.t_end IS NOT NULL",
                 rusqlite::params![
-                    source, key, state, t_start,
+                    source,
+                    key,
+                    state,
+                    t_start,
                     r.get("t_end").and_then(|v| v.as_str()),
                     r.get("device").and_then(|v| v.as_str()).unwrap_or("peer"),
                     now_utc()
@@ -136,14 +154,37 @@ mod tests {
             since: "2026-08-15T09:00:00Z".into(),
             until: None,
         };
-        assert_eq!(store.device_states_add("ios-focus", "iPhone", std::slice::from_ref(&open)).unwrap(), (1, 0));
+        assert_eq!(
+            store
+                .device_states_add("ios-focus", "iPhone", std::slice::from_ref(&open))
+                .unwrap(),
+            (1, 0)
+        );
         // replaying the open span is a no-op
-        assert_eq!(store.device_states_add("ios-focus", "iPhone", std::slice::from_ref(&open)).unwrap(), (0, 1));
+        assert_eq!(
+            store
+                .device_states_add("ios-focus", "iPhone", std::slice::from_ref(&open))
+                .unwrap(),
+            (0, 1)
+        );
         // the closing follow-up fills t_end in place
-        let closed = DeviceStateIn { until: Some("2026-08-15T11:30:00Z".into()), ..open };
-        assert_eq!(store.device_states_add("ios-focus", "iPhone", std::slice::from_ref(&closed)).unwrap(), (1, 0));
+        let closed = DeviceStateIn {
+            until: Some("2026-08-15T11:30:00Z".into()),
+            ..open
+        };
+        assert_eq!(
+            store
+                .device_states_add("ios-focus", "iPhone", std::slice::from_ref(&closed))
+                .unwrap(),
+            (1, 0)
+        );
         // and replaying the closed span is again a no-op
-        assert_eq!(store.device_states_add("ios-focus", "iPhone", &[closed]).unwrap(), (0, 1));
+        assert_eq!(
+            store
+                .device_states_add("ios-focus", "iPhone", &[closed])
+                .unwrap(),
+            (0, 1)
+        );
         let (n, _, days) = store.device_state_stats("ios-focus").unwrap();
         assert_eq!((n, days), (1, 1));
     }

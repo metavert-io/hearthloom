@@ -48,8 +48,8 @@ pub fn fix(s: &str) -> String {
 }
 
 fn load_json(path: &Path) -> Result<Value> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
 }
 
@@ -97,7 +97,9 @@ pub fn friends(root: &Path) -> Result<Vec<FbConnection>> {
     if friends_path.is_file() {
         let v = load_json(&friends_path)?;
         for f in v["friends_v2"].as_array().into_iter().flatten() {
-            let Some(name) = f["name"].as_str() else { continue };
+            let Some(name) = f["name"].as_str() else {
+                continue;
+            };
             out.push(FbConnection {
                 name: fix(name),
                 connected_at: f["timestamp"].as_i64().and_then(day_of),
@@ -110,7 +112,9 @@ pub fn friends(root: &Path) -> Result<Vec<FbConnection>> {
     if removed_path.is_file() {
         let v = load_json(&removed_path)?;
         for f in v["deleted_friends_v2"].as_array().into_iter().flatten() {
-            let Some(name) = f["name"].as_str() else { continue };
+            let Some(name) = f["name"].as_str() else {
+                continue;
+            };
             out.push(FbConnection {
                 name: fix(name),
                 connected_at: None,
@@ -177,7 +181,10 @@ pub fn ingest(root: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
             source_ref: "profile".into(),
             kind: "fb_profile".into(),
             title: format!("Facebook profile — {owner}"),
-            body: format!("Identities from the Facebook profile export.\n{}", lines.join("\n")),
+            body: format!(
+                "Identities from the Facebook profile export.\n{}",
+                lines.join("\n")
+            ),
             event_time: EventTime {
                 utc: None,
                 tz_offset_minutes: None,
@@ -212,7 +219,9 @@ fn posts(activity: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
             _ => vec![],
         };
         for post in &arr {
-            let Some(ts) = post["timestamp"].as_i64().filter(|t| *t > 0) else { continue };
+            let Some(ts) = post["timestamp"].as_i64().filter(|t| *t > 0) else {
+                continue;
+            };
             let title = fix(post["title"].as_str().unwrap_or(""));
             let mut text_parts: Vec<String> = Vec::new();
             for d in post["data"].as_array().into_iter().flatten() {
@@ -243,7 +252,11 @@ fn posts(activity: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
                             // into a forged `[HH:MM] x (lat,lon)` of its own.
                             place_lines.push((
                                 format!("[{}] {pname} ({lat},{lon})", hhmm_of(ts)),
-                                format!("[{}] {} ({lat},{lon})", hhmm_of(ts), hearthloom_core::one_line(&pname)),
+                                format!(
+                                    "[{}] {} ({lat},{lon})",
+                                    hhmm_of(ts),
+                                    hearthloom_core::one_line(&pname)
+                                ),
                             ));
                         }
                     }
@@ -277,7 +290,13 @@ fn posts(activity: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
                 if !attachment_names.is_empty() {
                     let names: Vec<String> = attachment_names
                         .iter()
-                        .map(|n| if clean { hearthloom_core::one_line(n) } else { n.clone() })
+                        .map(|n| {
+                            if clean {
+                                hearthloom_core::one_line(n)
+                            } else {
+                                n.clone()
+                            }
+                        })
                         .collect();
                     body.push_str(&format!("\nattached: {}\n", names.join(", ")));
                 }
@@ -297,8 +316,18 @@ fn posts(activity: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
                 continue;
             }
             let display_title = if title.is_empty() {
-                let first = text.lines().next().unwrap_or("").chars().take(80).collect::<String>();
-                if first.is_empty() { "Facebook post".into() } else { first }
+                let first = text
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(80)
+                    .collect::<String>();
+                if first.is_empty() {
+                    "Facebook post".into()
+                } else {
+                    first
+                }
             } else {
                 title
             };
@@ -341,7 +370,9 @@ fn albums(activity: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
             .filter(|t| *t > 0)
             .collect();
         times.sort_unstable();
-        let Some(&first) = times.first() else { continue };
+        let Some(&first) = times.first() else {
+            continue;
+        };
         let span = match (day_of(first), times.last().and_then(|t| day_of(*t))) {
             (Some(a), Some(b)) if a != b => format!("{a} → {b}"),
             (Some(a), _) => a,
@@ -372,7 +403,12 @@ fn albums(activity: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
 
 fn messages(activity: &Path, scope: Option<&str>, owner: &str) -> Result<Vec<EpisodeDraft>> {
     let mut drafts = Vec::new();
-    for folder in ["inbox", "archived_threads", "e2ee_cutover", "filtered_threads"] {
+    for folder in [
+        "inbox",
+        "archived_threads",
+        "e2ee_cutover",
+        "filtered_threads",
+    ] {
         let dir = activity.join("messages").join(folder);
         if !dir.is_dir() {
             continue;
@@ -439,8 +475,12 @@ fn thread_episodes(
                 .collect();
         }
         for m in v["messages"].as_array().into_iter().flatten() {
-            let Some(ts_ms) = m["timestamp_ms"].as_i64() else { continue };
-            let Some(content) = m["content"].as_str() else { continue };
+            let Some(ts_ms) = m["timestamp_ms"].as_i64() else {
+                continue;
+            };
+            let Some(content) = m["content"].as_str() else {
+                continue;
+            };
             let content = fix(content);
             if content.trim().is_empty() {
                 continue;
@@ -463,7 +503,11 @@ fn thread_episodes(
     for m in &all {
         *sent.entry(m.sender.clone()).or_default() += 1;
     }
-    let others: Vec<String> = participants.iter().filter(|p| *p != owner).cloned().collect();
+    let others: Vec<String> = participants
+        .iter()
+        .filter(|p| *p != owner)
+        .cloned()
+        .collect();
     let is_dm = others.len() == 1;
     let qualified: Vec<String> = if is_dm {
         others.clone()
@@ -493,8 +537,16 @@ fn thread_episodes(
     for (date, msgs) in buckets {
         let mut body = format!("chat: {chat_label}\ndate: {date}\n\n");
         for m in &msgs {
-            let sender = if m.sender == owner { "me" } else { m.sender.as_str() };
-            let line = format!("[{}] {sender}: {}\n", hhmm_of(m.ts_ms / 1000), m.content.trim());
+            let sender = if m.sender == owner {
+                "me"
+            } else {
+                m.sender.as_str()
+            };
+            let line = format!(
+                "[{}] {sender}: {}\n",
+                hhmm_of(m.ts_ms / 1000),
+                m.content.trim()
+            );
             if body.len() + line.len() > BODY_CAP {
                 body.push_str("[truncated]\n");
                 break;
@@ -536,10 +588,13 @@ fn thread_episodes(
 fn events(activity: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
     let mut drafts = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    let push = |name: String, ts: i64, description: String, role: &str,
-                    drafts: &mut Vec<EpisodeDraft>,
-                    seen: &mut std::collections::HashSet<String>,
-                    scope: Option<&str>| {
+    let push = |name: String,
+                ts: i64,
+                description: String,
+                role: &str,
+                drafts: &mut Vec<EpisodeDraft>,
+                seen: &mut std::collections::HashSet<String>,
+                scope: Option<&str>| {
         let key = format!("{name}:{ts}");
         if ts <= 0 || name.is_empty() || !seen.insert(key.clone()) {
             return;
@@ -567,7 +622,11 @@ fn events(activity: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
     let joined_path = activity.join("events/your_event_responses.json");
     if joined_path.is_file() {
         let v = load_json(&joined_path)?;
-        for e in v["event_responses_v2"]["events_joined"].as_array().into_iter().flatten() {
+        for e in v["event_responses_v2"]["events_joined"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
             push(
                 fix(e["name"].as_str().unwrap_or("")),
                 e["start_timestamp"].as_i64().unwrap_or(0),
@@ -599,7 +658,10 @@ fn events(activity: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
         let v = load_json(&hosted_path)?;
         let arr = match &v {
             Value::Array(a) => a.clone(),
-            Value::Object(o) => o.values().find_map(|x| x.as_array().cloned()).unwrap_or_default(),
+            Value::Object(o) => o
+                .values()
+                .find_map(|x| x.as_array().cloned())
+                .unwrap_or_default(),
             _ => vec![],
         };
         for e in &arr {
@@ -637,11 +699,16 @@ fn groups(activity: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
         let v = load_json(&path)?;
         let arr = match &v {
             Value::Array(a) => a.clone(),
-            Value::Object(o) => o.values().find_map(|x| x.as_array().cloned()).unwrap_or_default(),
+            Value::Object(o) => o
+                .values()
+                .find_map(|x| x.as_array().cloned())
+                .unwrap_or_default(),
             _ => vec![],
         };
         for it in &arr {
-            let Some(ts) = it["timestamp"].as_i64().filter(|t| *t > 0) else { continue };
+            let Some(ts) = it["timestamp"].as_i64().filter(|t| *t > 0) else {
+                continue;
+            };
             let mut group = String::new();
             let mut text = String::new();
             for d in it["data"].as_array().into_iter().flatten() {
@@ -669,7 +736,11 @@ fn groups(activity: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
     let mut buckets: BTreeMap<(String, String), Vec<Item>> = BTreeMap::new();
     for item in items {
         let Some(day) = day_of(item.ts) else { continue };
-        let group = if item.group.is_empty() { "unknown group".into() } else { item.group.clone() };
+        let group = if item.group.is_empty() {
+            "unknown group".into()
+        } else {
+            item.group.clone()
+        };
         buckets.entry((group, day)).or_default().push(item);
     }
     let mut drafts = Vec::new();
@@ -732,7 +803,10 @@ mod tests {
     #[test]
     fn test_mojibake_repair() {
         // "ð¥°" as chars → UTF-8 bytes for 🥰
-        let masked: String = [0xf0u8, 0x9f, 0xa5, 0xb0].iter().map(|b| *b as char).collect();
+        let masked: String = [0xf0u8, 0x9f, 0xa5, 0xb0]
+            .iter()
+            .map(|b| *b as char)
+            .collect();
         assert_eq!(fix(&masked), "🥰");
         // em dash
         let masked: String = [0xe2u8, 0x80, 0x94].iter().map(|b| *b as char).collect();
@@ -800,14 +874,27 @@ mod tests {
         let post = drafts.iter().find(|d| d.kind == "fb_post").unwrap();
         // the exact line the location index reads (core store/locations.rs
         // parse_location_lines tests the same shape): the pair closes it
-        assert!(post.body.contains("\n[12:00] Lakeside Park (12.34,-56.78)\n"), "coordinate line for the location index");
-        assert!(post.entities.iter().any(|e| e.entity_type == "Place" && e.name == "Lakeside Park"));
-        assert!(post.entities.iter().any(|e| e.name == "Ada Lovelace" && e.role == "tagged"));
+        assert!(
+            post.body
+                .contains("\n[12:00] Lakeside Park (12.34,-56.78)\n"),
+            "coordinate line for the location index"
+        );
+        assert!(post
+            .entities
+            .iter()
+            .any(|e| e.entity_type == "Place" && e.name == "Lakeside Park"));
+        assert!(post
+            .entities
+            .iter()
+            .any(|e| e.name == "Ada Lovelace" && e.role == "tagged"));
 
         let msg = drafts.iter().find(|d| d.kind == "fb_message").unwrap();
         assert!(msg.body.contains("me: hello"), "owner lines say 'me'");
         assert_eq!(msg.entities.len(), 1, "DM partner becomes the one entity");
-        assert_eq!(msg.entities[0].attributes[0], ("facebook".into(), "ada_123".into()));
+        assert_eq!(
+            msg.entities[0].attributes[0],
+            ("facebook".into(), "ada_123".into())
+        );
 
         let connections = friends(root).unwrap();
         assert_eq!(connections.len(), 1);

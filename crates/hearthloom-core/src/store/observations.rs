@@ -92,12 +92,26 @@ impl Store {
                               t_end, tz_offset_minutes, place, day, actor, ingest_time)
                          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
                         rusqlite::params![
-                            format!("{source}|{}", o.key), source, o.key, o.lat, o.lon,
-                            o.accuracy_m, o.t_start, o.t_end, o.tz_offset_minutes,
-                            o.place, day, actor, now_utc()
+                            format!("{source}|{}", o.key),
+                            source,
+                            o.key,
+                            o.lat,
+                            o.lon,
+                            o.accuracy_m,
+                            o.t_start,
+                            o.t_end,
+                            o.tz_offset_minutes,
+                            o.place,
+                            day,
+                            actor,
+                            now_utc()
                         ],
                     )?;
-                    if changed == 1 { accepted += 1 } else { duplicates += 1 }
+                    if changed == 1 {
+                        accepted += 1
+                    } else {
+                        duplicates += 1
+                    }
                 }
                 tx.commit()?;
             }
@@ -122,7 +136,8 @@ impl Store {
              ORDER BY lo.day",
         )?;
         let rows = stmt.query_map([today_local], |row| row.get(0))?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// All observations for one local day, time-ordered — the clustering
@@ -147,7 +162,8 @@ impl Store {
                 place: row.get(8)?,
             })
         })?;
-        rows.collect::<std::result::Result<_, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
     }
 
     /// The minted ledger row: (obs_count, keys_hash, revision).
@@ -225,7 +241,11 @@ impl Store {
     /// (rowid, id, source_ref, body). The working set of a pass that reads
     /// each visit once (daemon visits.rs, the calendar-only cleanup) —
     /// private visits too: it decides lifecycle and shows nothing.
-    pub fn visits_after(&self, after_rowid: i64, limit: usize) -> Result<Vec<(i64, String, String, String)>> {
+    pub fn visits_after(
+        &self,
+        after_rowid: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, String, String, String)>> {
         let conn = self.lock();
         // idx_episodes_source (source, kind) walks the visits in rowid
         // order; the body comes from the FTS row by its rowid pointer
@@ -239,7 +259,8 @@ impl Store {
         let rows = stmt.query_map(rusqlite::params![after_rowid, limit as i64], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })?;
-        rows.collect::<std::result::Result<_, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
     }
 
     /// Withdraw visit episodes: each (id, marker) still live is marked
@@ -247,7 +268,12 @@ impl Store {
     /// same on every node — and loses its map point, like any superseded
     /// row. Content stays; nothing leaves `episodes`. One mutation per
     /// visit says why. Returns how many were withdrawn.
-    pub fn withdraw_visits(&self, actor: &Actor, reason: &str, withdrawals: &[(String, String)]) -> Result<usize> {
+    pub fn withdraw_visits(
+        &self,
+        actor: &Actor,
+        reason: &str,
+        withdrawals: &[(String, String)],
+    ) -> Result<usize> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let mut n = 0usize;
@@ -302,7 +328,13 @@ impl Store {
             })?
             .collect::<std::result::Result<_, _>>()?;
         drop(stmt);
-        let next = super::page_cursor(&conn, "synced_at", "FROM location_observation WHERE synced_at > ?1", since, limit)?;
+        let next = super::page_cursor(
+            &conn,
+            "synced_at",
+            "FROM location_observation WHERE synced_at > ?1",
+            since,
+            limit,
+        )?;
         Ok(json!({ "items": items, "next": next }))
     }
 
@@ -313,8 +345,21 @@ impl Store {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let mut applied = 0usize;
-        for r in batch.get("items").and_then(|v| v.as_array()).into_iter().flatten() {
-            let (Some(id), Some(source), Some(source_ref), Some(lat), Some(lon), Some(t_start), Some(day)) = (
+        for r in batch
+            .get("items")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let (
+                Some(id),
+                Some(source),
+                Some(source_ref),
+                Some(lat),
+                Some(lon),
+                Some(t_start),
+                Some(day),
+            ) = (
                 r.get("id").and_then(|v| v.as_str()),
                 r.get("source").and_then(|v| v.as_str()),
                 r.get("source_ref").and_then(|v| v.as_str()),
@@ -322,7 +367,8 @@ impl Store {
                 r.get("lon").and_then(|v| v.as_f64()),
                 r.get("t_start").and_then(|v| v.as_str()),
                 r.get("day").and_then(|v| v.as_str()),
-            ) else {
+            )
+            else {
                 continue;
             };
             applied += tx.execute(
@@ -331,11 +377,17 @@ impl Store {
                       t_end, tz_offset_minutes, place, day, actor, ingest_time)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
                 rusqlite::params![
-                    id, source, source_ref, lat, lon,
+                    id,
+                    source,
+                    source_ref,
+                    lat,
+                    lon,
                     r.get("accuracy_m").and_then(|v| v.as_f64()),
                     t_start,
                     r.get("t_end").and_then(|v| v.as_str()),
-                    r.get("tz_offset_minutes").and_then(|v| v.as_i64()).unwrap_or(0),
+                    r.get("tz_offset_minutes")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
                     r.get("place").and_then(|v| v.as_str()),
                     day,
                     r.get("actor").and_then(|v| v.as_str()).unwrap_or("peer"),
@@ -384,10 +436,25 @@ mod tests {
     fn test_observations_idempotent_per_source() {
         let store = Store::open_in_memory().unwrap();
         let rows = vec![obs("k1", "2026-08-10T15:00:00Z", 42.36, -71.06)];
-        assert_eq!(store.observations_add("ios-visits", "adapter:ios", &rows).unwrap(), (1, 0));
-        assert_eq!(store.observations_add("ios-visits", "adapter:ios", &rows).unwrap(), (0, 1));
+        assert_eq!(
+            store
+                .observations_add("ios-visits", "adapter:ios", &rows)
+                .unwrap(),
+            (1, 0)
+        );
+        assert_eq!(
+            store
+                .observations_add("ios-visits", "adapter:ios", &rows)
+                .unwrap(),
+            (0, 1)
+        );
         // the SAME key under a different source is a different observation
-        assert_eq!(store.observations_add("photos", "adapter:photos", &rows).unwrap(), (1, 0));
+        assert_eq!(
+            store
+                .observations_add("photos", "adapter:photos", &rows)
+                .unwrap(),
+            (1, 0)
+        );
         assert_eq!(store.observations_for_day("2026-08-10").unwrap().len(), 2);
     }
 
@@ -395,19 +462,33 @@ mod tests {
     fn test_days_needing_visits_and_ledger() {
         let store = Store::open_in_memory().unwrap();
         store
-            .observations_add("ios-visits", "a", &[obs("k1", "2026-08-10T15:00:00Z", 42.0, -71.0)])
+            .observations_add(
+                "ios-visits",
+                "a",
+                &[obs("k1", "2026-08-10T15:00:00Z", 42.0, -71.0)],
+            )
             .unwrap();
         assert_eq!(
             store.observation_days_needing_visits("2026-08-12").unwrap(),
             vec!["2026-08-10"]
         );
         // today never clusters
-        assert!(store.observation_days_needing_visits("2026-08-10").unwrap().is_empty());
+        assert!(store
+            .observation_days_needing_visits("2026-08-10")
+            .unwrap()
+            .is_empty());
         store.set_visit_day_state("2026-08-10", 1, "h", 1).unwrap();
-        assert!(store.observation_days_needing_visits("2026-08-12").unwrap().is_empty());
+        assert!(store
+            .observation_days_needing_visits("2026-08-12")
+            .unwrap()
+            .is_empty());
         // a new observation reopens the day
         store
-            .observations_add("photos", "a", &[obs("k2", "2026-08-10T16:00:00Z", 42.0, -71.0)])
+            .observations_add(
+                "photos",
+                "a",
+                &[obs("k2", "2026-08-10T16:00:00Z", 42.0, -71.0)],
+            )
             .unwrap();
         assert_eq!(
             store.observation_days_needing_visits("2026-08-12").unwrap(),
@@ -419,8 +500,12 @@ mod tests {
     fn test_peer_export_apply_roundtrip() {
         let a = Store::open_in_memory().unwrap();
         let b = Store::open_in_memory().unwrap();
-        a.observations_add("ios-visits", "a", &[obs("k1", "2026-08-10T15:00:00Z", 42.0, -71.0)])
-            .unwrap();
+        a.observations_add(
+            "ios-visits",
+            "a",
+            &[obs("k1", "2026-08-10T15:00:00Z", 42.0, -71.0)],
+        )
+        .unwrap();
         let page = a.observations_since("", 100).unwrap();
         assert_eq!(b.observations_apply(&page).unwrap(), 1);
         assert_eq!(b.observations_apply(&page).unwrap(), 0, "replay is a no-op");

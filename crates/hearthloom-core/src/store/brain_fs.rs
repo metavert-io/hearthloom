@@ -79,9 +79,8 @@ impl Store {
             return Ok(None);
         };
         let mut out = format!("# {name}\n\n*{entity_type}*\n\n");
-        let mut attrs = conn.prepare(
-            "SELECT kind, value FROM entity_attributes WHERE entity_id = ?1 LIMIT 20",
-        )?;
+        let mut attrs = conn
+            .prepare("SELECT kind, value FROM entity_attributes WHERE entity_id = ?1 LIMIT 20")?;
         let attrs: Vec<(String, String)> = attrs
             .query_map([&id], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<std::result::Result<_, _>>()?;
@@ -228,11 +227,8 @@ mod tests {
             kind: "note".into(),
             title: title.into(),
             body: body.into(),
-            event_time: EventTime::parse_rfc3339(
-                "2026-07-01T10:00:00Z",
-                TimeUncertainty::Exact,
-            )
-            .unwrap(),
+            event_time: EventTime::parse_rfc3339("2026-07-01T10:00:00Z", TimeUncertainty::Exact)
+                .unwrap(),
             trust: "self".into(),
             scope: Some(scope.into()),
             entities: vec![],
@@ -252,8 +248,18 @@ mod tests {
                     actor: "human:test".into(),
                     session_id: None,
                     episodes: vec![
-                        draft("a", "public plans for the garden", "planting tomatoes", "personal"),
-                        draft("b", "private medical detail", "secret tomato diagnosis", "private"),
+                        draft(
+                            "a",
+                            "public plans for the garden",
+                            "planting tomatoes",
+                            "personal",
+                        ),
+                        draft(
+                            "b",
+                            "private medical detail",
+                            "secret tomato diagnosis",
+                            "private",
+                        ),
                     ],
                 },
             )

@@ -136,7 +136,10 @@ pub fn pull_new(
         let mut msgs = feed.fetch_batch(chunk)?;
         for m in &mut msgs {
             if personal.contains(&m.uid)
-                && !m.labels.iter().any(|l| l.eq_ignore_ascii_case("Category Personal"))
+                && !m
+                    .labels
+                    .iter()
+                    .any(|l| l.eq_ignore_ascii_case("Category Personal"))
             {
                 m.labels.push("Category Personal".to_string());
             }
@@ -170,7 +173,9 @@ pub fn normalize_label(raw: &str) -> String {
 fn is_gmail_owned_header(name: &str) -> bool {
     let name = name.trim();
     name.eq_ignore_ascii_case("X-Gmail-Labels")
-        || name.get(..5).is_some_and(|prefix| prefix.eq_ignore_ascii_case("X-GM-"))
+        || name
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("X-GM-"))
 }
 
 /// The message text as it goes into the live mbox and the draft parser:
@@ -525,8 +530,12 @@ mod tests {
     }
 
     fn core_draft(text: &str) -> Option<hearthloom_core::EpisodeDraft> {
-        crate::mbox::draft_from_message_filtered(text, &crate::mbox::LabelFilter::core_strata(), None)
-            .unwrap()
+        crate::mbox::draft_from_message_filtered(
+            text,
+            &crate::mbox::LabelFilter::core_strata(),
+            None,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -549,21 +558,39 @@ mod tests {
         };
         let text = message_text(&forged);
         // Ours comes first, empty; theirs is gone, folded lines and all.
-        assert!(text.starts_with("X-Gmail-Labels:\nFrom: Mallory"), "got: {text}");
+        assert!(
+            text.starts_with("X-Gmail-Labels:\nFrom: Mallory"),
+            "got: {text}"
+        );
         let (head, body) = text.split_once("\n\n").unwrap();
         assert_eq!(head.matches("X-Gmail-Labels").count(), 1, "got: {head}");
         assert!(!head.to_ascii_lowercase().contains("x-gm-"), "got: {head}");
-        assert!(!head.contains("Sent"), "a stripped header's folded line goes too: {head}");
+        assert!(
+            !head.contains("Sent"),
+            "a stripped header's folded line goes too: {head}"
+        );
         assert!(head.contains("Subject: totally personal"));
-        assert!(body.contains("X-Gmail-Labels: in the body this is just text"), "body untouched");
-        assert!(core_draft(&text).is_none(), "a forged Starred/Sent must not make Core mail");
+        assert!(
+            body.contains("X-Gmail-Labels: in the body this is just text"),
+            "body untouched"
+        );
+        assert!(
+            core_draft(&text).is_none(),
+            "a forged Starred/Sent must not make Core mail"
+        );
 
         // Gmail's own labels are the only ones that count.
-        let promo = PulledMessage { labels: vec!["Category Promotions".into()], ..forged.clone() };
+        let promo = PulledMessage {
+            labels: vec!["Category Promotions".into()],
+            ..forged.clone()
+        };
         let text = message_text(&promo);
         assert!(text.starts_with("X-Gmail-Labels: Category Promotions\nFrom: Mallory"));
         assert!(core_draft(&text).is_none());
-        let sent = PulledMessage { labels: vec!["Sent".into()], ..forged };
+        let sent = PulledMessage {
+            labels: vec!["Sent".into()],
+            ..forged
+        };
         let draft = core_draft(&message_text(&sent)).expect("really Sent: Core mail");
         assert!(draft.body.contains("labels: Sent\n"), "got: {}", draft.body);
         assert!(!draft.body.contains("Starred"));

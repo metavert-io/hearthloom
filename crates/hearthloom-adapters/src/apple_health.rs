@@ -126,7 +126,11 @@ fn record_to_sample(line: &str) -> Option<Sample> {
             .unwrap_or("Asleep")
             .trim_start_matches("HKCategoryValueSleepAnalysis")
             .to_string();
-        (hours_between(&start, &end), Some(stage), end[..10].to_string())
+        (
+            hours_between(&start, &end),
+            Some(stage),
+            end[..10].to_string(),
+        )
     } else if metric == "MindfulSession" {
         (hours_between(&start, &end), None, start[..10].to_string())
     } else {
@@ -150,8 +154,7 @@ fn record_to_sample(line: &str) -> Option<Sample> {
 /// Stream the export once; every Record/Workout goes to `sink`.
 /// Returns (samples, workouts) counts.
 pub fn scan(path: &Path, mut sink: impl FnMut(Item) -> Result<()>) -> Result<(usize, usize)> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("opening {}", path.display()))?;
+    let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let reader = std::io::BufReader::with_capacity(1 << 20, file);
 
     let mut samples = 0usize;
@@ -257,7 +260,9 @@ impl DayTable {
             _ => s.metric.clone(),
         };
         if let Some(u) = &s.unit {
-            self.units.entry(metric.clone()).or_insert_with(|| u.clone());
+            self.units
+                .entry(metric.clone())
+                .or_insert_with(|| u.clone());
         }
         self.first_ts
             .entry(s.day.clone())
@@ -299,7 +304,11 @@ impl DayTable {
                 highlights.push(format!("{} steps", a.sum as i64));
             }
             if let Some((src, a)) = pick("DistanceWalkingRunning") {
-                let unit = self.units.get("DistanceWalkingRunning").cloned().unwrap_or_default();
+                let unit = self
+                    .units
+                    .get("DistanceWalkingRunning")
+                    .cloned()
+                    .unwrap_or_default();
                 activity.push(format!("{:.1} {unit} [{}]", a.sum, lc(&src)));
             }
             if let Some((src, a)) = pick("ActiveEnergyBurned") {
@@ -344,10 +353,16 @@ impl DayTable {
             }
 
             // sleep (sum of asleep stages; InBed separate)
-            let asleep: f64 = ["Sleep/AsleepCore", "Sleep/AsleepDeep", "Sleep/AsleepREM", "Sleep/AsleepUnspecified", "Sleep/Asleep"]
-                .iter()
-                .filter_map(|k| pick(k).map(|(_, a)| a.sum))
-                .sum();
+            let asleep: f64 = [
+                "Sleep/AsleepCore",
+                "Sleep/AsleepDeep",
+                "Sleep/AsleepREM",
+                "Sleep/AsleepUnspecified",
+                "Sleep/Asleep",
+            ]
+            .iter()
+            .filter_map(|k| pick(k).map(|(_, a)| a.sum))
+            .sum();
             if asleep > 0.05 {
                 let mut sleep = vec![format!("{} asleep", fmt_hours(asleep))];
                 if let Some((_, deep)) = pick("Sleep/AsleepDeep") {
@@ -404,16 +419,16 @@ impl DayTable {
             }
 
             let sources: Vec<String> = {
-                let mut set: Vec<String> = metrics
-                    .values()
-                    .flatten()
-                    .map(|(s, _)| s.clone())
-                    .collect();
+                let mut set: Vec<String> =
+                    metrics.values().flatten().map(|(s, _)| s.clone()).collect();
                 set.sort();
                 set.dedup();
                 set
             };
-            lines.push(format!("sources: {}", sources.iter().map(|s| lc(s)).collect::<Vec<_>>().join(", ")));
+            lines.push(format!(
+                "sources: {}",
+                sources.iter().map(|s| lc(s)).collect::<Vec<_>>().join(", ")
+            ));
 
             let event_time = self
                 .first_ts
@@ -495,7 +510,10 @@ pub fn workout_to_episode(w: &WorkoutRec, scope: Option<&str>) -> EpisodeDraft {
         },
         lc(&w.source)
     );
-    let mut body = format!("workout: {}\nstart: {}\nend: {}\n", w.activity, w.start, w.end);
+    let mut body = format!(
+        "workout: {}\nstart: {}\nend: {}\n",
+        w.activity, w.start, w.end
+    );
     if !bits.is_empty() {
         body.push_str(&format!("totals: {}\n", bits.join(" · ")));
     }
@@ -556,11 +574,8 @@ pub fn ingest_clinical(dir: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDra
                     .ok()
                     .or_else(|| {
                         // Bare dates ("2021-04-03") are common in FHIR.
-                        EventTime::parse_rfc3339(
-                            &format!("{ts}T12:00:00Z"),
-                            TimeUncertainty::Day,
-                        )
-                        .ok()
+                        EventTime::parse_rfc3339(&format!("{ts}T12:00:00Z"), TimeUncertainty::Day)
+                            .ok()
                     })
             })
             .unwrap_or_else(EventTime::unknown);
@@ -694,7 +709,10 @@ mod tests {
         assert_eq!(samples[1].source, "iPhone");
 
         // Sleep buckets to the WAKE day and carries stage + duration-hours.
-        let deep = samples.iter().find(|s| s.category.as_deref() == Some("AsleepDeep")).unwrap();
+        let deep = samples
+            .iter()
+            .find(|s| s.category.as_deref() == Some("AsleepDeep"))
+            .unwrap();
         assert_eq!(deep.day, "2026-04-03");
         assert!((deep.value.unwrap() - 2.0).abs() < 0.01);
 
@@ -721,7 +739,11 @@ mod tests {
         assert_eq!(apr2.kind, "health_day");
         assert_eq!(apr2.scope.as_deref(), Some("health"));
         // Watch (2212 steps) wins over the iPhone's 7300 — no double count.
-        assert!(apr2.body.contains("2212 steps [apple watch]"), "body: {}", apr2.body);
+        assert!(
+            apr2.body.contains("2212 steps [apple watch]"),
+            "body: {}",
+            apr2.body
+        );
         assert!(apr2.body.contains("171.3 lb [withings]"));
         assert!(apr2.body.contains("rhr 52 [whoop]"));
         // Devices become entities for the Ribbons coverage story.

@@ -59,7 +59,10 @@ fn csp_hash(script: &str) -> String {
     use base64::Engine;
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(script.as_bytes());
-    format!("'sha256-{}'", base64::engine::general_purpose::STANDARD.encode(digest))
+    format!(
+        "'sha256-{}'",
+        base64::engine::general_purpose::STANDARD.encode(digest)
+    )
 }
 
 /// The text of each inline `<script>` (one without `src`) in `html`, as
@@ -74,7 +77,9 @@ fn inline_scripts(html: &str) -> Vec<String> {
     let mut at = 0;
     while let Some(open) = lower[at..].find("<script").map(|i| at + i) {
         if let Some(comment) = lower[at..open].find("<!--").map(|i| at + i) {
-            at = lower[comment..].find("-->").map_or(lower.len(), |i| comment + i + 3);
+            at = lower[comment..]
+                .find("-->")
+                .map_or(lower.len(), |i| comment + i + 3);
             continue;
         }
         let attrs_start = open + "<script".len();
@@ -108,9 +113,15 @@ fn inline_scripts(html: &str) -> Vec<String> {
             break;
         };
         let body_start = tag_end + 1;
-        let body_end = lower[body_start..].find("</script").map_or(lower.len(), |i| body_start + i);
+        let body_end = lower[body_start..]
+            .find("</script")
+            .map_or(lower.len(), |i| body_start + i);
         if !names_src(&lower[attrs_start..tag_end]) {
-            scripts.push(html[body_start..body_end].replace("\r\n", "\n").replace('\r', "\n"));
+            scripts.push(
+                html[body_start..body_end]
+                    .replace("\r\n", "\n")
+                    .replace('\r', "\n"),
+            );
         }
         at = body_end;
     }
@@ -136,7 +147,9 @@ fn names_src(attrs: &str) -> bool {
             let value = value.trim_start();
             rest = match value.chars().next() {
                 Some(q @ ('"' | '\'')) => value[1..].find(q).map_or("", |i| &value[i + 2..]),
-                _ => value.find(|c: char| c.is_ascii_whitespace()).map_or("", |i| &value[i..]),
+                _ => value
+                    .find(|c: char| c.is_ascii_whitespace())
+                    .map_or("", |i| &value[i..]),
             };
         }
     }
@@ -168,116 +181,47 @@ pub async fn index() -> Response {
 pub async fn asset(Path(name): Path<String>) -> Response {
     let (body, mime): (&'static [u8], &'static str) = match name.as_str() {
         "app.css" => (include_bytes!("../assets/app.css"), "text/css"),
-        "app.js" => (
-            include_bytes!("../assets/app.js"),
-            "text/javascript",
-        ),
-        "atlas.js" => (
-            include_bytes!("../assets/atlas.js"),
-            "text/javascript",
-        ),
+        "app.js" => (include_bytes!("../assets/app.js"), "text/javascript"),
+        "atlas.js" => (include_bytes!("../assets/atlas.js"), "text/javascript"),
         "integrations.js" => (
             include_bytes!("../assets/integrations.js"),
             "text/javascript",
         ),
         // Vendored MIT qrcode-generator (Kazuhiko Arase 1.4.4) — the
         // pair-a-device QR; no CDN per design law #1.
-        "qrcode.js" => (
-            include_bytes!("../assets/qrcode.js"),
-            "text/javascript",
-        ),
-        "peering.js" => (
-            include_bytes!("../assets/peering.js"),
-            "text/javascript",
-        ),
-        "network.js" => (
-            include_bytes!("../assets/network.js"),
-            "text/javascript",
-        ),
-        "monitor.js" => (
-            include_bytes!("../assets/monitor.js"),
-            "text/javascript",
-        ),
-        "agents.js" => (
-            include_bytes!("../assets/agents.js"),
-            "text/javascript",
-        ),
-        "retire.js" => (
-            include_bytes!("../assets/retire.js"),
-            "text/javascript",
-        ),
-        "spend.js" => (
-            include_bytes!("../assets/spend.js"),
-            "text/javascript",
-        ),
-        "keys.js" => (
-            include_bytes!("../assets/keys.js"),
-            "text/javascript",
-        ),
-        "about.js" => (
-            include_bytes!("../assets/about.js"),
-            "text/javascript",
-        ),
-        "settings.js" => (
-            include_bytes!("../assets/settings.js"),
-            "text/javascript",
-        ),
+        "qrcode.js" => (include_bytes!("../assets/qrcode.js"), "text/javascript"),
+        "peering.js" => (include_bytes!("../assets/peering.js"), "text/javascript"),
+        "network.js" => (include_bytes!("../assets/network.js"), "text/javascript"),
+        "monitor.js" => (include_bytes!("../assets/monitor.js"), "text/javascript"),
+        "agents.js" => (include_bytes!("../assets/agents.js"), "text/javascript"),
+        "retire.js" => (include_bytes!("../assets/retire.js"), "text/javascript"),
+        "spend.js" => (include_bytes!("../assets/spend.js"), "text/javascript"),
+        "keys.js" => (include_bytes!("../assets/keys.js"), "text/javascript"),
+        "about.js" => (include_bytes!("../assets/about.js"), "text/javascript"),
+        "settings.js" => (include_bytes!("../assets/settings.js"), "text/javascript"),
         "vendor/world-land-110m.json" => (
             include_bytes!("../assets/vendor/world-land-110m.json"),
             "application/json",
         ),
-        "pulse.js" => (
-            include_bytes!("../assets/pulse.js"),
-            "text/javascript",
-        ),
-        "desk.js" => (
-            include_bytes!("../assets/desk.js"),
-            "text/javascript",
-        ),
-        "loom.js" => (
-            include_bytes!("../assets/loom.js"),
-            "text/javascript",
-        ),
-        "notes.js" => (
-            include_bytes!("../assets/notes.js"),
-            "text/javascript",
-        ),
-        "orrery.js" => (
-            include_bytes!("../assets/orrery.js"),
-            "text/javascript",
-        ),
+        "pulse.js" => (include_bytes!("../assets/pulse.js"), "text/javascript"),
+        "desk.js" => (include_bytes!("../assets/desk.js"), "text/javascript"),
+        "loom.js" => (include_bytes!("../assets/loom.js"), "text/javascript"),
+        "notes.js" => (include_bytes!("../assets/notes.js"), "text/javascript"),
+        "orrery.js" => (include_bytes!("../assets/orrery.js"), "text/javascript"),
         "relationships.js" => (
             include_bytes!("../assets/relationships.js"),
             "text/javascript",
         ),
-        "globe.js" => (
-            include_bytes!("../assets/globe.js"),
-            "text/javascript",
-        ),
-        "biography.js" => (
-            include_bytes!("../assets/biography.js"),
-            "text/javascript",
-        ),
-        "rewind.js" => (
-            include_bytes!("../assets/rewind.js"),
-            "text/javascript",
-        ),
-        "dial.js" => (
-            include_bytes!("../assets/dial.js"),
-            "text/javascript",
-        ),
-        "chart-svg.js" => (
-            include_bytes!("../assets/chart-svg.js"),
-            "text/javascript",
-        ),
+        "globe.js" => (include_bytes!("../assets/globe.js"), "text/javascript"),
+        "biography.js" => (include_bytes!("../assets/biography.js"), "text/javascript"),
+        "rewind.js" => (include_bytes!("../assets/rewind.js"), "text/javascript"),
+        "dial.js" => (include_bytes!("../assets/dial.js"), "text/javascript"),
+        "chart-svg.js" => (include_bytes!("../assets/chart-svg.js"), "text/javascript"),
         "constellation.js" => (
             include_bytes!("../assets/constellation.js"),
             "text/javascript",
         ),
-        "galaxy.js" => (
-            include_bytes!("../assets/galaxy.js"),
-            "text/javascript",
-        ),
+        "galaxy.js" => (include_bytes!("../assets/galaxy.js"), "text/javascript"),
         "vendor/three.module.min.js" => (
             include_bytes!("../assets/vendor/three.module.min.js"),
             "text/javascript",
@@ -286,9 +230,7 @@ pub async fn asset(Path(name): Path<String>) -> Response {
             include_bytes!("../assets/vendor/OrbitControls.js"),
             "text/javascript",
         ),
-        _ => {
-            return (StatusCode::NOT_FOUND, hardening_headers(), "no such asset").into_response()
-        }
+        _ => return (StatusCode::NOT_FOUND, hardening_headers(), "no such asset").into_response(),
     };
     // The dashboard assets are compiled into the binary and change on
     // every deploy; without a cache directive browsers heuristically
@@ -309,10 +251,9 @@ pub async fn asset(Path(name): Path<String>) -> Response {
 /// Temporal ribbons: months axis + per-entity monthly evidence counts.
 pub async fn ribbons(State(state): State<AppState>) -> Response {
     let result = (|| -> anyhow::Result<serde_json::Value> {
-        let (months, lanes) =
-            state
-                .store
-                .ribbons(&["Project", "Person", "Place", "Org"], 18)?;
+        let (months, lanes) = state
+            .store
+            .ribbons(&["Project", "Person", "Place", "Org"], 18)?;
         Ok(json!({
             "months": months,
             "ribbons": lanes
@@ -370,7 +311,9 @@ pub async fn stats(State(state): State<AppState>) -> Response {
     let cached = |max_age: Option<Duration>| -> Option<serde_json::Value> {
         let guard = cache.lock().unwrap();
         let (at, value) = guard[view].as_ref()?;
-        max_age.is_none_or(|age| at.elapsed() < age).then(|| value.clone())
+        max_age
+            .is_none_or(|age| at.elapsed() < age)
+            .then(|| value.clone())
     };
     if let Some(value) = cached(Some(FRESH)) {
         return Json(value).into_response();
@@ -392,7 +335,10 @@ pub async fn stats(State(state): State<AppState>) -> Response {
     }
     // Nothing usable yet: compute, one caller at a time — the rest wait
     // here (parked, not grinding) and read the winner's result.
-    let _flight = FLIGHT.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
+    let _flight = FLIGHT
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
     if let Some(value) = cached(Some(FRESH)) {
         return Json(value).into_response();
     }
@@ -525,19 +471,30 @@ mod tests {
         use base64::Engine;
         use sha2::{Digest, Sha256};
         const OPEN: &str = r#"<script type="importmap">"#;
-        let start = INDEX_HTML.find(OPEN).expect("index.html has its import map") + OPEN.len();
+        let start = INDEX_HTML
+            .find(OPEN)
+            .expect("index.html has its import map")
+            + OPEN.len();
         let body = &INDEX_HTML[start..];
         let body = body[..body.find("</script>").unwrap()].replace("\r\n", "\n");
-        assert!(body.contains(r#""imports""#) && body.contains(r#""three""#), "not the import map: {body}");
+        assert!(
+            body.contains(r#""imports""#) && body.contains(r#""three""#),
+            "not the import map: {body}"
+        );
         let digest = Sha256::digest(body.as_bytes());
-        let expected = format!("'sha256-{}'", base64::engine::general_purpose::STANDARD.encode(digest));
+        let expected = format!(
+            "'sha256-{}'",
+            base64::engine::general_purpose::STANDARD.encode(digest)
+        );
         let script_src = DASHBOARD_CSP
             .split(';')
             .map(str::trim)
             .find(|d| d.starts_with("script-src "))
             .expect("a script-src directive");
         assert!(
-            script_src.split_whitespace().any(|source| source == expected),
+            script_src
+                .split_whitespace()
+                .any(|source| source == expected),
             "{script_src} lacks the import map's {expected}"
         );
     }
@@ -547,7 +504,10 @@ mod tests {
     #[test]
     fn test_csp_keeps_script_locked_down() {
         let directives: Vec<&str> = DASHBOARD_CSP.split(';').map(str::trim).collect();
-        let script_src = directives.iter().find(|d| d.starts_with("script-src ")).unwrap();
+        let script_src = directives
+            .iter()
+            .find(|d| d.starts_with("script-src "))
+            .unwrap();
         for source in script_src.split_whitespace().skip(1) {
             assert!(
                 source == "'self'" || source.starts_with("'sha256-"),
@@ -561,7 +521,10 @@ mod tests {
             "frame-ancestors 'self'",
             "form-action 'self'",
         ] {
-            assert!(directives.contains(&directive), "missing `{directive}` in {directives:?}");
+            assert!(
+                directives.contains(&directive),
+                "missing `{directive}` in {directives:?}"
+            );
         }
         assert!(axum::http::HeaderValue::from_str(&DASHBOARD_CSP).is_ok());
     }
@@ -584,7 +547,10 @@ mod tests {
             asset(Path("no-such-file.js".to_string())).await,
         ] {
             let headers = response.headers();
-            assert_eq!(headers[header::CONTENT_SECURITY_POLICY], DASHBOARD_CSP.as_str());
+            assert_eq!(
+                headers[header::CONTENT_SECURITY_POLICY],
+                DASHBOARD_CSP.as_str()
+            );
             assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
             assert_eq!(headers[header::REFERRER_POLICY], "same-origin");
         }
@@ -597,12 +563,19 @@ mod tests {
         let bytes = src.as_bytes();
         let mut found = Vec::new();
         for i in 1..bytes.len().saturating_sub(2) {
-            let attribute_start =
-                matches!(bytes[i - 1], b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' | b'`' | b'/');
+            let attribute_start = matches!(
+                bytes[i - 1],
+                b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' | b'`' | b'/'
+            );
             if !attribute_start || !bytes[i..i + 2].eq_ignore_ascii_case(b"on") {
                 continue;
             }
-            let name_end = i + 2 + bytes[i + 2..].iter().take_while(|b| b.is_ascii_alphabetic()).count();
+            let name_end = i
+                + 2
+                + bytes[i + 2..]
+                    .iter()
+                    .take_while(|b| b.is_ascii_alphabetic())
+                    .count();
             if name_end > i + 2
                 && bytes.get(name_end) == Some(&b'=')
                 && bytes.get(name_end + 1) != Some(&b'=')
@@ -616,13 +589,20 @@ mod tests {
 
     #[test]
     fn test_inline_handler_scan_catches_markup_not_code() {
-        let markup = "<input readonly onclick=\"this.select()\">\n<svg/onload=go()>\n<a\n  ONMouseOver='x'>";
-        let caught: Vec<String> =
-            inline_handlers(markup).into_iter().map(|(line, attr)| format!("{line}:{attr}")).collect();
+        let markup =
+            "<input readonly onclick=\"this.select()\">\n<svg/onload=go()>\n<a\n  ONMouseOver='x'>";
+        let caught: Vec<String> = inline_handlers(markup)
+            .into_iter()
+            .map(|(line, attr)| format!("{line}:{attr}"))
+            .collect();
         assert_eq!(caught, ["1:onclick=", "2:onload=", "4:ONMouseOver="]);
         let code = "el.onclick = () => go();\nconst onKey = (e) => e;\nlet onboardingState = \"done\";\n\
                     `<b data-confirm=\"sure?\" data-month=\"${m}\" contenteditable=\"true\">`;\nif (a.on==b) {}";
-        assert!(inline_handlers(code).is_empty(), "{:?}", inline_handlers(code));
+        assert!(
+            inline_handlers(code).is_empty(),
+            "{:?}",
+            inline_handlers(code)
+        );
     }
 
     /// No dashboard asset may emit an inline event-handler attribute
@@ -647,7 +627,10 @@ mod tests {
                     stack.push(path);
                     continue;
                 }
-                if !matches!(path.extension().and_then(|e| e.to_str()), Some("js" | "html")) {
+                if !matches!(
+                    path.extension().and_then(|e| e.to_str()),
+                    Some("js" | "html")
+                ) {
                     continue;
                 }
                 files += 1;

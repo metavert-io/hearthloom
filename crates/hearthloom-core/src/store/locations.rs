@@ -47,14 +47,20 @@ const PARSED: i64 = 2;
 ///   events, albums and groups carry text other people wrote;
 /// - visits: the LAST line only — the one `visit_draft` writes; the
 ///   `place:` and `observations:` lines above it are never read.
-pub(crate) fn parse_location_lines(source: &str, kind: &str, body: &str) -> Vec<(String, f64, f64)> {
+pub(crate) fn parse_location_lines(
+    source: &str,
+    kind: &str,
+    body: &str,
+) -> Vec<(String, f64, f64)> {
     match (source, kind) {
         ("photos", _) => {
             let places = body
                 .lines()
                 .take_while(|line| !line.is_empty())
                 .find_map(|line| line.strip_prefix("places: "));
-            body.lines().filter_map(|line| photo_line(line, places)).collect()
+            body.lines()
+                .filter_map(|line| photo_line(line, places))
+                .collect()
         }
         ("facebook", "fb_post") => body.lines().filter_map(location_line).collect(),
         ("visits", _) => body
@@ -104,7 +110,13 @@ fn place_suffix(rest: &str, listed: &str) -> Option<usize> {
 fn line_time(line: &str) -> Option<(String, &str)> {
     let b = line.as_bytes();
     let digits = |i: usize, j: usize| b[i].is_ascii_digit() && b[j].is_ascii_digit();
-    (b.len() > 8 && b[0] == b'[' && digits(1, 2) && b[3] == b':' && digits(4, 5) && b[6] == b']' && b[7] == b' ')
+    (b.len() > 8
+        && b[0] == b'['
+        && digits(1, 2)
+        && b[3] == b':'
+        && digits(4, 5)
+        && b[6] == b']'
+        && b[7] == b' ')
         .then(|| (line[1..6].to_string(), &line[8..]))
 }
 
@@ -112,7 +124,10 @@ fn line_time(line: &str) -> Option<(String, &str)> {
 fn closing_pair(s: &str) -> Option<(f64, f64)> {
     let inner = s.trim_end().strip_suffix(')')?;
     let (lat, lon) = inner[inner.rfind('(')? + 1..].split_once(',')?;
-    let (lat, lon) = (lat.trim().parse::<f64>().ok()?, lon.trim().parse::<f64>().ok()?);
+    let (lat, lon) = (
+        lat.trim().parse::<f64>().ok()?,
+        lon.trim().parse::<f64>().ok()?,
+    );
     ((-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon)).then_some((lat, lon))
 }
 
@@ -147,7 +162,13 @@ impl Store {
                  LIMIT ?1",
             )?;
             let rows = stmt.query_map(rusqlite::params![batch as i64, PARSED], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
@@ -215,7 +236,12 @@ impl Store {
     /// still need external scanning (the daemon's GPX pass reads
     /// apple-health `workout`s only: a clinical record's body quotes text
     /// its provider wrote, which must never name a file to open).
-    pub fn location_pending(&self, source: &str, kind: &str, batch: usize) -> Result<Vec<(String, String, String)>> {
+    pub fn location_pending(
+        &self,
+        source: &str,
+        kind: &str,
+        batch: usize,
+    ) -> Result<Vec<(String, String, String)>> {
         let conn = self.lock();
         // Same FTS-drives-the-join rule as location_backfill (see above).
         let mut stmt = conn.prepare(
@@ -252,29 +278,26 @@ impl Store {
              ORDER BY p.day ASC
              LIMIT ?3"
         ))?;
-        let rows = stmt.query_map(
-            rusqlite::params![from, to, cap as i64],
-            |row| {
-                let places: String = row.get(4)?;
-                let sources: String = row.get(5)?;
-                Ok(AtlasPoint {
-                    day: row.get(0)?,
-                    lat: row.get(1)?,
-                    lon: row.get(2)?,
-                    n: row.get(3)?,
-                    places: places
-                        .split(',')
-                        .filter(|s| !s.is_empty())
-                        .map(String::from)
-                        .collect(),
-                    sources: sources
-                        .split(',')
-                        .filter(|s| !s.is_empty())
-                        .map(String::from)
-                        .collect(),
-                })
-            },
-        )?;
+        let rows = stmt.query_map(rusqlite::params![from, to, cap as i64], |row| {
+            let places: String = row.get(4)?;
+            let sources: String = row.get(5)?;
+            Ok(AtlasPoint {
+                day: row.get(0)?,
+                lat: row.get(1)?,
+                lon: row.get(2)?,
+                n: row.get(3)?,
+                places: places
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect(),
+                sources: sources
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect(),
+            })
+        })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
@@ -305,10 +328,8 @@ impl Store {
         };
         let guard = self.scope_guard("e.scope");
         let mut clauses = String::new();
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
-            Box::new(from.to_string()),
-            Box::new(to.to_string()),
-        ];
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(from.to_string()), Box::new(to.to_string())];
         if let Some(q) = q.filter(|s| !s.trim().is_empty()) {
             clauses.push_str(
                 " AND e.fts_rowid IN (SELECT rowid FROM episode_fts WHERE episode_fts MATCH ?) /* all-episodes: a filter inside a query guarded where it is used */",
@@ -333,7 +354,11 @@ impl Store {
             );
             params.push(Box::new(format!(
                 "%{}%",
-                place.trim().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+                place
+                    .trim()
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
             )));
         }
         let conn = self.lock();
@@ -417,7 +442,11 @@ impl Store {
             );
             params.push(Box::new(format!(
                 "%{}%",
-                place.trim().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+                place
+                    .trim()
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
             )));
         }
         // Interestingness: kind weight (events > creations > ambient) +
@@ -517,7 +546,12 @@ impl Store {
     /// years — the memories-resurfacing strip. Same kind-weighted
     /// notability as the Dial labels, ≤2 per year, newest year first.
     /// VAULT-GUARDED.
-    pub fn on_this_day(&self, mmdd: &str, before_year: &str, k: usize) -> Result<Vec<NotableEpisode>> {
+    pub fn on_this_day(
+        &self,
+        mmdd: &str,
+        before_year: &str,
+        k: usize,
+    ) -> Result<Vec<NotableEpisode>> {
         let guard = self.scope_guard("e.scope");
         let conn = self.lock();
         let sql = format!(
@@ -620,7 +654,9 @@ impl Store {
                  WHEN 'conversation' THEN 5 WHEN 'commit' THEN 6 ELSE 7 END, rowid
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(rusqlite::params![month, k as i64], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let rows = stmt.query_map(rusqlite::params![month, k as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
@@ -687,11 +723,8 @@ mod tests {
             kind: kind.into(),
             title: format!("{kind}: {day}"),
             body: body.into(),
-            event_time: EventTime::parse_rfc3339(
-                &format!("{day}T12:00:00Z"),
-                TimeUncertainty::Day,
-            )
-            .unwrap(),
+            event_time: EventTime::parse_rfc3339(&format!("{day}T12:00:00Z"), TimeUncertainty::Day)
+                .unwrap(),
             trust: "imported".into(),
             scope: Some("personal".into()),
             entities: vec![],
@@ -718,7 +751,10 @@ mod tests {
     #[test]
     fn test_location_lines_take_only_the_closing_pair() {
         let pts = |source: &str, kind: &str, body: &str| -> Vec<(f64, f64)> {
-            parse_location_lines(source, kind, body).into_iter().map(|(_, lat, lon)| (lat, lon)).collect()
+            parse_location_lines(source, kind, body)
+                .into_iter()
+                .map(|(_, lat, lon)| (lat, lon))
+                .collect()
         };
         // photos: day_draft's header + lines, with and without a place
         let photos = "date: 2026-07-08\nphotos: 6\nplaces: Rome, Boston, MA\n\n\
@@ -738,14 +774,23 @@ mod tests {
                       [08:01] q (7,8) \u{2014} Paris\n";
         assert_eq!(pts("photos", "photos", dashed), vec![(41.1, 12.1)]);
         // a listed place that itself ends in a pair is still the place
-        let odd = "date: 2026-07-08\nphotos: 1\nplaces: Foo (3,4)\n\n[09:00] a.heic \u{2014} Foo (3,4)\n";
+        let odd =
+            "date: 2026-07-08\nphotos: 1\nplaces: Foo (3,4)\n\n[09:00] a.heic \u{2014} Foo (3,4)\n";
         assert!(pts("photos", "photos", odd).is_empty());
         // the strict [HH:MM] opening
-        assert!(pts("photos", "photos", "[7:30] a (1,2)\n[07:30](1,2)\n(07:30) a (1,2)\n").is_empty());
+        assert!(pts(
+            "photos",
+            "photos",
+            "[7:30] a (1,2)\n[07:30](1,2)\n(07:30) a (1,2)\n"
+        )
+        .is_empty());
 
         // facebook: fb_post place lines (f64 Display coordinates, maybe no name)
         let post = "Test post\n\nattached: a (9,9)\n\n[12:00] Lakeside Park (12.34,-56.78)\n[12:00]  (40,-74)\n";
-        assert_eq!(pts("facebook", "fb_post", post), vec![(12.34, -56.78), (40.0, -74.0)]);
+        assert_eq!(
+            pts("facebook", "fb_post", post),
+            vec![(12.34, -56.78), (40.0, -74.0)]
+        );
         // every other facebook kind carries other people's text
         let forged = "[12:00] ada: meet me (40.71,-74.00)\n[12:00] x (40.71,-74.00)\n";
         for kind in ["fb_message", "fb_group", "fb_event", "fb_album"] {
@@ -781,12 +826,27 @@ mod tests {
                     actor: "adapter:facebook".into(),
                     session_id: None,
                     episodes: vec![
-                        episode("facebook", "fb_message", "thread:ada:2026-07-01", "2026-07-01",
-                            "ada: hi\n[12:00] ada (40.71,-74.00)\n"),
-                        episode("facebook", "fb_post", "post:1", "2026-07-01",
-                            "Lunch\n\n[12:00] Lakeside Park (12.34,-56.78)\n"),
-                        episode("photos", "photos", "photos:2026-07-01", "2026-07-01",
-                            "date: 2026-07-01\nphotos: 1\n\n[08:00] x (3,4).heic\n"),
+                        episode(
+                            "facebook",
+                            "fb_message",
+                            "thread:ada:2026-07-01",
+                            "2026-07-01",
+                            "ada: hi\n[12:00] ada (40.71,-74.00)\n",
+                        ),
+                        episode(
+                            "facebook",
+                            "fb_post",
+                            "post:1",
+                            "2026-07-01",
+                            "Lunch\n\n[12:00] Lakeside Park (12.34,-56.78)\n",
+                        ),
+                        episode(
+                            "photos",
+                            "photos",
+                            "photos:2026-07-01",
+                            "2026-07-01",
+                            "date: 2026-07-01\nphotos: 1\n\n[08:00] x (3,4).heic\n",
+                        ),
                     ],
                 },
             )
@@ -806,14 +866,17 @@ mod tests {
                 )
                 .unwrap();
             }
-            conn.execute("UPDATE episodes SET location_scanned = 1", []).unwrap();
+            conn.execute("UPDATE episodes SET location_scanned = 1", [])
+                .unwrap();
         }
         let (scanned, added) = store.location_backfill(&actor, 100).unwrap();
         assert_eq!((scanned, added), (3, 1));
         assert_eq!(store.location_backfill(&actor, 100).unwrap(), (0, 0));
         let points: Vec<(String, f64, f64)> = {
             let conn = store.lock();
-            let mut stmt = conn.prepare("SELECT episode_id, lat, lon FROM location_points").unwrap();
+            let mut stmt = conn
+                .prepare("SELECT episode_id, lat, lon FROM location_points")
+                .unwrap();
             stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
                 .unwrap()
                 .collect::<std::result::Result<_, _>>()
@@ -837,17 +900,32 @@ mod tests {
                     actor: "adapter:apple-health".into(),
                     session_id: None,
                     episodes: vec![
-                        episode("apple-health", "workout", "workout:2026-07-01", "2026-07-01",
-                            "workout: Running\nroute: /workout-routes/route_1.gpx\n"),
-                        episode("apple-health", "clinical_record", "clinical:1", "2026-07-01",
-                            "Observation: x\nroute: ../../../etc/passwd\ndate: 2026-07-01"),
+                        episode(
+                            "apple-health",
+                            "workout",
+                            "workout:2026-07-01",
+                            "2026-07-01",
+                            "workout: Running\nroute: /workout-routes/route_1.gpx\n",
+                        ),
+                        episode(
+                            "apple-health",
+                            "clinical_record",
+                            "clinical:1",
+                            "2026-07-01",
+                            "Observation: x\nroute: ../../../etc/passwd\ndate: 2026-07-01",
+                        ),
                     ],
                 },
             )
             .unwrap();
-        let pending = store.location_pending("apple-health", "workout", 10).unwrap();
+        let pending = store
+            .location_pending("apple-health", "workout", 10)
+            .unwrap();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].0, crate::ids::episode_id("apple-health", "workout:2026-07-01"));
+        assert_eq!(
+            pending[0].0,
+            crate::ids::episode_id("apple-health", "workout:2026-07-01")
+        );
     }
 
     #[test]
@@ -865,7 +943,10 @@ mod tests {
                     actor: "adapter:photos".into(),
                     session_id: None,
                     episodes: vec![
-                        photo_episode("2026-07-01", "[08:00] a.heic (41.89,12.49)\n[09:00] b.heic (41.89,12.49)"),
+                        photo_episode(
+                            "2026-07-01",
+                            "[08:00] a.heic (41.89,12.49)\n[09:00] b.heic (41.89,12.49)",
+                        ),
                         photo_episode("2026-07-02", "[10:00] c.heic (48.85,2.35)"),
                     ],
                 },
@@ -897,6 +978,12 @@ mod tests {
         assert_eq!(locked.len(), 1);
         assert_eq!(locked[0].day, "2026-07-01");
         store.vault_unlock(15);
-        assert_eq!(store.atlas_points("2026-01-01", "2026-12-31", 100).unwrap().len(), 2);
+        assert_eq!(
+            store
+                .atlas_points("2026-01-01", "2026-12-31", 100)
+                .unwrap()
+                .len(),
+            2
+        );
     }
 }

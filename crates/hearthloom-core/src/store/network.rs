@@ -370,13 +370,19 @@ impl Store {
     pub fn apply_declared(&self, declared: &serde_json::Value) -> Result<usize> {
         let conn = self.lock();
         let mut applied = 0usize;
-        for g in declared.get("grants").and_then(|v| v.as_array()).unwrap_or(&vec![]) {
+        for g in declared
+            .get("grants")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&vec![])
+        {
             let (Some(friend), Some(spheres), Some(detail), Some(created)) = (
                 g.get("friend").and_then(|v| v.as_str()),
                 g.get("spheres"),
                 g.get("detail").and_then(|v| v.as_str()),
                 g.get("created_at").and_then(|v| v.as_str()),
-            ) else { continue };
+            ) else {
+                continue;
+            };
             conn.execute(
                 "INSERT INTO grants (friend, spheres, detail, created_at, expires_at, revoked_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -384,14 +390,21 @@ impl Store {
                      detail=excluded.detail, expires_at=excluded.expires_at,
                      revoked_at=excluded.revoked_at",
                 rusqlite::params![
-                    friend, spheres.to_string().replace('\u{0}',""), detail, created,
+                    friend,
+                    spheres.to_string().replace('\u{0}', ""),
+                    detail,
+                    created,
                     g.get("expires_at").and_then(|v| v.as_str()),
                     g.get("revoked_at").and_then(|v| v.as_str()),
                 ],
             )?;
             applied += 1;
         }
-        for k in declared.get("friend_keys").and_then(|v| v.as_array()).unwrap_or(&vec![]) {
+        for k in declared
+            .get("friend_keys")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&vec![])
+        {
             let (Some(id), Some(name), Some(hash), Some(scopes), Some(created), Some(by)) = (
                 k.get("id").and_then(|v| v.as_str()),
                 k.get("name").and_then(|v| v.as_str()),
@@ -399,7 +412,9 @@ impl Store {
                 k.get("scopes").and_then(|v| v.as_str()),
                 k.get("created_at").and_then(|v| v.as_str()),
                 k.get("created_by").and_then(|v| v.as_str()),
-            ) else { continue };
+            ) else {
+                continue;
+            };
             conn.execute(
                 "INSERT INTO api_keys (id, name, key_hash, scopes, created_at, created_by, expires_at, revoked_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -426,7 +441,10 @@ impl Store {
     }
 
     /// Recent network accesses, newest first — the transparency ledger.
-    pub fn recent_network_accesses(&self, limit: usize) -> Result<Vec<(String, serde_json::Value)>> {
+    pub fn recent_network_accesses(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(String, serde_json::Value)>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
             "SELECT ts, payload FROM mutations WHERE kind = 'network_access'
@@ -436,8 +454,13 @@ impl Store {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
         rows.map(|r| {
-            r.map(|(ts, p)| (ts, serde_json::from_str(&p).unwrap_or(serde_json::Value::Null)))
-                .map_err(Into::into)
+            r.map(|(ts, p)| {
+                (
+                    ts,
+                    serde_json::from_str(&p).unwrap_or(serde_json::Value::Null),
+                )
+            })
+            .map_err(Into::into)
         })
         .collect()
     }
@@ -480,9 +503,8 @@ impl Store {
     /// (name, url, entity) triples for every connected friend brain.
     pub fn friends(&self) -> Result<Vec<(String, String, Option<String>)>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT name, config FROM sources WHERE kind = 'friend' ORDER BY name",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT name, config FROM sources WHERE kind = 'friend' ORDER BY name")?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
@@ -596,7 +618,10 @@ mod tests {
             .set_grant(&actor, "eve", &["private".into()], "excerpts", None)
             .is_err());
         store.vault_unlock(5); // must not matter
-        assert!(store.network_search("ada", "therapy", 10).unwrap().is_empty());
+        assert!(store
+            .network_search("ada", "therapy", 10)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -628,7 +653,13 @@ mod tests {
         store.revoke_grant(&actor, "ada").unwrap();
         assert!(store.network_search("ada", "roadmap", 10).is_err());
         store
-            .set_grant(&actor, "bea", &["work".into()], "excerpts", Some("2020-01-01T00:00:00Z"))
+            .set_grant(
+                &actor,
+                "bea",
+                &["work".into()],
+                "excerpts",
+                Some("2020-01-01T00:00:00Z"),
+            )
             .unwrap();
         assert!(store.network_search("bea", "roadmap", 10).is_err());
         assert!(store.network_search("carl", "roadmap", 10).is_err()); // no grant
@@ -653,9 +684,7 @@ mod tests {
                      WHERE episode_fts MATCH 'hello'",
                 )
                 .unwrap();
-            let rows = stmt
-                .query_map([], |row| row.get::<_, String>(3))
-                .unwrap();
+            let rows = stmt.query_map([], |row| row.get::<_, String>(3)).unwrap();
             rows.collect::<std::result::Result<_, _>>().unwrap()
         };
         let episodes_step = plan

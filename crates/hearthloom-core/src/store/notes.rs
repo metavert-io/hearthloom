@@ -225,7 +225,9 @@ fn journal_note_with_body(
     let post = post.map(|mut v| {
         if let Some(map) = v.as_object_mut() {
             let path = map.get("path").and_then(|p| p.as_str());
-            let body = path.map(|p| home.read_note(p).unwrap_or_default()).unwrap_or_default();
+            let body = path
+                .map(|p| home.read_note(p).unwrap_or_default())
+                .unwrap_or_default();
             map.insert("__body__".into(), Value::String(body));
         }
         v
@@ -260,8 +262,17 @@ impl Store {
         scope: &str,
         linked_task: Option<&str>,
     ) -> Result<String> {
-        self.create_note_from(actor, home, title, body, tags, scope, linked_task,
-            NATIVE_ORIGIN, None)
+        self.create_note_from(
+            actor,
+            home,
+            title,
+            body,
+            tags,
+            scope,
+            linked_task,
+            NATIVE_ORIGIN,
+            None,
+        )
     }
 
     /// The importer path: same note, explicit ORIGIN ('codi', future
@@ -282,8 +293,18 @@ impl Store {
         origin: &str,
         timestamps: Option<(&str, &str)>, // (created_at, updated_at)
     ) -> Result<String> {
-        self.create_note_kind(actor, home, title, body, tags, scope, linked_task,
-            origin, timestamps, "note")
+        self.create_note_kind(
+            actor,
+            home,
+            title,
+            body,
+            tags,
+            scope,
+            linked_task,
+            origin,
+            timestamps,
+            "note",
+        )
     }
 
     /// Full-control creation: also sets the note KIND (note | template).
@@ -317,7 +338,9 @@ impl Store {
             origin
         };
         if kind == RECIPE_KIND && origin != NATIVE_ORIGIN {
-            return Err(anyhow!("only a note written in the app can be an Ask recipe"));
+            return Err(anyhow!(
+                "only a note written in the app can be an Ask recipe"
+            ));
         }
         let conn = self.lock();
         // Unique slug: base, base-2, base-3…
@@ -427,7 +450,8 @@ impl Store {
         };
         let Some((id, slug, version)) = existing else {
             let id = self.create_note_from(
-                actor, home, title, body, tags, scope, None, origin, timestamps)?;
+                actor, home, title, body, tags, scope, None, origin, timestamps,
+            )?;
             let conn = self.lock();
             conn.execute(
                 "UPDATE notes_index SET origin_ref = ?1 WHERE id = ?2",
@@ -435,7 +459,9 @@ impl Store {
             )?;
             return Ok(NoteImport::Created);
         };
-        let current = home.read_note(&format!("notes/{slug}.md")).unwrap_or_default();
+        let current = home
+            .read_note(&format!("notes/{slug}.md"))
+            .unwrap_or_default();
         let unchanged = {
             let conn = self.lock();
             let (cur_title, cur_tags): (String, Option<String>) = conn.query_row(
@@ -451,7 +477,17 @@ impl Store {
         if unchanged {
             return Ok(NoteImport::Skipped);
         }
-        self.update_note_as(actor, home, &id, Some(title), Some(body), Some(tags), None, version, false)?;
+        self.update_note_as(
+            actor,
+            home,
+            &id,
+            Some(title),
+            Some(body),
+            Some(tags),
+            None,
+            version,
+            false,
+        )?;
         // an importer's update is not a human edit — keep it settled,
         // and keep the SOURCE's dates (update_note stamped "now"):
         // real dates when the source has them, NULL when it doesn't.
@@ -509,9 +545,7 @@ impl Store {
              FROM notes_index WHERE status != 'deleted'
              GROUP BY origin ORDER BY 2 DESC",
         )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
@@ -611,9 +645,7 @@ impl Store {
                 .map(|t| format!("\"{}\"", t.replace('"', "")))
                 .collect::<Vec<_>>()
                 .join(" ");
-            clauses.push_str(
-                " AND id IN (SELECT note_id FROM notes_fts WHERE notes_fts MATCH ?)",
-            );
+            clauses.push_str(" AND id IN (SELECT note_id FROM notes_fts WHERE notes_fts MATCH ?)");
             params.push(Box::new(fts));
         }
         if let Some(tag) = tag.map(str::trim).filter(|t| !t.is_empty()) {
@@ -630,7 +662,10 @@ impl Store {
              ORDER BY updated_at DESC LIMIT {limit} OFFSET {offset}"
         ))?;
         let rows = stmt
-            .query_map(rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())), note_from_row)
+            .query_map(
+                rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+                note_from_row,
+            )
             .map(|r| r.filter_map(|x| x.ok()).collect::<Vec<_>>())
             .unwrap_or_default();
         Ok(rows)
@@ -861,7 +896,17 @@ impl Store {
         scope: Option<&str>,
         expected_version: i64,
     ) -> Result<i64> {
-        self.update_note_as(actor, home, id, title, body, tags, scope, expected_version, true)
+        self.update_note_as(
+            actor,
+            home,
+            id,
+            title,
+            body,
+            tags,
+            scope,
+            expected_version,
+            true,
+        )
     }
 
     /// `update_note`, with the vault check optional: an importer's refresh
@@ -900,7 +945,9 @@ impl Store {
         // A vaulted note is invisible to a viewer whose vault is locked,
         // and so is beyond its edits — including taking it out of the vault.
         if vault_checked && row.scope == "private" && !self.private_visible() {
-            return Err(anyhow!("note {id} is in the vault — unlock it to change the note"));
+            return Err(anyhow!(
+                "note {id} is in the vault — unlock it to change the note"
+            ));
         }
         if row.version != expected_version {
             return Err(anyhow!(
@@ -913,11 +960,21 @@ impl Store {
         // landing as the owner's words, a recipe stops being one), and the
         // owner's later edits don't launder it back.
         let (origin, kind) = if is_agent(actor) && row.origin == NATIVE_ORIGIN {
-            (AGENT_ORIGIN, if row.kind == RECIPE_KIND { "note" } else { row.kind.as_str() })
+            (
+                AGENT_ORIGIN,
+                if row.kind == RECIPE_KIND {
+                    "note"
+                } else {
+                    row.kind.as_str()
+                },
+            )
         } else {
             (row.origin.as_str(), row.kind.as_str())
         };
-        let new_title = title.map(str::trim).filter(|t| !t.is_empty()).unwrap_or(&row.title);
+        let new_title = title
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .unwrap_or(&row.title);
         let new_body = match body {
             Some(body) => {
                 home.write_note(&row.slug, body)?;
@@ -929,10 +986,7 @@ impl Store {
         // Rules re-check on every edit; a match forces private and an
         // explicit downgrade attempt loses to the rule.
         let rules = super::privacy::load_rules(&conn)?;
-        let scope = if super::privacy::text_matches(
-            &rules,
-            &format!("{new_title}\n{new_body}"),
-        ) {
+        let scope = if super::privacy::text_matches(&rules, &format!("{new_title}\n{new_body}")) {
             Some("private")
         } else {
             scope
@@ -1240,9 +1294,7 @@ impl Store {
              WHERE r.note_id = ?1 AND n.status != 'deleted'{guard}
              ORDER BY r.score DESC LIMIT {limit}"
         ))?;
-        let rows = stmt.query_map([note_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?;
+        let rows = stmt.query_map([note_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
@@ -1290,9 +1342,7 @@ impl Store {
              ORDER BY CASE en.type WHEN 'Project' THEN 0 WHEN 'Org' THEN 1
                                    WHEN 'Person' THEN 2 ELSE 3 END, en.name"
         ))?;
-        let rows = stmt.query_map([note_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?;
+        let rows = stmt.query_map([note_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
@@ -1372,16 +1422,24 @@ impl Store {
         let placeholders: Vec<String> = (1..=cols.len()).map(|i| format!("?{i}")).collect();
         let sql = format!(
             "INSERT OR REPLACE INTO notes_index ({}) VALUES ({})",
-            cols.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", "),
+            cols.iter()
+                .map(|c| c.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
             placeholders.join(", ")
         );
-        let params: Vec<rusqlite::types::Value> =
-            cols.iter().map(|c| super::json_to_sql(&map[c.as_str()])).collect();
+        let params: Vec<rusqlite::types::Value> = cols
+            .iter()
+            .map(|c| super::json_to_sql(&map[c.as_str()]))
+            .collect();
         conn.execute(&sql, rusqlite::params_from_iter(params))?;
         // Rewrite the markdown file from the captured body, then reindex the
         // FTS + mention/wiki-link derivations from the restored content.
         let slug = map.get("slug").and_then(|v| v.as_str());
-        let title = map.get("title").and_then(|v| v.as_str()).unwrap_or_default();
+        let title = map
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         if let (Some(slug), Some(body)) = (slug, body.as_deref()) {
             home.write_note(slug, body)?;
             conn.execute("DELETE FROM notes_fts WHERE note_id = ?1", [id])?;
@@ -1540,7 +1598,11 @@ pub fn parse_template(note_id: &str, title: &str, body: &str) -> TemplateDef {
                     });
                     if let Some(options) = parts.get(3) {
                         field["options"] = Value::Array(
-                            options.split(',').map(|o| Value::String(o.trim().into())).collect());
+                            options
+                                .split(',')
+                                .map(|o| Value::String(o.trim().into()))
+                                .collect(),
+                        );
                     }
                     fields.push(field);
                 } else if let Some(v) = line.strip_prefix("note-on-complete:") {
@@ -1669,22 +1731,66 @@ mod tests {
         let home = Home::at(tmp.path());
         home.init().unwrap();
         let store = Store::open_in_memory().unwrap();
-        let open = store.create_note(&actor(), &home, "Groceries", "milk", &[], "personal", None).unwrap();
-        let vaulted = store.create_note(&actor(), &home, "Diagnosis", "private", &[], "private", None).unwrap();
+        let open = store
+            .create_note(&actor(), &home, "Groceries", "milk", &[], "personal", None)
+            .unwrap();
+        let vaulted = store
+            .create_note(
+                &actor(),
+                &home,
+                "Diagnosis",
+                "private",
+                &[],
+                "private",
+                None,
+            )
+            .unwrap();
         // Read the label directly: `note()` itself hides a vaulted note while locked.
         let scope_of = |id: &str| -> String {
-            store.lock().query_row("SELECT scope FROM notes_index WHERE id = ?1", [id], |r| r.get(0)).unwrap()
+            store
+                .lock()
+                .query_row("SELECT scope FROM notes_index WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
+                .unwrap()
         };
 
         // Locked (no viewer here): the vaulted note can't be edited or unvaulted…
-        assert!(store.update_note(&actor(), &home, &vaulted, None, None, None, Some("personal"), 1).is_err());
+        assert!(store
+            .update_note(
+                &actor(),
+                &home,
+                &vaulted,
+                None,
+                None,
+                None,
+                Some("personal"),
+                1
+            )
+            .is_err());
         // …and a bulk "unvault this origin" passes over it.
-        store.set_notes_scope_by_origin(&actor(), &home, "hearthloom", "work").unwrap();
-        assert_eq!((scope_of(&open), scope_of(&vaulted)), ("work".to_string(), "private".to_string()));
+        store
+            .set_notes_scope_by_origin(&actor(), &home, "hearthloom", "work")
+            .unwrap();
+        assert_eq!(
+            (scope_of(&open), scope_of(&vaulted)),
+            ("work".to_string(), "private".to_string())
+        );
 
         // With the vault open the owner can do both.
         store.vault_unlock(15);
-        store.update_note(&actor(), &home, &vaulted, None, None, None, Some("health"), 1).unwrap();
+        store
+            .update_note(
+                &actor(),
+                &home,
+                &vaulted,
+                None,
+                None,
+                None,
+                Some("health"),
+                1,
+            )
+            .unwrap();
         assert_eq!(scope_of(&vaulted), "health");
     }
 
@@ -1697,9 +1803,13 @@ mod tests {
 
         let id = store
             .create_note(
-                &actor(), &home, "Reading: attention is all you need",
-                "# Transformers\n\nqueries, keys, values", &["ml".into()],
-                "work", None,
+                &actor(),
+                &home,
+                "Reading: attention is all you need",
+                "# Transformers\n\nqueries, keys, values",
+                &["ml".into()],
+                "work",
+                None,
             )
             .unwrap();
         // The file exists on disk, human-readable.
@@ -1711,8 +1821,13 @@ mod tests {
         // Same title → deduped slug.
         let id2 = store
             .create_note(
-                &actor(), &home, "Reading: attention is all you need",
-                "second", &[], "work", None,
+                &actor(),
+                &home,
+                "Reading: attention is all you need",
+                "second",
+                &[],
+                "work",
+                None,
             )
             .unwrap();
         let (row2, _) = store.note(&home, &id2).unwrap().unwrap();
@@ -1724,10 +1839,22 @@ mod tests {
             .update_note(&actor(), &home, &id, None, Some("edited"), None, None, 99)
             .is_err());
         let v2 = store
-            .update_note(&actor(), &home, &id, None, Some("# Edited\nnew text"), None, None, 1)
+            .update_note(
+                &actor(),
+                &home,
+                &id,
+                None,
+                Some("# Edited\nnew text"),
+                None,
+                None,
+                1,
+            )
             .unwrap();
         assert_eq!(v2, 2);
-        assert!(store.list_notes(Some("transformers"), 10).unwrap().is_empty());
+        assert!(store
+            .list_notes(Some("transformers"), 10)
+            .unwrap()
+            .is_empty());
         assert_eq!(store.list_notes(Some("edited"), 10).unwrap().len(), 1);
 
         // Archive → snapshot episode, derivation declared.
@@ -1745,7 +1872,9 @@ mod tests {
             .contains("new text"));
 
         // Delete is soft; the file survives.
-        store.set_note_status(&actor(), &home, &id2, "deleted").unwrap();
+        store
+            .set_note_status(&actor(), &home, &id2, "deleted")
+            .unwrap();
         assert!(home.root().join(&row2.path).exists());
         assert_eq!(store.list_notes(None, 10).unwrap().len(), 1);
     }
@@ -1754,7 +1883,10 @@ mod tests {
     fn test_mentions_extract_index_and_snapshot() {
         // Only the explicit @[Name] form links; bare @text never does.
         let names = |s: &str| -> Vec<String> {
-            extract_mentions_typed(s).into_iter().map(|(_, n)| n).collect()
+            extract_mentions_typed(s)
+                .into_iter()
+                .map(|(_, n)| n)
+                .collect()
         };
         assert_eq!(
             names("met @[Ada Lovelace] and @[Bob], cc @everyone at a@b.com"),
@@ -1783,15 +1915,20 @@ mod tests {
         // A known entity to link against.
         {
             let conn = store.lock();
-            crate::store::graph::upsert_entity(
-                &conn, &actor(), "Person", "Ada", "work", &[],
-            )
-            .unwrap();
+            crate::store::graph::upsert_entity(&conn, &actor(), "Person", "Ada", "work", &[])
+                .unwrap();
         }
         let ada = store.entity_by_name("Ada").unwrap().unwrap();
         let id = store
-            .create_note(&actor(), &home, "sync", "talked to @[Ada] about @[Nobody Known]",
-                &[], "work", None)
+            .create_note(
+                &actor(),
+                &home,
+                "sync",
+                "talked to @[Ada] about @[Nobody Known]",
+                &[],
+                "work",
+                None,
+            )
             .unwrap();
         // Known name links; unknown stays text (no row).
         let notes = store.notes_mentioning(&ada.id, 10).unwrap();
@@ -1800,12 +1937,30 @@ mod tests {
         assert_eq!(store.mention_counts().unwrap(), vec![(ada.id.clone(), 1)]);
         // Editing away the mention unlinks it.
         store
-            .update_note(&actor(), &home, &id, None, Some("no more mentions"), None, None, 1)
+            .update_note(
+                &actor(),
+                &home,
+                &id,
+                None,
+                Some("no more mentions"),
+                None,
+                None,
+                1,
+            )
             .unwrap();
         assert!(store.notes_mentioning(&ada.id, 10).unwrap().is_empty());
         // Re-add and settle: the snapshot carries the mention into the graph.
         store
-            .update_note(&actor(), &home, &id, None, Some("again @[Ada]"), None, None, 2)
+            .update_note(
+                &actor(),
+                &home,
+                &id,
+                None,
+                Some("again @[Ada]"),
+                None,
+                None,
+                2,
+            )
             .unwrap();
         assert_eq!(store.settle_notes(&actor(), &home, 0).unwrap(), 1);
         let dossier = store.entity_dossier("Ada").unwrap().unwrap();
@@ -1840,7 +1995,15 @@ mod tests {
             (pick("Person"), pick("Org"))
         };
         let id = store
-            .create_note(&actor(), &home, "deal", "call with @[Org:Apex]", &[], "work", None)
+            .create_note(
+                &actor(),
+                &home,
+                "deal",
+                "call with @[Org:Apex]",
+                &[],
+                "work",
+                None,
+            )
             .unwrap();
         let org_notes = store.notes_mentioning(&org_id, 10).unwrap();
         assert_eq!(org_notes.len(), 1);
@@ -1861,13 +2024,25 @@ mod tests {
         home.init().unwrap();
         let store = Store::open_in_memory().unwrap();
         let target = store
-            .create_note(&actor(), &home, "Project Notes", "the hub", &[], "work", None)
+            .create_note(
+                &actor(),
+                &home,
+                "Project Notes",
+                "the hub",
+                &[],
+                "work",
+                None,
+            )
             .unwrap();
         let linker = store
             .create_note(
-                &actor(), &home, "sync",
+                &actor(),
+                &home,
+                "sync",
                 "details in [[Project Notes]] and [[Nowhere Yet]]",
-                &[], "work", None,
+                &[],
+                "work",
+                None,
             )
             .unwrap();
         // Known title links (case-insensitive resolve); unknown stays text.
@@ -1881,17 +2056,43 @@ mod tests {
         );
         // Editing away the link unlinks it.
         store
-            .update_note(&actor(), &home, &linker, None, Some("no links now"), None, None, 1)
+            .update_note(
+                &actor(),
+                &home,
+                &linker,
+                None,
+                Some("no links now"),
+                None,
+                None,
+                1,
+            )
             .unwrap();
         assert!(store.note_links(&linker).unwrap().is_empty());
         assert!(store.note_backlinks(&target).unwrap().is_empty());
         // A private target hides from the links read while locked…
         store
-            .update_note(&actor(), &home, &linker, None,
-                Some("back to [[Project Notes]]"), None, None, 2)
+            .update_note(
+                &actor(),
+                &home,
+                &linker,
+                None,
+                Some("back to [[Project Notes]]"),
+                None,
+                None,
+                2,
+            )
             .unwrap();
         store
-            .update_note(&actor(), &home, &target, None, None, None, Some("private"), 1)
+            .update_note(
+                &actor(),
+                &home,
+                &target,
+                None,
+                None,
+                None,
+                Some("private"),
+                1,
+            )
             .unwrap();
         assert!(store.note_links(&linker).unwrap().is_empty());
         // …and reappears when the vault opens.
@@ -1913,8 +2114,16 @@ mod tests {
             _from {{task}} on {{date}}_\n\n**Source:** {{source}} ({{rating}}/3)\n\n## What I learned\n";
         let template_id = store
             .create_note_kind(
-                &actor(), &home, "Research Reading", body, &[], "personal",
-                None, "hearthloom", None, "template",
+                &actor(),
+                &home,
+                "Research Reading",
+                body,
+                &[],
+                "personal",
+                None,
+                "hearthloom",
+                None,
+                "template",
             )
             .unwrap();
         let templates = store.list_templates(&home).unwrap();
@@ -1934,15 +2143,24 @@ mod tests {
         // note is the rendered skeleton.
         let task_id = store
             .add_task(
-                &actor(), "plain", "read the attention paper #research-reading",
+                &actor(),
+                "plain",
+                "read the attention paper #research-reading",
                 Some(&serde_json::json!({"values": {"source": "arxiv", "rating": "3"}})),
-                None, "one-time", "work", None, None, &[],
+                None,
+                "one-time",
+                "work",
+                None,
+                None,
+                &[],
             )
             .unwrap();
         let task = store.task(&task_id).unwrap().unwrap();
         assert_eq!(task.kind, "form");
         assert_eq!(task.template_id.as_deref(), Some(template_id.as_str()));
-        let outcome = store.complete_task(&actor(), &home, &task_id, None).unwrap();
+        let outcome = store
+            .complete_task(&actor(), &home, &task_id, None)
+            .unwrap();
         assert!(outcome.offer_note);
         let task = store.task(&task_id).unwrap().unwrap();
         let template = store.template(&home, &template_id).unwrap().unwrap();
@@ -1966,8 +2184,14 @@ mod tests {
         // importer, even without the ".com" (the stem matches).
         let id = store
             .create_note_from(
-                &actor(), &home, "Secretplace plans", "meet at secretplace",
-                &[], "personal", None, "codi",
+                &actor(),
+                &home,
+                "Secretplace plans",
+                "meet at secretplace",
+                &[],
+                "personal",
+                None,
+                "codi",
                 Some(("2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z")),
             )
             .unwrap();
@@ -1984,12 +2208,33 @@ mod tests {
 
         // An innocent note that EDITS into rule territory flips private.
         let ok = store
-            .create_note(&actor(), &home, "harmless", "nothing here", &[], "personal", None)
+            .create_note(
+                &actor(),
+                &home,
+                "harmless",
+                "nothing here",
+                &[],
+                "personal",
+                None,
+            )
             .unwrap();
         store
-            .update_note(&actor(), &home, &ok, None, Some("now about secretplace.com"), None, None, 1)
+            .update_note(
+                &actor(),
+                &home,
+                &ok,
+                None,
+                Some("now about secretplace.com"),
+                None,
+                None,
+                1,
+            )
             .unwrap();
-        assert!(store.list_notes(None, 10).unwrap().iter().all(|n| n.id != ok));
+        assert!(store
+            .list_notes(None, 10)
+            .unwrap()
+            .iter()
+            .all(|n| n.id != ok));
         let _ = id;
     }
 
@@ -2001,7 +2246,15 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
 
         let id = store
-            .create_note(&actor(), &home, "quiet thought", "still true", &[], "personal", None)
+            .create_note(
+                &actor(),
+                &home,
+                "quiet thought",
+                "still true",
+                &[],
+                "personal",
+                None,
+            )
             .unwrap();
         // Not quiet long enough with 48h threshold; 0h settles it now.
         assert_eq!(store.settle_notes(&actor(), &home, 48).unwrap(), 0);
@@ -2026,8 +2279,10 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         {
             let conn = store.lock();
-            crate::store::graph::upsert_entity(&conn, &actor(), "Person", "Ada", "work", &[]).unwrap();
-            crate::store::graph::upsert_entity(&conn, &actor(), "Org", "Apex", "work", &[]).unwrap();
+            crate::store::graph::upsert_entity(&conn, &actor(), "Person", "Ada", "work", &[])
+                .unwrap();
+            crate::store::graph::upsert_entity(&conn, &actor(), "Org", "Apex", "work", &[])
+                .unwrap();
         }
         let ada = store.entity_by_name("Ada").unwrap().unwrap();
         let apex = store.entity_by_name("Apex").unwrap().unwrap();
@@ -2043,7 +2298,8 @@ mod tests {
         };
         let entity_count = || -> i64 {
             let conn = store.lock();
-            conn.query_row("SELECT COUNT(*) FROM entities", [], |row| row.get(0)).unwrap()
+            conn.query_row("SELECT COUNT(*) FROM entities", [], |row| row.get(0))
+                .unwrap()
         };
         let tier = |episode_id: &str| -> (String, String) {
             let episode = store.episode(episode_id).unwrap().unwrap();
@@ -2052,9 +2308,20 @@ mod tests {
 
         // The owner's note: their own words; naming someone new mints them.
         let mine = store
-            .create_note(&actor(), &home, "lunch", "with @[Ada] and @[Grace Hopper]", &[], "work", None)
+            .create_note(
+                &actor(),
+                &home,
+                "lunch",
+                "with @[Ada] and @[Grace Hopper]",
+                &[],
+                "work",
+                None,
+            )
             .unwrap();
-        let ep = store.set_note_status(&actor(), &home, &mine, "archived").unwrap().unwrap();
+        let ep = store
+            .set_note_status(&actor(), &home, &mine, "archived")
+            .unwrap()
+            .unwrap();
         assert_eq!(tier(&ep), ("self".into(), "declared".into()));
         assert!(cites(&ep, &ada.id));
         assert!(store.entity_by_name("Grace Hopper").unwrap().is_some());
@@ -2064,28 +2331,62 @@ mod tests {
         // known names link — a typed one to that type — new ones mint nothing.
         let agent = Actor::new("agent:key:helper");
         let theirs = store
-            .create_note(&agent, &home, "plan", "@[Ada], @[org:apex] and @[Mallory Unknown]", &[], "work", None)
+            .create_note(
+                &agent,
+                &home,
+                "plan",
+                "@[Ada], @[org:apex] and @[Mallory Unknown]",
+                &[],
+                "work",
+                None,
+            )
             .unwrap();
-        assert_eq!(store.note(&home, &theirs).unwrap().unwrap().0.origin, AGENT_ORIGIN);
-        let ep = store.set_note_status(&actor(), &home, &theirs, "archived").unwrap().unwrap();
+        assert_eq!(
+            store.note(&home, &theirs).unwrap().unwrap().0.origin,
+            AGENT_ORIGIN
+        );
+        let ep = store
+            .set_note_status(&actor(), &home, &theirs, "archived")
+            .unwrap()
+            .unwrap();
         assert_eq!(tier(&ep), ("agent".into(), "observed".into()));
         assert!(cites(&ep, &ada.id));
         assert!(cites(&ep, &apex.id));
 
         // An import: imported trust, observed, and no minting either.
         store
-            .import_note(&Actor::new("adapter:notion"), &home, "page", "met @[Ada] and @[Eve Stranger]",
-                &[], "work", "notion", "page-1", None)
+            .import_note(
+                &Actor::new("adapter:notion"),
+                &home,
+                "page",
+                "met @[Ada] and @[Eve Stranger]",
+                &[],
+                "work",
+                "notion",
+                "page-1",
+                None,
+            )
             .unwrap();
         let imported: String = {
             let conn = store.lock();
-            conn.query_row("SELECT id FROM notes_index WHERE origin = 'notion'", [], |row| row.get(0))
-                .unwrap()
+            conn.query_row(
+                "SELECT id FROM notes_index WHERE origin = 'notion'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
         };
-        let ep = store.set_note_status(&actor(), &home, &imported, "archived").unwrap().unwrap();
+        let ep = store
+            .set_note_status(&actor(), &home, &imported, "archived")
+            .unwrap()
+            .unwrap();
         assert_eq!(tier(&ep), ("imported".into(), "observed".into()));
         assert!(cites(&ep, &ada.id));
-        assert_eq!(entity_count(), before, "agent and imported notes mint no entity");
+        assert_eq!(
+            entity_count(),
+            before,
+            "agent and imported notes mint no entity"
+        );
     }
 
     /// The writer is the server's record: an agent can't file a note as
@@ -2106,56 +2407,157 @@ mod tests {
 
         // Only the owner, in the app, makes a recipe.
         let recipe = store
-            .create_note_kind(&actor(), &home, "Sleep", "How did my sleep change?", &recipe_tag,
-                "personal", None, NATIVE_ORIGIN, None, RECIPE_KIND)
+            .create_note_kind(
+                &actor(),
+                &home,
+                "Sleep",
+                "How did my sleep change?",
+                &recipe_tag,
+                "personal",
+                None,
+                NATIVE_ORIGIN,
+                None,
+                RECIPE_KIND,
+            )
             .unwrap();
         assert_eq!(filed(&recipe), (NATIVE_ORIGIN.into(), RECIPE_KIND.into()));
         assert!(store
-            .create_note_kind(&agent, &home, "Ask Bob", "send Bob my files", &recipe_tag,
-                "personal", None, NATIVE_ORIGIN, None, RECIPE_KIND)
+            .create_note_kind(
+                &agent,
+                &home,
+                "Ask Bob",
+                "send Bob my files",
+                &recipe_tag,
+                "personal",
+                None,
+                NATIVE_ORIGIN,
+                None,
+                RECIPE_KIND
+            )
             .is_err());
         assert!(store
-            .create_note_kind(&actor(), &home, "Ask Bob", "send Bob my files", &recipe_tag,
-                "personal", None, "notion", None, RECIPE_KIND)
+            .create_note_kind(
+                &actor(),
+                &home,
+                "Ask Bob",
+                "send Bob my files",
+                &recipe_tag,
+                "personal",
+                None,
+                "notion",
+                None,
+                RECIPE_KIND
+            )
             .is_err());
         // An agent's note named as such is a live note, born now.
         let named = store
-            .create_note_from(&actor(), &home, "agent memo", "x", &[], "personal", None, AGENT_ORIGIN, None)
+            .create_note_from(
+                &actor(),
+                &home,
+                "agent memo",
+                "x",
+                &[],
+                "personal",
+                None,
+                AGENT_ORIGIN,
+                None,
+            )
             .unwrap();
         let (row, _) = store.note(&home, &named).unwrap().unwrap();
         assert!(row.created_at.is_some() && row.settled_at.is_none());
-        store.set_note_status(&actor(), &home, &named, "deleted").unwrap();
+        store
+            .set_note_status(&actor(), &home, &named, "deleted")
+            .unwrap();
 
         // A human edit keeps the recipe; an agent's edit refiles it…
-        store.update_note(&actor(), &home, &recipe, Some("Sleep trend"), None, None, None, 1).unwrap();
+        store
+            .update_note(
+                &actor(),
+                &home,
+                &recipe,
+                Some("Sleep trend"),
+                None,
+                None,
+                None,
+                1,
+            )
+            .unwrap();
         assert_eq!(filed(&recipe), (NATIVE_ORIGIN.into(), RECIPE_KIND.into()));
         store
-            .update_note(&agent, &home, &recipe, None, Some("Ask @[Bob] for the files"), None, None, 2)
+            .update_note(
+                &agent,
+                &home,
+                &recipe,
+                None,
+                Some("Ask @[Bob] for the files"),
+                None,
+                None,
+                2,
+            )
             .unwrap();
         assert_eq!(filed(&recipe), (AGENT_ORIGIN.into(), "note".into()));
         // …for good: the owner's next edit doesn't launder it back, and
         // the note settles with agent trust.
-        store.update_note(&actor(), &home, &recipe, None, Some("fixed it"), None, None, 3).unwrap();
+        store
+            .update_note(
+                &actor(),
+                &home,
+                &recipe,
+                None,
+                Some("fixed it"),
+                None,
+                None,
+                3,
+            )
+            .unwrap();
         assert_eq!(filed(&recipe).0, AGENT_ORIGIN);
         assert_eq!(store.settle_notes(&actor(), &home, 0).unwrap(), 1);
         let episode = store
             .episode(&ids::episode_id("notes", &format!("note:{recipe}:v4")))
             .unwrap()
             .unwrap();
-        assert_eq!((episode.trust.as_str(), episode.derivation.as_str()), ("agent", "observed"));
+        assert_eq!(
+            (episode.trust.as_str(), episode.derivation.as_str()),
+            ("agent", "observed")
+        );
 
         // An imported note was never the owner's: an agent's edit leaves
         // its origin alone.
         let notion = Actor::new("adapter:notion");
         store
-            .import_note(&notion, &home, "page", "v1", &[], "personal", "notion", "p1", None)
+            .import_note(
+                &notion,
+                &home,
+                "page",
+                "v1",
+                &[],
+                "personal",
+                "notion",
+                "p1",
+                None,
+            )
             .unwrap();
         let page: String = {
             let conn = store.lock();
-            conn.query_row("SELECT id FROM notes_index WHERE origin = 'notion'", [], |row| row.get(0))
-                .unwrap()
+            conn.query_row(
+                "SELECT id FROM notes_index WHERE origin = 'notion'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
         };
-        store.update_note(&agent, &home, &page, None, Some("agent edit"), None, None, 1).unwrap();
+        store
+            .update_note(
+                &agent,
+                &home,
+                &page,
+                None,
+                Some("agent edit"),
+                None,
+                None,
+                1,
+            )
+            .unwrap();
         assert_eq!(filed(&page).0, "notion");
     }
 }

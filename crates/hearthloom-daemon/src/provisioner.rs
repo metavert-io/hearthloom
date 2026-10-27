@@ -52,12 +52,17 @@ pub fn verify_control_token(token: &str) -> Result<String> {
         .split_once('.')
         .ok_or_else(|| anyhow!("malformed control token"))?;
     let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let payload = engine.decode(payload_b64).map_err(|_| anyhow!("malformed control token"))?;
-    let sig = engine.decode(sig_b64).map_err(|_| anyhow!("malformed control token"))?;
+    let payload = engine
+        .decode(payload_b64)
+        .map_err(|_| anyhow!("malformed control token"))?;
+    let sig = engine
+        .decode(sig_b64)
+        .map_err(|_| anyhow!("malformed control token"))?;
     let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes())
         .map_err(|_| anyhow!("bad provisioner secret"))?;
     mac.update(&payload);
-    mac.verify_slice(&sig).map_err(|_| anyhow!("control signature mismatch"))?;
+    mac.verify_slice(&sig)
+        .map_err(|_| anyhow!("control signature mismatch"))?;
     let claims: Value = serde_json::from_slice(&payload)?;
     if claims.get("purpose").and_then(|p| p.as_str()) != Some("control") {
         return Err(anyhow!("not a control token"));
@@ -106,9 +111,13 @@ pub fn set_killswitch(
     link: Option<&str>,
     allow_export: Option<bool>,
 ) -> Result<()> {
-    state.store.set_consolidation_state(KEY_ACTIVE, if active { "1" } else { "0" })?;
+    state
+        .store
+        .set_consolidation_state(KEY_ACTIVE, if active { "1" } else { "0" })?;
     state.store.set_consolidation_state(KEY_MESSAGE, message)?;
-    state.store.set_consolidation_state(KEY_LINK, link.unwrap_or(""))?;
+    state
+        .store
+        .set_consolidation_state(KEY_LINK, link.unwrap_or(""))?;
     if let Some(allow) = allow_export {
         state
             .store
@@ -123,7 +132,11 @@ pub fn set_killswitch(
         &Actor::new(format!("provisioner:{sub}")),
         "provisioner",
         if active { "critical" } else { "info" },
-        if active { "This node has been restricted" } else { "Full access restored" },
+        if active {
+            "This node has been restricted"
+        } else {
+            "Full access restored"
+        },
         message,
         link.filter(|l| !l.is_empty()).map(|l| (l, None)),
         Some("killswitch"),
@@ -133,7 +146,13 @@ pub fn set_killswitch(
 
 /// The 402 payload every blocked request receives.
 pub fn killswitch_body(store: &hearthloom_core::Store) -> Value {
-    let get = |k: &str| store.consolidation_state(k).ok().flatten().unwrap_or_default();
+    let get = |k: &str| {
+        store
+            .consolidation_state(k)
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    };
     json!({
         "error": "this node is restricted by its provisioner",
         "killswitch": true,
@@ -183,7 +202,12 @@ pub fn allowed_origins(state: &AppState) -> Vec<String> {
     if let Ok(Some((_, url))) = state.store.peer() {
         origins.push(url);
     }
-    if let Some(domains) = state.store.consolidation_state(KEY_LINK_DOMAINS).ok().flatten() {
+    if let Some(domains) = state
+        .store
+        .consolidation_state(KEY_LINK_DOMAINS)
+        .ok()
+        .flatten()
+    {
         if let Ok(list) = serde_json::from_str::<Vec<String>>(&domains) {
             origins.extend(list);
         }
@@ -200,7 +224,13 @@ pub fn set_link_domains(state: &AppState, domains: &[String]) -> Result<()> {
 /// Internal producer helper: system notifications never fail the
 /// caller's path, and every creation publishes a bus hint so the peer's
 /// bell rings in seconds (poll reconciles).
-pub fn notify_system(state: &AppState, severity: &str, title: &str, body: &str, dedupe: Option<&str>) {
+pub fn notify_system(
+    state: &AppState,
+    severity: &str,
+    title: &str,
+    body: &str,
+    dedupe: Option<&str>,
+) {
     let _ = state.store.notify(
         &Actor::new("system:daemon"),
         "system:daemon",
@@ -246,14 +276,20 @@ mod tests {
         );
         assert!(verify_control_token(&login).is_err());
         // expired / over-long exp / bad signature
-        let expired = mint("test-secret", &json!({"purpose": "control", "exp": now - 5, "jti": "j3"}));
+        let expired = mint(
+            "test-secret",
+            &json!({"purpose": "control", "exp": now - 5, "jti": "j3"}),
+        );
         assert!(verify_control_token(&expired).is_err());
         let overlong = mint(
             "test-secret",
             &json!({"purpose": "control", "exp": now + 999_999, "jti": "j4"}),
         );
         assert!(verify_control_token(&overlong).is_err());
-        let forged = mint("wrong-secret", &json!({"purpose": "control", "exp": now + 60, "jti": "j5"}));
+        let forged = mint(
+            "wrong-secret",
+            &json!({"purpose": "control", "exp": now + 60, "jti": "j5"}),
+        );
         assert!(verify_control_token(&forged).is_err());
         std::env::remove_var("HEARTHLOOM_PROVISIONER_SECRET");
     }

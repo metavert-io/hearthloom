@@ -78,7 +78,9 @@ fn environment() -> String {
 /// on a personal node. The returned guard must live for the process
 /// (run() holds it; drop flushes pending events on exit).
 pub(crate) fn init() -> Option<sentry::ClientInitGuard> {
-    let dsn = std::env::var("SENTRY_DSN").ok().filter(|d| !d.trim().is_empty())?;
+    let dsn = std::env::var("SENTRY_DSN")
+        .ok()
+        .filter(|d| !d.trim().is_empty())?;
     let rate: f32 = std::env::var("SENTRY_TRACES_SAMPLE_RATE")
         .ok()
         .and_then(|v| v.trim().parse().ok())
@@ -96,24 +98,23 @@ pub(crate) fn init() -> Option<sentry::ClientInitGuard> {
             None
         }
     }));
-    let options =
-        options.traces_sampler(move |ctx: &sentry::TransactionContext| {
-            if !consented() {
-                return 0.0;
-            }
-            // health probes (fly checks, the iOS shell, launchd
-            // watchdogs) would dominate the quota with zero signal
-            if ctx.name() == "GET /health" || ctx.name().ends_with("/health") {
-                return 0.0;
-            }
-            match ctx.sampled() {
-                // continue the caller's decision (the iOS app's
-                // distributed trace) so phone→daemon traces stitch
-                Some(true) => 1.0,
-                Some(false) => 0.0,
-                None => rate,
-            }
-        });
+    let options = options.traces_sampler(move |ctx: &sentry::TransactionContext| {
+        if !consented() {
+            return 0.0;
+        }
+        // health probes (fly checks, the iOS shell, launchd
+        // watchdogs) would dominate the quota with zero signal
+        if ctx.name() == "GET /health" || ctx.name().ends_with("/health") {
+            return 0.0;
+        }
+        match ctx.sampled() {
+            // continue the caller's decision (the iOS app's
+            // distributed trace) so phone→daemon traces stitch
+            Some(true) => 1.0,
+            Some(false) => 0.0,
+            None => rate,
+        }
+    });
     let guard = sentry::init((dsn, options));
     tracing::info!(
         "sentry APM active (release {:?}, environment {}, traces rate {}, consent {})",

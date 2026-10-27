@@ -160,10 +160,9 @@ impl Store {
              ORDER BY knn.distance"
         ))?;
         let rows: Vec<(String, String, f64)> = stmt
-            .query_map(
-                rusqlite::params![floats_to_bytes(query), k as i64],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )?
+            .query_map(rusqlite::params![floats_to_bytes(query), k as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
             .collect::<std::result::Result<_, _>>()?;
         drop(stmt);
         drop(conn);
@@ -205,9 +204,7 @@ impl Store {
             std::collections::HashMap::new();
         for (episode_id, text, blob) in rows {
             let similarity = cosine_similarity(query, &bytes_to_floats(&blob));
-            let entry = best
-                .entry(episode_id)
-                .or_insert((f32::MIN, String::new()));
+            let entry = best.entry(episode_id).or_insert((f32::MIN, String::new()));
             if similarity > entry.0 {
                 *entry = (similarity, text);
             }
@@ -278,8 +275,12 @@ mod tests {
 
         let pending = store.chunks_needing_embedding(10).unwrap();
         assert_eq!(pending.len(), 2);
-        store.set_chunk_embedding(&pending[0].0, &[1.0, 0.0]).unwrap();
-        store.set_chunk_embedding(&pending[1].0, &[0.0, 1.0]).unwrap();
+        store
+            .set_chunk_embedding(&pending[0].0, &[1.0, 0.0])
+            .unwrap();
+        store
+            .set_chunk_embedding(&pending[1].0, &[0.0, 1.0])
+            .unwrap();
         assert_eq!(store.embedding_coverage().unwrap(), (2, 2));
         assert!(store.chunks_needing_embedding(10).unwrap().is_empty());
 

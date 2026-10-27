@@ -37,8 +37,7 @@ impl Store {
             return Err(anyhow!("project name is required"));
         }
         let conn = self.lock();
-        let (id, _created, _queued) =
-            upsert_entity(&conn, actor, "Project", name, "work", &[])?;
+        let (id, _created, _queued) = upsert_entity(&conn, actor, "Project", name, "work", &[])?;
         // stamp declared_importance ≥1 so it outranks auto-minted repos
         // in the galaxy/rankings (a named project is a deliberate thing)
         conn.execute(
@@ -71,12 +70,7 @@ impl Store {
 
     /// Compose one entity (a repo Project, usually) under a project via
     /// a `contains` edge. Both are resolved through merge groups.
-    pub fn attach_to_project(
-        &self,
-        actor: &Actor,
-        project_id: &str,
-        child_id: &str,
-    ) -> Result<()> {
+    pub fn attach_to_project(&self, actor: &Actor, project_id: &str, child_id: &str) -> Result<()> {
         let conn = self.lock();
         let project = resolve_merged(&conn, project_id)?;
         let child = resolve_merged(&conn, child_id)?;

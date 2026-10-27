@@ -59,7 +59,10 @@ pub fn start(spec: Spec) -> Result<()> {
     let child = Arc::new(Mutex::new(None));
     table.insert(
         spec.name.clone(),
-        Handle { stop: stop.clone(), child: child.clone() },
+        Handle {
+            stop: stop.clone(),
+            child: child.clone(),
+        },
     );
     std::thread::Builder::new()
         .name(format!("ember-{}", spec.name))
@@ -115,7 +118,11 @@ fn terminate(child: &Arc<Mutex<Option<Child>>>) {
 }
 
 fn log_line(log: &PathBuf, msg: &str) {
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+    {
         let _ = writeln!(f, "[hearthloom {}] {msg}", hearthloom_core::time::now_utc());
     }
 }
@@ -132,11 +139,17 @@ fn supervise(spec: Spec, stop: Arc<AtomicBool>, child: Arc<Mutex<Option<Child>>>
     let mut backoff = Duration::from_secs(1);
     while !stop.load(Ordering::SeqCst) {
         // keep the log bounded: one generation of history
-        if std::fs::metadata(&spec.log).map(|m| m.len() > LOG_ROTATE_BYTES).unwrap_or(false) {
+        if std::fs::metadata(&spec.log)
+            .map(|m| m.len() > LOG_ROTATE_BYTES)
+            .unwrap_or(false)
+        {
             let _ = std::fs::rename(&spec.log, spec.log.with_extension("log.1"));
         }
         let spawned = (|| -> std::io::Result<Child> {
-            let out = std::fs::OpenOptions::new().create(true).append(true).open(&spec.log)?;
+            let out = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&spec.log)?;
             let err = out.try_clone()?;
             let mut cmd = Command::new(&spec.bin);
             cmd.current_dir(&spec.cwd)
@@ -160,7 +173,10 @@ fn supervise(spec: Spec, stop: Arc<AtomicBool>, child: Arc<Mutex<Option<Child>>>
         let started = Instant::now();
         match spawned {
             Ok(c) => {
-                log_line(&spec.log, &format!("started {} (pid {})", spec.name, c.id()));
+                log_line(
+                    &spec.log,
+                    &format!("started {} (pid {})", spec.name, c.id()),
+                );
                 *child.lock().unwrap() = Some(c);
                 // poll (not wait): stop() needs the handle to signal it
                 let status = loop {
@@ -185,16 +201,26 @@ fn supervise(spec: Spec, stop: Arc<AtomicBool>, child: Arc<Mutex<Option<Child>>>
                 if started.elapsed() >= HEALTHY_AFTER {
                     backoff = Duration::from_secs(1);
                 }
-                let how = status.map(|s| s.to_string()).unwrap_or_else(|| "unknown status".into());
+                let how = status
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "unknown status".into());
                 log_line(
                     &spec.log,
-                    &format!("{} exited ({how}); restarting in {}s", spec.name, backoff.as_secs()),
+                    &format!(
+                        "{} exited ({how}); restarting in {}s",
+                        spec.name,
+                        backoff.as_secs()
+                    ),
                 );
             }
             Err(e) => {
                 log_line(
                     &spec.log,
-                    &format!("couldn't start {}: {e}; retrying in {}s", spec.name, backoff.as_secs()),
+                    &format!(
+                        "couldn't start {}: {e}; retrying in {}s",
+                        spec.name,
+                        backoff.as_secs()
+                    ),
                 );
             }
         }
@@ -220,7 +246,8 @@ mod tests {
 
     #[test]
     fn test_supervisor_runs_restarts_and_stops() {
-        let dir = std::env::temp_dir().join(format!("hl-sidecar-{}", uuid::Uuid::new_v4().simple()));
+        let dir =
+            std::env::temp_dir().join(format!("hl-sidecar-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
         // a sidecar that records each start, then exits — the supervisor
         // must bring it back
@@ -245,7 +272,10 @@ mod tests {
         })
         .unwrap();
         let runs = || std::fs::read_to_string(dir.join("runs")).unwrap_or_default();
-        assert!(wait_for(|| runs().lines().count() >= 2), "restarted after exit");
+        assert!(
+            wait_for(|| runs().lines().count() >= 2),
+            "restarted after exit"
+        );
         assert!(runs().starts_with("run demo"), "env reached the child");
         stop(&name);
         let after = runs().lines().count();
@@ -259,7 +289,8 @@ mod tests {
 
     #[test]
     fn test_stop_terminates_a_long_runner() {
-        let dir = std::env::temp_dir().join(format!("hl-sidecar-{}", uuid::Uuid::new_v4().simple()));
+        let dir =
+            std::env::temp_dir().join(format!("hl-sidecar-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("long.sh");
         std::fs::write(&bin, "#!/bin/sh\necho $$ > \"$PWD/pid\"\nexec sleep 30\n").unwrap();
@@ -280,11 +311,18 @@ mod tests {
         assert!(wait_for(|| running(&name)), "long runner is up");
         let pid: i32 = {
             assert!(wait_for(|| dir.join("pid").exists()));
-            std::fs::read_to_string(dir.join("pid")).unwrap().trim().parse().unwrap()
+            std::fs::read_to_string(dir.join("pid"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap()
         };
         let t = Instant::now();
         stop(&name);
-        assert!(t.elapsed() < Duration::from_secs(6), "SIGTERM honored promptly");
+        assert!(
+            t.elapsed() < Duration::from_secs(6),
+            "SIGTERM honored promptly"
+        );
         assert!(!running(&name));
         #[cfg(unix)]
         {

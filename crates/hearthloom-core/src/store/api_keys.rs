@@ -14,8 +14,9 @@ use super::{record_mutation, Actor, Store, LIFE_AREAS};
 use crate::ids;
 use crate::time::now_utc;
 
-pub const API_KEY_SCOPES: &[&str] =
-    &["read", "write", "mcp", "peer", "friend", "notify", "ingest", "admin"];
+pub const API_KEY_SCOPES: &[&str] = &[
+    "read", "write", "mcp", "peer", "friend", "notify", "ingest", "admin",
+];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ApiKeyRow {
@@ -109,12 +110,10 @@ impl KeyGrants {
     /// area list, or an area limit combined with Ask (Ask's tools read
     /// through raw SQL and a thread pool the area filter doesn't cover).
     pub fn validate(&self) -> Result<()> {
-        if self.own_device
-            && !self.capture
-            && !self.tasks.can_write()
-            && !self.notes.can_write()
-        {
-            return Err(anyhow!("an own-device key needs something to write: capture, tasks or notes"));
+        if self.own_device && !self.capture && !self.tasks.can_write() && !self.notes.can_write() {
+            return Err(anyhow!(
+                "an own-device key needs something to write: capture, tasks or notes"
+            ));
         }
         let Some(areas) = &self.areas else {
             return Ok(());
@@ -124,11 +123,16 @@ impl KeyGrants {
         }
         for area in areas {
             if !LIFE_AREAS.contains(&area.as_str()) {
-                return Err(anyhow!("unknown area {area:?} (valid: {})", LIFE_AREAS.join(", ")));
+                return Err(anyhow!(
+                    "unknown area {area:?} (valid: {})",
+                    LIFE_AREAS.join(", ")
+                ));
             }
         }
         if self.ask {
-            return Err(anyhow!("an area-limited key can't use Ask — drop the area limit or the Ask grant"));
+            return Err(anyhow!(
+                "an area-limited key can't use Ask — drop the area limit or the Ask grant"
+            ));
         }
         Ok(())
     }
@@ -141,7 +145,10 @@ impl KeyGrants {
         let under = |prefix: &str| path == prefix || path.starts_with(&format!("{prefix}/"));
         let allow = |ok: bool, reads: bool| {
             if ok {
-                GrantVerdict::Allowed { reads, is_ask: false }
+                GrantVerdict::Allowed {
+                    reads,
+                    is_ask: false,
+                }
             } else {
                 GrantVerdict::Denied
             }
@@ -151,19 +158,41 @@ impl KeyGrants {
         }
         // Reads no guard filters by scope (purged-task text, per-origin
         // counts, the vault's own listing) stay off every scoped key.
-        if get && ["/v1/tasks/deleted", "/v1/notes/vaulted", "/v1/notes/origins"].contains(&path) {
+        if get
+            && [
+                "/v1/tasks/deleted",
+                "/v1/notes/vaulted",
+                "/v1/notes/origins",
+            ]
+            .contains(&path)
+        {
             return GrantVerdict::Denied;
         }
         if under("/v1/tasks") {
-            return if get { allow(self.tasks.can_read(), true) } else { allow(self.tasks.can_write(), false) };
+            return if get {
+                allow(self.tasks.can_read(), true)
+            } else {
+                allow(self.tasks.can_write(), false)
+            };
         }
         if under("/v1/notes") {
-            return if get { allow(self.notes.can_read(), true) } else { allow(self.notes.can_write(), false) };
+            return if get {
+                allow(self.notes.can_read(), true)
+            } else {
+                allow(self.notes.can_write(), false)
+            };
         }
         if get
-            && ["/v1/search", "/v1/recall", "/v1/traverse", "/v1/entity", "/v1/episode", "/v1/timeline"]
-                .iter()
-                .any(|p| under(p))
+            && [
+                "/v1/search",
+                "/v1/recall",
+                "/v1/traverse",
+                "/v1/entity",
+                "/v1/episode",
+                "/v1/timeline",
+            ]
+            .iter()
+            .any(|p| under(p))
         {
             return allow(self.memory.can_read(), true);
         }
@@ -173,12 +202,17 @@ impl KeyGrants {
         if path == "/mcp" {
             // Tool-level checks (and the vault rule for its read tools)
             // live in mcp.rs — the endpoint itself needs any data grant.
-            let any = self.tasks != Access::None || self.notes != Access::None || self.memory != Access::None;
+            let any = self.tasks != Access::None
+                || self.notes != Access::None
+                || self.memory != Access::None;
             return allow(any, false);
         }
         if path == "/v1/query" || path == "/v1/query/stream" {
             return if self.ask && self.areas.is_none() {
-                GrantVerdict::Allowed { reads: true, is_ask: true }
+                GrantVerdict::Allowed {
+                    reads: true,
+                    is_ask: true,
+                }
             } else {
                 GrantVerdict::Denied
             };
@@ -242,7 +276,9 @@ impl Store {
                 return Err(anyhow!("a scoped key needs at least one grant"));
             }
             if !scopes.is_empty() {
-                return Err(anyhow!("a scoped key takes grants, not scopes — choose one"));
+                return Err(anyhow!(
+                    "a scoped key takes grants, not scopes — choose one"
+                ));
             }
             g.validate()?;
         }
@@ -409,7 +445,14 @@ impl Store {
         conn.execute(
             "INSERT INTO key_requests (id, name, grants, ttl_secs, poll_hash, created_at, status)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending')",
-            rusqlite::params![id, name, serde_json::json!(grants).to_string(), ttl_secs, hash_of(&poll), now_utc()],
+            rusqlite::params![
+                id,
+                name,
+                serde_json::json!(grants).to_string(),
+                ttl_secs,
+                hash_of(&poll),
+                now_utc()
+            ],
         )?;
         Ok((id, poll))
     }
@@ -475,7 +518,11 @@ impl Store {
 
     /// The requester's poll. Returns (status, secret). The secret is
     /// handed over exactly ONCE and then erased from the row.
-    pub fn key_request_poll(&self, id: &str, poll_secret: &str) -> Result<Option<(String, Option<String>)>> {
+    pub fn key_request_poll(
+        &self,
+        id: &str,
+        poll_secret: &str,
+    ) -> Result<Option<(String, Option<String>)>> {
         let conn = self.lock();
         let found: Option<(String, Option<String>, String)> = conn
             .query_row(
@@ -491,7 +538,10 @@ impl Store {
             return Ok(Some(("expired".into(), None)));
         }
         if secret.is_some() {
-            conn.execute("UPDATE key_requests SET issued_secret = NULL WHERE id = ?1", [id])?;
+            conn.execute(
+                "UPDATE key_requests SET issued_secret = NULL WHERE id = ?1",
+                [id],
+            )?;
         }
         Ok(Some((status, secret)))
     }
@@ -507,8 +557,9 @@ impl Store {
         let rows = stmt
             .query_map(rusqlite::params![agent_actor, limit as i64], |row| {
                 let image: Option<String> = row.get(4)?;
-                let image: serde_json::Value =
-                    image.and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
+                let image: serde_json::Value = image
+                    .and_then(|raw| serde_json::from_str(&raw).ok())
+                    .unwrap_or_default();
                 let label = ["description", "title", "name", "text"]
                     .iter()
                     .find_map(|k| image.get(*k).and_then(|v| v.as_str()))
@@ -582,7 +633,12 @@ mod tests {
         assert_eq!(claims.id, row.id);
         assert!(store.verify_api_key("hl_wrong").unwrap().is_none());
         // last_used stamped
-        assert!(store.api_key(&row.id).unwrap().unwrap().last_used_at.is_some());
+        assert!(store
+            .api_key(&row.id)
+            .unwrap()
+            .unwrap()
+            .last_used_at
+            .is_some());
 
         // revoke kills it; list still shows it (history, not deletion)
         store.revoke_api_key(&actor, &row.id).unwrap();
@@ -596,7 +652,12 @@ mod tests {
         let (store, _tmp) = test_store();
         let actor = Actor::new("human:test");
         let (_, secret) = store
-            .create_api_key(&actor, "old", &["read".into()], Some("2020-01-01T00:00:00Z"))
+            .create_api_key(
+                &actor,
+                "old",
+                &["read".into()],
+                Some("2020-01-01T00:00:00Z"),
+            )
             .unwrap();
         assert!(store.verify_api_key(&secret).unwrap().is_none());
     }
@@ -612,37 +673,102 @@ mod tests {
 
     #[test]
     fn test_scoped_key_route_table_is_default_deny() {
-        let g = KeyGrants { tasks: Access::Write, notes: Access::Read, capture: true, ..Default::default() };
+        let g = KeyGrants {
+            tasks: Access::Write,
+            notes: Access::Read,
+            capture: true,
+            ..Default::default()
+        };
         let ok = |m: &str, p: &str| matches!(g.permits(m, p), GrantVerdict::Allowed { .. });
-        assert!(ok("GET", "/v1/tasks") && ok("POST", "/v1/tasks") && ok("DELETE", "/v1/tasks/tk_1"));
-        assert!(ok("GET", "/v1/notes/n1") && !ok("POST", "/v1/notes"), "notes are read-only here");
+        assert!(
+            ok("GET", "/v1/tasks") && ok("POST", "/v1/tasks") && ok("DELETE", "/v1/tasks/tk_1")
+        );
+        assert!(
+            ok("GET", "/v1/notes/n1") && !ok("POST", "/v1/notes"),
+            "notes are read-only here"
+        );
         assert!(ok("POST", "/v1/ingest/capture") && ok("GET", "/health") && ok("POST", "/mcp"));
         // Everything not on the table is denied — including what an
         // ordinary key reaches by default.
-        for (m, p) in [("GET", "/v1/search"), ("POST", "/v1/query"), ("GET", "/v1/keys"),
-                       ("POST", "/v1/vault"), ("GET", "/v1/export/start"), ("POST", "/v1/sql"),
-                       ("GET", "/v1/llm/usage"), ("GET", "/v1/tasksX"), ("POST", "/v1/ingest/health")] {
+        for (m, p) in [
+            ("GET", "/v1/search"),
+            ("POST", "/v1/query"),
+            ("GET", "/v1/keys"),
+            ("POST", "/v1/vault"),
+            ("GET", "/v1/export/start"),
+            ("POST", "/v1/sql"),
+            ("GET", "/v1/llm/usage"),
+            ("GET", "/v1/tasksX"),
+            ("POST", "/v1/ingest/health"),
+        ] {
             assert!(!ok(m, p), "{m} {p} must be denied");
         }
         // Reads are marked so the vault rule can refuse them; writes aren't.
-        assert_eq!(g.permits("GET", "/v1/tasks"), GrantVerdict::Allowed { reads: true, is_ask: false });
-        assert_eq!(g.permits("POST", "/v1/tasks"), GrantVerdict::Allowed { reads: false, is_ask: false });
-        let ask = KeyGrants { ask: true, ..Default::default() };
-        assert_eq!(ask.permits("POST", "/v1/query"), GrantVerdict::Allowed { reads: true, is_ask: true });
+        assert_eq!(
+            g.permits("GET", "/v1/tasks"),
+            GrantVerdict::Allowed {
+                reads: true,
+                is_ask: false
+            }
+        );
+        assert_eq!(
+            g.permits("POST", "/v1/tasks"),
+            GrantVerdict::Allowed {
+                reads: false,
+                is_ask: false
+            }
+        );
+        let ask = KeyGrants {
+            ask: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            ask.permits("POST", "/v1/query"),
+            GrantVerdict::Allowed {
+                reads: true,
+                is_ask: true
+            }
+        );
         assert!(KeyGrants::default().grants_nothing());
         // Unguarded reads are off the table whatever the grants.
-        let all = KeyGrants { tasks: Access::Write, notes: Access::Write, ..Default::default() };
-        for p in ["/v1/tasks/deleted", "/v1/notes/vaulted", "/v1/notes/origins"] {
+        let all = KeyGrants {
+            tasks: Access::Write,
+            notes: Access::Write,
+            ..Default::default()
+        };
+        for p in [
+            "/v1/tasks/deleted",
+            "/v1/notes/vaulted",
+            "/v1/notes/origins",
+        ] {
             assert_eq!(all.permits("GET", p), GrantVerdict::Denied, "{p}");
         }
     }
 
     #[test]
     fn test_own_device_needs_something_to_write() {
-        let own = |g: KeyGrants| KeyGrants { own_device: true, ..g };
-        assert!(own(KeyGrants { capture: true, ..Default::default() }).validate().is_ok());
-        assert!(own(KeyGrants { notes: Access::Write, ..Default::default() }).validate().is_ok());
-        assert!(own(KeyGrants { memory: Access::Read, ..Default::default() }).validate().is_err());
+        let own = |g: KeyGrants| KeyGrants {
+            own_device: true,
+            ..g
+        };
+        assert!(own(KeyGrants {
+            capture: true,
+            ..Default::default()
+        })
+        .validate()
+        .is_ok());
+        assert!(own(KeyGrants {
+            notes: Access::Write,
+            ..Default::default()
+        })
+        .validate()
+        .is_ok());
+        assert!(own(KeyGrants {
+            memory: Access::Read,
+            ..Default::default()
+        })
+        .validate()
+        .is_err());
         // Keys minted before the flag existed read as not-own-device.
         let old: KeyGrants = serde_json::from_str(r#"{"capture": true}"#).unwrap();
         assert!(!old.own_device);
@@ -651,23 +777,39 @@ mod tests {
     #[test]
     fn test_area_limited_grants_validate() {
         let areas = |a: &[&str]| Some(a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
-        let ok = KeyGrants { memory: Access::Read, areas: areas(&["work"]), ..Default::default() };
+        let ok = KeyGrants {
+            memory: Access::Read,
+            areas: areas(&["work"]),
+            ..Default::default()
+        };
         assert!(ok.validate().is_ok());
         for bad in [areas(&[]), areas(&["private"]), areas(&["work", "nope"])] {
-            let g = KeyGrants { memory: Access::Read, areas: bad, ..Default::default() };
+            let g = KeyGrants {
+                memory: Access::Read,
+                areas: bad,
+                ..Default::default()
+            };
             assert!(g.validate().is_err());
         }
         // Ask and an area limit don't combine — at mint, at request, and
         // (for a row written some other way) at the route table.
-        let ask = KeyGrants { ask: true, areas: areas(&["work"]), ..Default::default() };
+        let ask = KeyGrants {
+            ask: true,
+            areas: areas(&["work"]),
+            ..Default::default()
+        };
         assert!(ask.validate().is_err());
         assert_eq!(ask.permits("POST", "/v1/query"), GrantVerdict::Denied);
         let store = Store::open_in_memory().unwrap();
         let actor = Actor::new("human:test");
-        assert!(store.create_api_key_scoped(&actor, "a", &[], None, Some(&ask)).is_err());
+        assert!(store
+            .create_api_key_scoped(&actor, "a", &[], None, Some(&ask))
+            .is_err());
         assert!(store.key_request_create("a", &ask, None).is_err());
         // The limit survives the round trip through the grants column.
-        let (_, secret) = store.create_api_key_scoped(&actor, "work-agent", &[], None, Some(&ok)).unwrap();
+        let (_, secret) = store
+            .create_api_key_scoped(&actor, "work-agent", &[], None, Some(&ok))
+            .unwrap();
         let claims = store.verify_api_key(&secret).unwrap().unwrap();
         assert_eq!(claims.grants.unwrap().areas, areas(&["work"]));
     }
@@ -676,34 +818,70 @@ mod tests {
     fn test_scoped_key_mint_verify_and_request_flow() {
         let store = Store::open_in_memory().unwrap();
         let actor = Actor::new("human:test");
-        let grants = KeyGrants { tasks: Access::Write, ..Default::default() };
+        let grants = KeyGrants {
+            tasks: Access::Write,
+            ..Default::default()
+        };
         // Grants and scopes don't mix; an empty grant set is refused.
-        assert!(store.create_api_key_scoped(&actor, "x", &["read".into()], None, Some(&grants)).is_err());
-        assert!(store.create_api_key_scoped(&actor, "x", &[], None, Some(&KeyGrants::default())).is_err());
-        let (row, secret) = store.create_api_key_scoped(&actor, "agent-a", &[], None, Some(&grants)).unwrap();
+        assert!(store
+            .create_api_key_scoped(&actor, "x", &["read".into()], None, Some(&grants))
+            .is_err());
+        assert!(store
+            .create_api_key_scoped(&actor, "x", &[], None, Some(&KeyGrants::default()))
+            .is_err());
+        let (row, secret) = store
+            .create_api_key_scoped(&actor, "agent-a", &[], None, Some(&grants))
+            .unwrap();
         assert_eq!(row.grants.as_ref(), Some(&grants));
         let claims = store.verify_api_key(&secret).unwrap().unwrap();
         assert_eq!(claims.grants, Some(grants.clone()));
         assert_eq!(claims.agent_actor(), "agent:key:agent-a");
         // An ordinary key stays unscoped.
-        let (_, plain) = store.create_api_key(&actor, "plain", &["read".into()], None).unwrap();
-        assert!(store.verify_api_key(&plain).unwrap().unwrap().grants.is_none());
+        let (_, plain) = store
+            .create_api_key(&actor, "plain", &["read".into()], None)
+            .unwrap();
+        assert!(store
+            .verify_api_key(&plain)
+            .unwrap()
+            .unwrap()
+            .grants
+            .is_none());
 
         // Request → nothing until approved → secret handed over once.
-        let (id, poll) = store.key_request_create("claude-code", &grants, Some(3600)).unwrap();
+        let (id, poll) = store
+            .key_request_create("claude-code", &grants, Some(3600))
+            .unwrap();
         assert_eq!(store.key_requests_pending().unwrap().len(), 1);
-        assert_eq!(store.key_request_poll(&id, &poll).unwrap(), Some(("pending".into(), None)));
+        assert_eq!(
+            store.key_request_poll(&id, &poll).unwrap(),
+            Some(("pending".into(), None))
+        );
         assert_eq!(store.key_request_poll(&id, "wrong").unwrap(), None);
         assert!(store.key_request_decide(&actor, &id, true).unwrap());
         let (status, issued) = store.key_request_poll(&id, &poll).unwrap().unwrap();
         assert_eq!(status, "approved");
         let issued = issued.expect("secret on first poll");
-        assert!(store.verify_api_key(&issued).unwrap().unwrap().grants.is_some());
-        assert_eq!(store.key_request_poll(&id, &poll).unwrap(), Some(("approved".into(), None)), "only once");
-        assert!(!store.key_request_decide(&actor, &id, true).unwrap(), "already decided");
+        assert!(store
+            .verify_api_key(&issued)
+            .unwrap()
+            .unwrap()
+            .grants
+            .is_some());
+        assert_eq!(
+            store.key_request_poll(&id, &poll).unwrap(),
+            Some(("approved".into(), None)),
+            "only once"
+        );
+        assert!(
+            !store.key_request_decide(&actor, &id, true).unwrap(),
+            "already decided"
+        );
         // Denied requests mint nothing.
         let (id2, poll2) = store.key_request_create("other", &grants, None).unwrap();
         assert!(store.key_request_decide(&actor, &id2, false).unwrap());
-        assert_eq!(store.key_request_poll(&id2, &poll2).unwrap(), Some(("denied".into(), None)));
+        assert_eq!(
+            store.key_request_poll(&id2, &poll2).unwrap(),
+            Some(("denied".into(), None))
+        );
     }
 }

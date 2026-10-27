@@ -271,7 +271,10 @@ impl SseBuffer {
 /// The first blank line in `buf`: (offset, length of the separator).
 fn sse_boundary(buf: &[u8]) -> Option<(usize, usize)> {
     let lf = buf.windows(2).position(|w| w == b"\n\n").map(|i| (i, 2));
-    let crlf = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| (i, 4));
+    let crlf = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|i| (i, 4));
     match (lf, crlf) {
         (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
         (a, b) => a.or(b),
@@ -310,7 +313,10 @@ impl AnthropicStream {
         for (field, slot) in [
             ("input_tokens", &mut self.usage.input_tokens),
             ("output_tokens", &mut self.usage.output_tokens),
-            ("cache_creation_input_tokens", &mut self.usage.cache_creation_tokens),
+            (
+                "cache_creation_input_tokens",
+                &mut self.usage.cache_creation_tokens,
+            ),
             ("cache_read_input_tokens", &mut self.usage.cache_read_tokens),
         ] {
             if let Some(n) = u[field].as_i64() {
@@ -348,7 +354,9 @@ impl AnthropicStream {
     }
     fn finish(self) -> Result<Completion> {
         if !self.done {
-            return Err(anyhow!("anthropic stream ended before the reply was complete"));
+            return Err(anyhow!(
+                "anthropic stream ended before the reply was complete"
+            ));
         }
         Ok(Completion {
             text: self.text,
@@ -362,7 +370,9 @@ impl AnthropicStream {
 /// OpenAI's usage block as ours. `prompt_tokens` INCLUDES cached tokens;
 /// split them so input_tokens means "full-price input" on every provider.
 fn openai_usage(u: &Value) -> Usage {
-    let cached = u["prompt_tokens_details"]["cached_tokens"].as_i64().unwrap_or(0);
+    let cached = u["prompt_tokens_details"]["cached_tokens"]
+        .as_i64()
+        .unwrap_or(0);
     Usage {
         input_tokens: u["prompt_tokens"].as_i64().unwrap_or(0) - cached,
         output_tokens: u["completion_tokens"].as_i64().unwrap_or(0),
@@ -382,7 +392,13 @@ struct OpenAiStream {
 
 impl OpenAiStream {
     fn new(model: &str) -> Self {
-        OpenAiStream { text: String::new(), model: model.to_string(), usage: None, stop: None, done: false }
+        OpenAiStream {
+            text: String::new(),
+            model: model.to_string(),
+            usage: None,
+            stop: None,
+            done: false,
+        }
     }
     /// Apply one `data:` payload; returns the visible text it added.
     fn on_data(&mut self, data: &str) -> Result<Option<String>> {
@@ -554,7 +570,12 @@ fn effort_with(model: &str, tier: Tier, efforts: &Efforts) -> Option<&'static st
     Some(
         efforts
             .get(tier)
-            .and_then(|want| Efforts::LEVELS.iter().find(|level| **level == want).copied())
+            .and_then(|want| {
+                Efforts::LEVELS
+                    .iter()
+                    .find(|level| **level == want)
+                    .copied()
+            })
             .unwrap_or(default),
     )
 }
@@ -610,7 +631,11 @@ impl AnthropicProvider {
         // `tier` is None only for the 1-token model probe, which must
         // stay a bare request.
         let effort = tier.and_then(|t| effort_with(model, t, &self.efforts));
-        let max_tokens = if effort.is_some() { max_tokens + THINKING_HEADROOM } else { max_tokens };
+        let max_tokens = if effort.is_some() {
+            max_tokens + THINKING_HEADROOM
+        } else {
+            max_tokens
+        };
         let mut body = json!({
             "model": model,
             "max_tokens": max_tokens,
@@ -673,7 +698,12 @@ impl AnthropicProvider {
         // prefer it for the ledger; fall back to what we asked for.
         let model = value["model"].as_str().unwrap_or(model).to_string();
         let stop = Stop::from_raw(value["stop_reason"].as_str());
-        Ok(Completion { text, model, usage, stop })
+        Ok(Completion {
+            text,
+            model,
+            usage,
+            stop,
+        })
     }
 }
 
@@ -685,8 +715,22 @@ impl LlmProvider for AnthropicProvider {
     fn available(&self) -> bool {
         !self.api_key.is_empty()
     }
-    async fn complete(&self, tier: Tier, system: &str, prompt: &str, max_tokens: u32) -> Result<Completion> {
-        self.call(self.models.get(tier), Some(tier), system, prompt, max_tokens, None).await
+    async fn complete(
+        &self,
+        tier: Tier,
+        system: &str,
+        prompt: &str,
+        max_tokens: u32,
+    ) -> Result<Completion> {
+        self.call(
+            self.models.get(tier),
+            Some(tier),
+            system,
+            prompt,
+            max_tokens,
+            None,
+        )
+        .await
     }
     async fn complete_streaming(
         &self,
@@ -696,13 +740,23 @@ impl LlmProvider for AnthropicProvider {
         max_tokens: u32,
         on_text: TextSink<'_>,
     ) -> Result<Completion> {
-        self.call(self.models.get(tier), Some(tier), system, prompt, max_tokens, Some(on_text)).await
+        self.call(
+            self.models.get(tier),
+            Some(tier),
+            system,
+            prompt,
+            max_tokens,
+            Some(on_text),
+        )
+        .await
     }
     fn model_for(&self, tier: Tier) -> &str {
         self.models.get(tier)
     }
     async fn validate_model(&self, model: &str) -> Result<()> {
-        self.call(model, None, "", "ping", 1, None).await.map(|_| ())
+        self.call(model, None, "", "ping", 1, None)
+            .await
+            .map(|_| ())
     }
 }
 
@@ -741,7 +795,12 @@ impl OpenAiCompatProvider {
     /// Any OpenAI-compatible endpoint. An empty `base_url` yields a
     /// provider that reports unavailable rather than an error at boot.
     pub fn custom(base_url: &str, models: TierModels, api_key: impl Into<String>) -> Self {
-        Self::new("custom", base_url.trim().trim_end_matches('/'), models, api_key)
+        Self::new(
+            "custom",
+            base_url.trim().trim_end_matches('/'),
+            models,
+            api_key,
+        )
     }
     fn is_custom(&self) -> bool {
         self.name == "custom"
@@ -773,11 +832,18 @@ impl OpenAiCompatProvider {
                 ));
             }
         } else if self.api_key.is_empty() {
-            return Err(anyhow!("{} provider configured but no API key set", self.name));
+            return Err(anyhow!(
+                "{} provider configured but no API key set",
+                self.name
+            ));
         }
         // `max_completion_tokens` is OpenAI's current name; compatible
         // servers (Ollama, vLLM, OpenRouter) still key on `max_tokens`.
-        let cap_field = if self.is_custom() { "max_tokens" } else { "max_completion_tokens" };
+        let cap_field = if self.is_custom() {
+            "max_tokens"
+        } else {
+            "max_completion_tokens"
+        };
         let mut body = json!({
             "model": model,
             "messages": [
@@ -818,7 +884,9 @@ impl OpenAiCompatProvider {
                     }
                 }
             }
-            return message.finish().map_err(|err| anyhow!("{} {err}", self.name));
+            return message
+                .finish()
+                .map_err(|err| anyhow!("{} {err}", self.name));
         }
         let value: Value = resp.json().await?;
         let text = value["choices"][0]["message"]["content"]
@@ -828,7 +896,12 @@ impl OpenAiCompatProvider {
         let usage = value.get("usage").map(openai_usage);
         let model = value["model"].as_str().unwrap_or(model).to_string();
         let stop = Stop::from_raw(value["choices"][0]["finish_reason"].as_str());
-        Ok(Completion { text, model, usage, stop })
+        Ok(Completion {
+            text,
+            model,
+            usage,
+            stop,
+        })
     }
 }
 
@@ -844,8 +917,15 @@ impl LlmProvider for OpenAiCompatProvider {
             !self.api_key.is_empty()
         }
     }
-    async fn complete(&self, tier: Tier, system: &str, prompt: &str, max_tokens: u32) -> Result<Completion> {
-        self.call(self.models.get(tier), system, prompt, max_tokens, None).await
+    async fn complete(
+        &self,
+        tier: Tier,
+        system: &str,
+        prompt: &str,
+        max_tokens: u32,
+    ) -> Result<Completion> {
+        self.call(self.models.get(tier), system, prompt, max_tokens, None)
+            .await
     }
     /// Streamed for OpenAI and Grok. A `custom` endpoint is not: servers
     /// differ on whether a stream reports usage at all, and a reply with
@@ -859,7 +939,8 @@ impl LlmProvider for OpenAiCompatProvider {
         on_text: TextSink<'_>,
     ) -> Result<Completion> {
         let on_text = (!self.is_custom()).then_some(on_text);
-        self.call(self.models.get(tier), system, prompt, max_tokens, on_text).await
+        self.call(self.models.get(tier), system, prompt, max_tokens, on_text)
+            .await
     }
     fn model_for(&self, tier: Tier) -> &str {
         self.models.get(tier)
@@ -878,9 +959,19 @@ pub struct GeminiProvider {
 
 impl GeminiProvider {
     pub fn new(models: TierModels, api_key: impl Into<String>) -> Self {
-        GeminiProvider { models, api_key: api_key.into(), client: reqwest::Client::new() }
+        GeminiProvider {
+            models,
+            api_key: api_key.into(),
+            client: reqwest::Client::new(),
+        }
     }
-    async fn call(&self, model: &str, system: &str, prompt: &str, max_tokens: u32) -> Result<Completion> {
+    async fn call(
+        &self,
+        model: &str,
+        system: &str,
+        prompt: &str,
+        max_tokens: u32,
+    ) -> Result<Completion> {
         if self.api_key.is_empty() {
             return Err(anyhow!("gemini provider configured but no API key set"));
         }
@@ -925,7 +1016,12 @@ impl GeminiProvider {
         });
         let model = value["modelVersion"].as_str().unwrap_or(model).to_string();
         let stop = Stop::from_raw(value["candidates"][0]["finishReason"].as_str());
-        Ok(Completion { text, model, usage, stop })
+        Ok(Completion {
+            text,
+            model,
+            usage,
+            stop,
+        })
     }
 }
 
@@ -937,8 +1033,15 @@ impl LlmProvider for GeminiProvider {
     fn available(&self) -> bool {
         !self.api_key.is_empty()
     }
-    async fn complete(&self, tier: Tier, system: &str, prompt: &str, max_tokens: u32) -> Result<Completion> {
-        self.call(self.models.get(tier), system, prompt, max_tokens).await
+    async fn complete(
+        &self,
+        tier: Tier,
+        system: &str,
+        prompt: &str,
+        max_tokens: u32,
+    ) -> Result<Completion> {
+        self.call(self.models.get(tier), system, prompt, max_tokens)
+            .await
     }
     fn model_for(&self, tier: Tier) -> &str {
         self.models.get(tier)
@@ -962,7 +1065,11 @@ pub fn approx_input_usd_per_mtok(model: &str) -> f64 {
 
 /// Build a provider by name with an explicit key + tier map. The daemon
 /// assembles these from stored config + sealed keys; this stays pure.
-pub fn build_provider(name: &str, api_key: &str, models: TierModels) -> Result<Box<dyn LlmProvider>> {
+pub fn build_provider(
+    name: &str,
+    api_key: &str,
+    models: TierModels,
+) -> Result<Box<dyn LlmProvider>> {
     build_provider_at(name, api_key, models, None)
 }
 
@@ -988,7 +1095,9 @@ pub fn build_provider_full(
 ) -> Result<Box<dyn LlmProvider>> {
     match name {
         "none" | "" => Ok(Box::new(NoProvider)),
-        "anthropic" => Ok(Box::new(AnthropicProvider::new(models, api_key).with_efforts(efforts))),
+        "anthropic" => Ok(Box::new(
+            AnthropicProvider::new(models, api_key).with_efforts(efforts),
+        )),
         "openai" => Ok(Box::new(OpenAiCompatProvider::openai(models, api_key))),
         "grok" => Ok(Box::new(OpenAiCompatProvider::grok(models, api_key))),
         "gemini" => Ok(Box::new(GeminiProvider::new(models, api_key))),
@@ -1015,7 +1124,12 @@ pub struct RoutedProvider {
 
 impl RoutedProvider {
     pub fn new(base: Box<dyn LlmProvider>) -> Self {
-        RoutedProvider { base, low: None, medium: None, high: None }
+        RoutedProvider {
+            base,
+            low: None,
+            medium: None,
+            high: None,
+        }
     }
     /// Route one tier to `provider` (built with that tier's model id).
     pub fn route(mut self, tier: Tier, provider: Box<dyn LlmProvider>) -> Self {
@@ -1055,8 +1169,16 @@ impl LlmProvider for RoutedProvider {
             .iter()
             .any(|t| self.pick(*t).available())
     }
-    async fn complete(&self, tier: Tier, system: &str, prompt: &str, max_tokens: u32) -> Result<Completion> {
-        self.pick(tier).complete(tier, system, prompt, max_tokens).await
+    async fn complete(
+        &self,
+        tier: Tier,
+        system: &str,
+        prompt: &str,
+        max_tokens: u32,
+    ) -> Result<Completion> {
+        self.pick(tier)
+            .complete(tier, system, prompt, max_tokens)
+            .await
     }
     async fn complete_streaming(
         &self,
@@ -1066,7 +1188,9 @@ impl LlmProvider for RoutedProvider {
         max_tokens: u32,
         on_text: TextSink<'_>,
     ) -> Result<Completion> {
-        self.pick(tier).complete_streaming(tier, system, prompt, max_tokens, on_text).await
+        self.pick(tier)
+            .complete_streaming(tier, system, prompt, max_tokens, on_text)
+            .await
     }
     fn model_for(&self, tier: Tier) -> &str {
         self.pick(tier).model_for(tier)
@@ -1144,7 +1268,12 @@ mod tests {
         assert_eq!(done.stop, Stop::Truncated);
         let usage = done.usage.unwrap();
         assert_eq!(
-            (usage.input_tokens, usage.output_tokens, usage.cache_creation_tokens, usage.cache_read_tokens),
+            (
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_creation_tokens,
+                usage.cache_read_tokens
+            ),
             (12, 77, 3, 900)
         );
 
@@ -1179,10 +1308,19 @@ mod tests {
         assert_eq!(done.model, "gpt-x");
         assert_eq!(done.stop, Stop::Truncated);
         let usage = done.usage.unwrap();
-        assert_eq!((usage.input_tokens, usage.output_tokens, usage.cache_read_tokens), (60, 9, 40));
+        assert_eq!(
+            (
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_read_tokens
+            ),
+            (60, 9, 40)
+        );
 
         assert!(OpenAiStream::new("m").finish().is_err(), "nothing arrived");
-        assert!(OpenAiStream::new("m").on_data(r#"{"error": {"message": "boom"}}"#).is_err());
+        assert!(OpenAiStream::new("m")
+            .on_data(r#"{"error": {"message": "boom"}}"#)
+            .is_err());
     }
 
     #[test]
@@ -1204,10 +1342,16 @@ mod tests {
         assert!(pricing_for("claude-haiku-4-5-20251001").is_some());
         // On-machine models are free, not unpriced.
         let local = pricing_for("local:all-MiniLM-L6-v2").unwrap();
-        assert_eq!((local.input, local.output, local.cache_read), (0.0, 0.0, 0.0));
+        assert_eq!(
+            (local.input, local.output, local.cache_read),
+            (0.0, 0.0, 0.0)
+        );
         // Successor generations price at THEIR rate, not the family's.
         let opus55 = pricing_for("claude-opus-5-5").unwrap();
-        assert_eq!((opus55.input, opus55.output, opus55.cache_read), (4.0, 20.0, 0.20));
+        assert_eq!(
+            (opus55.input, opus55.output, opus55.cache_read),
+            (4.0, 20.0, 0.20)
+        );
         let sonnet55 = pricing_for("claude-sonnet-5-5").unwrap();
         assert_eq!((sonnet55.input, sonnet55.output), (2.0, 10.0));
         assert_eq!(pricing_for("claude-sonnet-4-6").unwrap().input, 3.0);
@@ -1219,7 +1363,11 @@ mod tests {
         assert!(pricing_for("mystery-llm-9000").is_none());
         // Cost math: 1M in + 1M out on sonnet = 3 + 15.
         let sonnet = pricing_for("claude-sonnet-4-6").unwrap();
-        let u = Usage { input_tokens: 1_000_000, output_tokens: 1_000_000, ..Default::default() };
+        let u = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            ..Default::default()
+        };
         assert!((usage_cost_usd(&sonnet, &u) - 18.0).abs() < 1e-9);
     }
 
@@ -1227,7 +1375,10 @@ mod tests {
     fn test_build_provider() {
         let m = || TierModels::defaults_for("anthropic");
         assert_eq!(build_provider("none", "", m()).unwrap().name(), "none");
-        assert_eq!(build_provider("anthropic", "k", m()).unwrap().name(), "anthropic");
+        assert_eq!(
+            build_provider("anthropic", "k", m()).unwrap().name(),
+            "anthropic"
+        );
         assert_eq!(build_provider("openai", "k", m()).unwrap().name(), "openai");
         assert_eq!(build_provider("grok", "k", m()).unwrap().name(), "grok");
         assert_eq!(build_provider("gemini", "k", m()).unwrap().name(), "gemini");
@@ -1236,14 +1387,29 @@ mod tests {
 
     #[test]
     fn test_custom_provider_and_routing() {
-        let one = |id: &str| TierModels { low: id.into(), medium: id.into(), high: id.into() };
+        let one = |id: &str| TierModels {
+            low: id.into(),
+            medium: id.into(),
+            high: id.into(),
+        };
         // Keyless custom is available iff it has an address.
-        let local = build_provider_at("custom", "", one("qwen3:8b"), Some("http://localhost:11434/v1/")).unwrap();
+        let local = build_provider_at(
+            "custom",
+            "",
+            one("qwen3:8b"),
+            Some("http://localhost:11434/v1/"),
+        )
+        .unwrap();
         assert!(local.available());
         assert_eq!(local.name(), "custom");
-        assert!(!build_provider_at("custom", "", one("x"), None).unwrap().available());
+        assert!(!build_provider_at("custom", "", one("x"), None)
+            .unwrap()
+            .available());
         assert!(normalize_base_url("ftp://x").is_err());
-        assert_eq!(normalize_base_url(" http://localhost:11434/v1/ ").unwrap(), "http://localhost:11434/v1");
+        assert_eq!(
+            normalize_base_url(" http://localhost:11434/v1/ ").unwrap(),
+            "http://localhost:11434/v1"
+        );
 
         // Low routes to the local endpoint; the other tiers stay on base.
         let base = build_provider("anthropic", "k", TierModels::defaults_for("anthropic")).unwrap();
@@ -1259,7 +1425,10 @@ mod tests {
     #[test]
     fn test_effort_only_for_always_thinking_models() {
         assert_eq!(effort_for("claude-opus-5-5", Tier::High), Some("high"));
-        assert_eq!(effort_for("claude-sonnet-5-5", Tier::Medium), Some("medium"));
+        assert_eq!(
+            effort_for("claude-sonnet-5-5", Tier::Medium),
+            Some("medium")
+        );
         assert_eq!(effort_for("claude-fable-5-1", Tier::Low), Some("low"));
         // Unchanged for everything that shipped before: no parameter at all.
         assert_eq!(effort_for("claude-opus-4-8", Tier::High), None);
@@ -1267,11 +1436,20 @@ mod tests {
         assert_eq!(effort_for("claude-haiku-4-5", Tier::Low), None);
         // An override lowers the effort where one is sent, and only there.
         let efforts = Efforts([None, None, Some("medium".into())]);
-        assert_eq!(effort_with("claude-opus-5-5", Tier::High, &efforts), Some("medium"));
-        assert_eq!(effort_with("claude-opus-5-5", Tier::Medium, &efforts), Some("medium"));
+        assert_eq!(
+            effort_with("claude-opus-5-5", Tier::High, &efforts),
+            Some("medium")
+        );
+        assert_eq!(
+            effort_with("claude-opus-5-5", Tier::Medium, &efforts),
+            Some("medium")
+        );
         assert_eq!(effort_with("claude-opus-4-8", Tier::High, &efforts), None);
         let junk = Efforts([None, None, Some("turbo".into())]);
-        assert_eq!(effort_with("claude-opus-5-5", Tier::High, &junk), Some("high"));
+        assert_eq!(
+            effort_with("claude-opus-5-5", Tier::High, &junk),
+            Some("high")
+        );
     }
 
     #[test]

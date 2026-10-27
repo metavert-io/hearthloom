@@ -37,7 +37,10 @@ pub async fn call(
     prompt: &str,
     max_tokens: u32,
 ) -> Result<LlmReply> {
-    call_streaming(store, llm, purpose, ref_id, tier, system, prompt, max_tokens, None).await
+    call_streaming(
+        store, llm, purpose, ref_id, tier, system, prompt, max_tokens, None,
+    )
+    .await
 }
 
 /// `call`, with the reply's text handed to `on_text` as it is written
@@ -56,7 +59,10 @@ pub async fn call_streaming(
 ) -> Result<LlmReply> {
     let started = Instant::now();
     let result = match on_text {
-        Some(on_text) => llm.complete_streaming(tier, system, prompt, max_tokens, on_text).await,
+        Some(on_text) => {
+            llm.complete_streaming(tier, system, prompt, max_tokens, on_text)
+                .await
+        }
         None => llm.complete(tier, system, prompt, max_tokens).await,
     };
     let ms = started.elapsed().as_millis() as u64;
@@ -138,7 +144,11 @@ mod tests {
             Ok(Completion {
                 text: "hello".into(),
                 model: "mock-1".into(),
-                usage: Some(Usage { input_tokens: 42, output_tokens: 7, ..Default::default() }),
+                usage: Some(Usage {
+                    input_tokens: 42,
+                    output_tokens: 7,
+                    ..Default::default()
+                }),
                 stop: Stop::End,
             })
         }
@@ -153,14 +163,34 @@ mod tests {
     #[tokio::test]
     async fn test_call_lands_ledger_rows_success_and_error() {
         let store = Store::open_in_memory().unwrap();
-        let ok = call(&store, &MockLlm { fail: false }, "ask", Some("ask_x"),
-            Tier::High, "s", "p", 100).await.unwrap();
+        let ok = call(
+            &store,
+            &MockLlm { fail: false },
+            "ask",
+            Some("ask_x"),
+            Tier::High,
+            "s",
+            "p",
+            100,
+        )
+        .await
+        .unwrap();
         assert_eq!(ok.text, "hello");
         assert_eq!(ok.usage.as_ref().unwrap().input_tokens, 42);
 
         // Errors surface to the caller AND still land a ledger row.
-        assert!(call(&store, &MockLlm { fail: true }, "ask", Some("ask_x"),
-            Tier::High, "s", "p", 100).await.is_err());
+        assert!(call(
+            &store,
+            &MockLlm { fail: true },
+            "ask",
+            Some("ask_x"),
+            Tier::High,
+            "s",
+            "p",
+            100
+        )
+        .await
+        .is_err());
 
         store.vault_unlock(5);
         let rows = store.llm_usage_for_ref("ask_x").unwrap();

@@ -61,9 +61,13 @@ pub struct StoredHealthSample {
 /// parser's rule (apple_health.rs `record_to_sample`), so live and
 /// export aggregate the same night into the same episode.
 pub fn local_day(start_utc: &str, end_utc: &str, tz_off_min: i32, metric: &str) -> String {
-    let anchor = if metric == "SleepAnalysis" { end_utc } else { start_utc };
-    let off = FixedOffset::east_opt(tz_off_min * 60)
-        .unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
+    let anchor = if metric == "SleepAnalysis" {
+        end_utc
+    } else {
+        start_utc
+    };
+    let off =
+        FixedOffset::east_opt(tz_off_min * 60).unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
     DateTime::parse_from_rfc3339(anchor)
         .map(|dt| dt.with_timezone(&off).format("%Y-%m-%d").to_string())
         .unwrap_or_else(|_| anchor[..anchor.len().min(10)].to_string())
@@ -109,11 +113,24 @@ impl Store {
                               start_utc, end_utc, tz_offset_minutes, day, ingest_time)
                          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
                         rusqlite::params![
-                            s.uuid, s.metric, value, s.unit, s.category, s.source,
-                            s.start, s.end, s.tz_offset_minutes, day, now_utc()
+                            s.uuid,
+                            s.metric,
+                            value,
+                            s.unit,
+                            s.category,
+                            s.source,
+                            s.start,
+                            s.end,
+                            s.tz_offset_minutes,
+                            day,
+                            now_utc()
                         ],
                     )?;
-                    if changed == 1 { accepted += 1 } else { duplicates += 1 }
+                    if changed == 1 {
+                        accepted += 1
+                    } else {
+                        duplicates += 1
+                    }
                 }
                 tx.commit()?;
             }
@@ -231,7 +248,13 @@ impl Store {
 mod tests {
     use super::*;
 
-    fn sample(uuid: &str, metric: &str, value: Option<f64>, start: &str, end: &str) -> HealthSampleRow {
+    fn sample(
+        uuid: &str,
+        metric: &str,
+        value: Option<f64>,
+        start: &str,
+        end: &str,
+    ) -> HealthSampleRow {
         HealthSampleRow {
             uuid: uuid.into(),
             metric: metric.into(),
@@ -249,11 +272,21 @@ mod tests {
     fn test_local_day_buckets_sleep_to_wake_day() {
         // A night starting 23:30 local July 25 (03:30Z Jul 26 at -0400),
         // ending 07:00 local July 26 — sleep buckets to the WAKE day.
-        let d = local_day("2026-07-26T03:30:00Z", "2026-07-26T11:00:00Z", -240, "SleepAnalysis");
+        let d = local_day(
+            "2026-07-26T03:30:00Z",
+            "2026-07-26T11:00:00Z",
+            -240,
+            "SleepAnalysis",
+        );
         assert_eq!(d, "2026-07-26");
         // A step sample at 23:30 local July 25 stays on July 25 even
         // though its UTC instant is already July 26.
-        let d = local_day("2026-07-26T03:30:00Z", "2026-07-26T03:31:00Z", -240, "StepCount");
+        let d = local_day(
+            "2026-07-26T03:30:00Z",
+            "2026-07-26T03:31:00Z",
+            -240,
+            "StepCount",
+        );
         assert_eq!(d, "2026-07-25");
     }
 
@@ -261,11 +294,23 @@ mod tests {
     fn test_health_add_samples_idempotent_and_sleep_valued() {
         let store = Store::open_in_memory().unwrap();
         let batch = vec![
-            sample("u1", "StepCount", Some(120.0), "2026-07-24T12:00:00Z", "2026-07-24T12:05:00Z"),
+            sample(
+                "u1",
+                "StepCount",
+                Some(120.0),
+                "2026-07-24T12:00:00Z",
+                "2026-07-24T12:05:00Z",
+            ),
             HealthSampleRow {
                 category: Some("AsleepDeep".into()),
                 unit: None,
-                ..sample("u2", "SleepAnalysis", None, "2026-07-24T04:00:00Z", "2026-07-24T05:30:00Z")
+                ..sample(
+                    "u2",
+                    "SleepAnalysis",
+                    None,
+                    "2026-07-24T04:00:00Z",
+                    "2026-07-24T05:30:00Z",
+                )
             },
         ];
         assert_eq!(store.health_add_samples(&batch).unwrap(), (2, 0));
@@ -292,17 +337,39 @@ mod tests {
     fn test_health_unfinalized_days_excludes_today_and_minted() {
         let store = Store::open_in_memory().unwrap();
         let batch = vec![
-            sample("a", "StepCount", Some(10.0), "2026-07-24T12:00:00Z", "2026-07-24T12:01:00Z"),
-            sample("b", "StepCount", Some(10.0), "2026-07-25T12:00:00Z", "2026-07-25T12:01:00Z"),
-            sample("c", "StepCount", Some(10.0), "2026-07-26T12:00:00Z", "2026-07-26T12:01:00Z"),
+            sample(
+                "a",
+                "StepCount",
+                Some(10.0),
+                "2026-07-24T12:00:00Z",
+                "2026-07-24T12:01:00Z",
+            ),
+            sample(
+                "b",
+                "StepCount",
+                Some(10.0),
+                "2026-07-25T12:00:00Z",
+                "2026-07-25T12:01:00Z",
+            ),
+            sample(
+                "c",
+                "StepCount",
+                Some(10.0),
+                "2026-07-26T12:00:00Z",
+                "2026-07-26T12:01:00Z",
+            ),
         ];
         store.health_add_samples(&batch).unwrap();
         // today = the 26th local → only the 24th + 25th are closed
         let far_future = "2999-01-01T00:00:00Z";
-        let days = store.health_unfinalized_days("2026-07-26", far_future).unwrap();
+        let days = store
+            .health_unfinalized_days("2026-07-26", far_future)
+            .unwrap();
         assert_eq!(days, vec!["2026-07-24", "2026-07-25"]);
         // a grace cutoff EARLIER than the rows' ingest_time seals nothing
-        let days = store.health_unfinalized_days("2026-07-26", "2000-01-01T00:00:00Z").unwrap();
+        let days = store
+            .health_unfinalized_days("2026-07-26", "2000-01-01T00:00:00Z")
+            .unwrap();
         assert!(days.is_empty(), "grace must hold back fresh days");
         // minting the 24th's episode removes it from the backlog
         {
@@ -316,7 +383,9 @@ mod tests {
             )
             .unwrap();
         }
-        let days = store.health_unfinalized_days("2026-07-26", far_future).unwrap();
+        let days = store
+            .health_unfinalized_days("2026-07-26", far_future)
+            .unwrap();
         assert_eq!(days, vec!["2026-07-25"]);
     }
 }

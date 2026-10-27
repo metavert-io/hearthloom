@@ -51,7 +51,10 @@ pub fn set(state: &AppState, budget: Option<f64>) -> Result<()> {
 /// Take the other node's budget if it is newer than ours. Returns
 /// whether it was adopted.
 pub fn adopt(state: &AppState, value: &str, stamp: &str) -> Result<bool> {
-    let ours = state.store.consolidation_state(KEY_STAMP)?.unwrap_or_default();
+    let ours = state
+        .store
+        .consolidation_state(KEY_STAMP)?
+        .unwrap_or_default();
     if stamp <= ours.as_str() {
         return Ok(false);
     }
@@ -77,12 +80,17 @@ fn month_bounds(today: NaiveDate) -> (String, String) {
         NaiveDate::from_ymd_opt(start.year(), start.month() + 1, 1)
     }
     .unwrap_or(start);
-    (start.format("%Y-%m-%d").to_string(), next.format("%Y-%m-%d").to_string())
+    (
+        start.format("%Y-%m-%d").to_string(),
+        next.format("%Y-%m-%d").to_string(),
+    )
 }
 
 /// The highest threshold `spent` has reached, if any.
 fn level_reached(spent: f64, budget: f64) -> Option<u8> {
-    LEVELS.into_iter().find(|level| spent >= budget * f64::from(*level) / 100.0)
+    LEVELS
+        .into_iter()
+        .find(|level| spent >= budget * f64::from(*level) / 100.0)
 }
 
 /// Is `level` news this month, given what was last announced?
@@ -118,7 +126,10 @@ pub fn check(state: &AppState) -> Result<Option<u8>> {
     let Some(level) = level_reached(month_spend(state, today)?, budget) else {
         return Ok(None);
     };
-    let alerted = state.store.consolidation_state(KEY_ALERTED)?.unwrap_or_default();
+    let alerted = state
+        .store
+        .consolidation_state(KEY_ALERTED)?
+        .unwrap_or_default();
     if !is_news(&month, level, &alerted) {
         return Ok(None);
     }
@@ -142,7 +153,9 @@ pub fn check(state: &AppState) -> Result<Option<u8>> {
         Some(("#/spend", Some("open Spend"))),
         Some(&format!("llm-budget:{month}:{level}")),
     )?;
-    state.store.set_consolidation_state(KEY_ALERTED, &format!("{month}:{level}"))?;
+    state
+        .store
+        .set_consolidation_state(KEY_ALERTED, &format!("{month}:{level}"))?;
     crate::bus::touch(state, "notification.created");
     Ok(Some(level))
 }
@@ -162,8 +175,14 @@ mod tests {
         assert!(is_news("2026-10", 80, ""));
         assert!(!is_news("2026-10", 80, "2026-10:80"));
         assert!(is_news("2026-10", 100, "2026-10:80"));
-        assert!(!is_news("2026-10", 80, "2026-10:100"), "never steps back down");
-        assert!(is_news("2026-11", 80, "2026-10:100"), "a new month starts over");
+        assert!(
+            !is_news("2026-10", 80, "2026-10:100"),
+            "never steps back down"
+        );
+        assert!(
+            is_news("2026-11", 80, "2026-10:100"),
+            "a new month starts over"
+        );
         assert!(is_news("2026-10", 80, "garbage"));
     }
 
@@ -175,7 +194,9 @@ mod tests {
         let home = hearthloom_core::paths::Home::at(tmp.path());
         home.init().unwrap();
         let state = AppState {
-            store: std::sync::Arc::new(hearthloom_core::store::Store::open(&home.db_path()).unwrap()),
+            store: std::sync::Arc::new(
+                hearthloom_core::store::Store::open(&home.db_path()).unwrap(),
+            ),
             home,
             embedder: None,
             llm: None,
@@ -186,10 +207,23 @@ mod tests {
         };
         // Opus input is $5 per million tokens: 8M tokens = $40.
         let spend = |millions: i64| {
-            let usage = Usage { input_tokens: millions * 1_000_000, ..Default::default() };
+            let usage = Usage {
+                input_tokens: millions * 1_000_000,
+                ..Default::default()
+            };
             state
                 .store
-                .record_llm_usage("cloud", "extraction", None, "anthropic", "claude-opus-4-8", "high", &usage, 1, "ok")
+                .record_llm_usage(
+                    "cloud",
+                    "extraction",
+                    None,
+                    "anthropic",
+                    "claude-opus-4-8",
+                    "high",
+                    &usage,
+                    1,
+                    "ok",
+                )
                 .unwrap();
         };
         let alerts = || state.store.notifications(false, 50).unwrap().len();
@@ -201,9 +235,28 @@ mod tests {
         assert_eq!(check(&state).unwrap(), Some(80));
         assert_eq!(check(&state).unwrap(), None, "said once");
         // Free on-machine runs and unpriced models add nothing.
-        state.store.record_local_model_run("local", "embed_backfill", "all-MiniLM-L6-v2", 9_000_000, 5).unwrap();
-        let big = Usage { input_tokens: 900_000_000, ..Default::default() };
-        state.store.record_llm_usage("local", "ask", None, "custom", "qwen-unpriced", "low", &big, 1, "ok").unwrap();
+        state
+            .store
+            .record_local_model_run("local", "embed_backfill", "all-MiniLM-L6-v2", 9_000_000, 5)
+            .unwrap();
+        let big = Usage {
+            input_tokens: 900_000_000,
+            ..Default::default()
+        };
+        state
+            .store
+            .record_llm_usage(
+                "local",
+                "ask",
+                None,
+                "custom",
+                "qwen-unpriced",
+                "low",
+                &big,
+                1,
+                "ok",
+            )
+            .unwrap();
         assert_eq!(check(&state).unwrap(), None);
         spend(2);
         assert_eq!(check(&state).unwrap(), Some(100));
@@ -226,7 +279,13 @@ mod tests {
     #[test]
     fn test_month_bounds_roll_over_the_year() {
         let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
-        assert_eq!(month_bounds(d(2026, 10, 7)), ("2026-10-01".into(), "2026-11-01".into()));
-        assert_eq!(month_bounds(d(2026, 12, 31)), ("2026-12-01".into(), "2027-01-01".into()));
+        assert_eq!(
+            month_bounds(d(2026, 10, 7)),
+            ("2026-10-01".into(), "2026-11-01".into())
+        );
+        assert_eq!(
+            month_bounds(d(2026, 12, 31)),
+            ("2026-12-01".into(), "2027-01-01".into())
+        );
     }
 }

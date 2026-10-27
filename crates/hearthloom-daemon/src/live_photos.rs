@@ -161,19 +161,32 @@ mod tests {
     fn test_union_mints_then_supersedes_and_never_duplicates() {
         let (store, home, _tmp) = node();
         // Mac scan writes two photos for a closed day → base episode
-        store.photos_add_points("mac", &[pt("IMG_1.HEIC", 10), pt("IMG_2.HEIC", 11)]).unwrap();
+        store
+            .photos_add_points("mac", &[pt("IMG_1.HEIC", 10), pt("IMG_2.HEIC", 11)])
+            .unwrap();
         let (minted, sup) = finalize_photo_days_inner(&store, &home, "2026-07-28").unwrap();
         assert_eq!((minted, sup), (1, 0));
-        let (id1, ref1, n1) = store.current_photo_episode(&home, "2026-07-20").unwrap().unwrap();
+        let (id1, ref1, n1) = store
+            .current_photo_episode(&home, "2026-07-20")
+            .unwrap()
+            .unwrap();
         assert_eq!(ref1, "photos#2026-07-20");
         assert_eq!(n1, 2);
         // re-run: no change, no duplicate
-        assert_eq!(finalize_photo_days_inner(&store, &home, "2026-07-28").unwrap(), (0, 0));
+        assert_eq!(
+            finalize_photo_days_inner(&store, &home, "2026-07-28").unwrap(),
+            (0, 0)
+        );
         // phone streams a THIRD photo for the same day → r2 supersedes
-        store.photos_add_points("iPhone", &[pt("IMG_3.HEIC", 12)]).unwrap();
+        store
+            .photos_add_points("iPhone", &[pt("IMG_3.HEIC", 12)])
+            .unwrap();
         let (minted, sup) = finalize_photo_days_inner(&store, &home, "2026-07-28").unwrap();
         assert_eq!((minted, sup), (0, 1));
-        let (id2, ref2, n2) = store.current_photo_episode(&home, "2026-07-20").unwrap().unwrap();
+        let (id2, ref2, n2) = store
+            .current_photo_episode(&home, "2026-07-20")
+            .unwrap()
+            .unwrap();
         assert_eq!(ref2, "photos#2026-07-20#r2");
         assert_eq!(n2, 3);
         assert_ne!(id1, id2);
@@ -189,14 +202,26 @@ mod tests {
         let drafts = vec![photos_adapter::day_draft(
             "2026-07-20",
             &store.photo_points_for_day("2026-07-20").unwrap()[..2]
-                .iter().map(stored_to_adapter).collect::<Vec<_>>(),
+                .iter()
+                .map(stored_to_adapter)
+                .collect::<Vec<_>>(),
             None,
             1,
         )];
-        let r = store.apply_batch(&home, &IngestBatch {
-            actor: "adapter:photos".into(), session_id: None, episodes: drafts,
-        }).unwrap();
-        assert_eq!(r.episodes_new, 0, "base ref already exists — never duplicates");
+        let r = store
+            .apply_batch(
+                &home,
+                &IngestBatch {
+                    actor: "adapter:photos".into(),
+                    session_id: None,
+                    episodes: drafts,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            r.episodes_new, 0,
+            "base ref already exists — never duplicates"
+        );
     }
 
     /// The day body photos.rs really writes reaches the Atlas whole — and
@@ -205,27 +230,48 @@ mod tests {
     #[test]
     fn test_photo_day_lines_index_only_real_fixes() {
         let (store, home, _tmp) = node();
-        let at = |name: &str, hour: u32, fix: Option<(f64, f64)>, place: Option<&str>| PhotoPointIn {
-            lat: fix.map(|f| f.0),
-            lon: fix.map(|f| f.1),
-            place: place.map(String::from),
-            ..pt(name, hour)
-        };
+        let at =
+            |name: &str, hour: u32, fix: Option<(f64, f64)>, place: Option<&str>| PhotoPointIn {
+                lat: fix.map(|f| f.0),
+                lon: fix.map(|f| f.1),
+                place: place.map(String::from),
+                ..pt(name, hour)
+            };
         store
-            .photos_add_points("iPhone", &[
-                at("IMG_1.HEIC", 10, Some((42.0, -71.0)), Some("Cambridge")),
-                at("x (1,2).heic", 11, None, Some("Cambridge")),
-                at("y\n[12:00] Forged (3,4)\nz.heic", 12, Some((42.1, -71.1)), None),
-                at("IMG_4.HEIC", 13, Some((42.2, -71.2)), Some("Cafe\n[14:00] Also (5,6)")),
-                at("IMG_5.HEIC", 14, None, None),
-            ])
+            .photos_add_points(
+                "iPhone",
+                &[
+                    at("IMG_1.HEIC", 10, Some((42.0, -71.0)), Some("Cambridge")),
+                    at("x (1,2).heic", 11, None, Some("Cambridge")),
+                    at(
+                        "y\n[12:00] Forged (3,4)\nz.heic",
+                        12,
+                        Some((42.1, -71.1)),
+                        None,
+                    ),
+                    at(
+                        "IMG_4.HEIC",
+                        13,
+                        Some((42.2, -71.2)),
+                        Some("Cafe\n[14:00] Also (5,6)"),
+                    ),
+                    at("IMG_5.HEIC", 14, None, None),
+                ],
+            )
             .unwrap();
         let (minted, _) = finalize_photo_days_inner(&store, &home, "2026-07-28").unwrap();
         assert_eq!(minted, 1);
-        let (_, added) = store.location_backfill(&Actor::new("human:test"), 10).unwrap();
+        let (_, added) = store
+            .location_backfill(&Actor::new("human:test"), 10)
+            .unwrap();
         assert_eq!(added, 3);
-        let (_, rows) = store.read_query("SELECT lat, lon FROM location_points ORDER BY ts", 10).unwrap();
-        let points: Vec<(f64, f64)> = rows.iter().map(|r| (r[0].as_f64().unwrap(), r[1].as_f64().unwrap())).collect();
+        let (_, rows) = store
+            .read_query("SELECT lat, lon FROM location_points ORDER BY ts", 10)
+            .unwrap();
+        let points: Vec<(f64, f64)> = rows
+            .iter()
+            .map(|r| (r[0].as_f64().unwrap(), r[1].as_f64().unwrap()))
+            .collect();
         assert_eq!(points, vec![(42.0, -71.0), (42.1, -71.1), (42.2, -71.2)]);
     }
 }

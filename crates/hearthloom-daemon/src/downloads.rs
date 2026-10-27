@@ -72,8 +72,7 @@ pub fn detect_dir(path: &Path) -> Option<&'static str> {
     }
     // The Health export unzipped by hand (or by the inbox): the export
     // dir itself, or the wrapper containing it.
-    if path.join("export.xml").is_file() || path.join("apple_health_export/export.xml").is_file()
-    {
+    if path.join("export.xml").is_file() || path.join("apple_health_export/export.xml").is_file() {
         return Some("apple-health");
     }
     let name = path.file_name()?.to_string_lossy().into_owned();
@@ -181,10 +180,7 @@ pub fn place(
     }
     if src.is_dir() {
         let dest = install_archive_dir(home, &src, key, keep_copy)?;
-        Ok((
-            dest,
-            "staged — press run now on its card to ingest".into(),
-        ))
+        Ok((dest, "staged — press run now on its card to ingest".into()))
     } else {
         let inbox = home.inbox_dir();
         std::fs::create_dir_all(&inbox)?;

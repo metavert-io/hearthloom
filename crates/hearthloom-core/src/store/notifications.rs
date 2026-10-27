@@ -130,8 +130,13 @@ impl Store {
                          link = ?6, link_label = ?7, read_at = NULL, dismissed_at = NULL
                      WHERE id = ?1",
                     rusqlite::params![
-                        id, now, severity, title, body,
-                        link.map(|(u, _)| u), link.and_then(|(_, l)| l),
+                        id,
+                        now,
+                        severity,
+                        title,
+                        body,
+                        link.map(|(u, _)| u),
+                        link.and_then(|(_, l)| l),
                     ],
                 )?;
                 id
@@ -143,8 +148,15 @@ impl Store {
                          (id, ts, severity, origin, title, body, link, link_label, dedupe_key)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                     rusqlite::params![
-                        id, now, severity, origin, title, body,
-                        link.map(|(u, _)| u), link.and_then(|(_, l)| l), dedupe_key,
+                        id,
+                        now,
+                        severity,
+                        origin,
+                        title,
+                        body,
+                        link.map(|(u, _)| u),
+                        link.and_then(|(_, l)| l),
+                        dedupe_key,
                     ],
                 )?;
                 id
@@ -167,15 +179,24 @@ impl Store {
         Ok(id)
     }
 
-    pub fn notifications(&self, include_dismissed: bool, limit: usize) -> Result<Vec<NotificationRow>> {
+    pub fn notifications(
+        &self,
+        include_dismissed: bool,
+        limit: usize,
+    ) -> Result<Vec<NotificationRow>> {
         let conn = self.lock();
         let sql = format!(
             "SELECT {COLS} FROM notifications {} ORDER BY ts DESC LIMIT ?1",
-            if include_dismissed { "" } else { "WHERE dismissed_at IS NULL" }
+            if include_dismissed {
+                ""
+            } else {
+                "WHERE dismissed_at IS NULL"
+            }
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([limit as i64], row_to_notification)?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn notifications_unread(&self) -> Result<i64> {
@@ -211,8 +232,8 @@ impl Store {
     }
 
     /* ————— the peer exchange (telemetry pattern: two-way append-ish,
-       watermark by ts; read/dismiss merge LWW — the newest stamp on
-       either node wins) ————— */
+    watermark by ts; read/dismiss merge LWW — the newest stamp on
+    either node wins) ————— */
 
     pub fn notifications_since(&self, since: &str, limit: usize) -> Result<Value> {
         let conn = self.lock();
@@ -224,7 +245,13 @@ impl Store {
             .query_map(rusqlite::params![since, limit as i64], row_to_notification)?
             .collect::<std::result::Result<_, _>>()?;
         drop(stmt);
-        let next = super::page_cursor(&conn, "synced_at", "FROM notifications WHERE synced_at > ?1", since, limit)?;
+        let next = super::page_cursor(
+            &conn,
+            "synced_at",
+            "FROM notifications WHERE synced_at > ?1",
+            since,
+            limit,
+        )?;
         Ok(json!({"notifications": rows, "next": next}))
     }
 
@@ -232,10 +259,9 @@ impl Store {
     /// ids take the NEWER content ts, and read/dismiss stamps merge by
     /// max (a dismiss on either node sticks).
     pub fn apply_notifications(&self, batch: &Value) -> Result<usize> {
-        let rows: Vec<NotificationRow> = serde_json::from_value(
-            batch.get("notifications").cloned().unwrap_or(json!([])),
-        )
-        .unwrap_or_default();
+        let rows: Vec<NotificationRow> =
+            serde_json::from_value(batch.get("notifications").cloned().unwrap_or(json!([])))
+                .unwrap_or_default();
         let conn = self.lock();
         let mut applied = 0usize;
         for r in rows {
@@ -281,7 +307,10 @@ impl Store {
         }
         // empty read_at/dismissed_at strings from the MAX(COALESCE) trick
         // normalize back to NULL
-        conn.execute("UPDATE notifications SET read_at = NULL WHERE read_at = ''", [])?;
+        conn.execute(
+            "UPDATE notifications SET read_at = NULL WHERE read_at = ''",
+            [],
+        )?;
         conn.execute(
             "UPDATE notifications SET dismissed_at = NULL WHERE dismissed_at = ''",
             [],
@@ -306,20 +335,38 @@ mod tests {
         let s = store();
         let a = actor();
         let id1 = s
-            .notify(&a, "provisioner", "warn", "Renewal in 3 days", "", None, Some("renewal"))
+            .notify(
+                &a,
+                "provisioner",
+                "warn",
+                "Renewal in 3 days",
+                "",
+                None,
+                Some("renewal"),
+            )
             .unwrap();
         s.notification_mark(Some(&id1), "read").unwrap();
         assert_eq!(s.notifications_unread().unwrap(), 0);
         // the countdown updates the SAME row and re-unreads it
         let id2 = s
-            .notify(&a, "provisioner", "warn", "Renewal in 2 days", "", None, Some("renewal"))
+            .notify(
+                &a,
+                "provisioner",
+                "warn",
+                "Renewal in 2 days",
+                "",
+                None,
+                Some("renewal"),
+            )
             .unwrap();
         assert_eq!(id1, id2);
         assert_eq!(s.notifications(false, 10).unwrap().len(), 1);
         assert_eq!(s.notifications_unread().unwrap(), 1);
         // no dedupe key = a new row every time
-        s.notify(&a, "system:peering", "info", "Paired", "", None, None).unwrap();
-        s.notify(&a, "system:peering", "info", "Paired again", "", None, None).unwrap();
+        s.notify(&a, "system:peering", "info", "Paired", "", None, None)
+            .unwrap();
+        s.notify(&a, "system:peering", "info", "Paired again", "", None, None)
+            .unwrap();
         assert_eq!(s.notifications(false, 10).unwrap().len(), 3);
         // dismiss hides from the default list
         let rows = s.notifications(false, 10).unwrap();
@@ -356,7 +403,15 @@ mod tests {
         let b_store = store();
         let a = actor();
         let id = a_store
-            .notify(&a, "system:peering", "info", "First sync complete", "", None, None)
+            .notify(
+                &a,
+                "system:peering",
+                "info",
+                "First sync complete",
+                "",
+                None,
+                None,
+            )
             .unwrap();
         // replicate a → b
         let batch = a_store.notifications_since("", 100).unwrap();

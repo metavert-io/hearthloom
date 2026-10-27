@@ -50,7 +50,10 @@ impl Store {
         {
             let conn = self.lock();
             for (entity_type, name) in &old {
-                if entities.iter().any(|(t, n)| t == entity_type && n.eq_ignore_ascii_case(name)) {
+                if entities
+                    .iter()
+                    .any(|(t, n)| t == entity_type && n.eq_ignore_ascii_case(name))
+                {
                     continue;
                 }
                 conn.execute(
@@ -157,7 +160,10 @@ impl Store {
                     list.iter()
                         .filter_map(|pair| {
                             let arr = pair.as_array()?;
-                            Some((arr.first()?.as_str()?.to_string(), arr.get(1)?.as_str()?.to_string()))
+                            Some((
+                                arr.first()?.as_str()?.to_string(),
+                                arr.get(1)?.as_str()?.to_string(),
+                            ))
                         })
                         .collect()
                 })
@@ -232,7 +238,8 @@ impl Store {
         let params: Vec<&dyn rusqlite::ToSql> =
             sources.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
         let rows = stmt.query_map(&params[..], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// Put one source's failed (2) episodes back in the pending pool —
@@ -251,8 +258,8 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EpisodeDraft, EventTime, IngestBatch, TimeUncertainty};
     use crate::paths::Home;
+    use crate::{EpisodeDraft, EventTime, IngestBatch, TimeUncertainty};
 
     fn seeded() -> (Store, Home, tempfile::TempDir, String) {
         let tmp = tempfile::tempdir().unwrap();
@@ -282,7 +289,8 @@ mod tests {
         store.apply_batch(&home, &batch).unwrap();
         let id: String = {
             let conn = store.lock();
-            conn.query_row("SELECT id FROM episodes LIMIT 1", [], |r| r.get(0)).unwrap()
+            conn.query_row("SELECT id FROM episodes LIMIT 1", [], |r| r.get(0))
+                .unwrap()
         };
         (store, home, tmp, id)
     }
@@ -299,7 +307,10 @@ mod tests {
                  WHERE ee.episode_id = ?1 AND ee.role = 'mentioned' ORDER BY en.name",
             )
             .unwrap();
-        stmt.query_map([ep], |r| r.get(0)).unwrap().flatten().collect()
+        stmt.query_map([ep], |r| r.get(0))
+            .unwrap()
+            .flatten()
+            .collect()
     }
 
     #[test]
@@ -309,24 +320,39 @@ mod tests {
         // the weak model saw two names, one of them wrong
         store
             .record_verdict(
-                &a, &ep, "personal",
-                &[("Person".into(), "Alice Chen".into()), ("Org".into(), "Hearthloom Inc".into())],
-                "low", "haiku",
+                &a,
+                &ep,
+                "personal",
+                &[
+                    ("Person".into(), "Alice Chen".into()),
+                    ("Org".into(), "Hearthloom Inc".into()),
+                ],
+                "low",
+                "haiku",
             )
             .unwrap();
         assert_eq!(mentioned(&store, &ep), vec!["Alice Chen", "Hearthloom Inc"]);
         // the strong re-run drops the wrong org, adds a project
         store
             .record_verdict(
-                &a, &ep, "personal",
-                &[("Person".into(), "Alice Chen".into()), ("Project".into(), "Hearthloom".into())],
-                "high", "opus",
+                &a,
+                &ep,
+                "personal",
+                &[
+                    ("Person".into(), "Alice Chen".into()),
+                    ("Project".into(), "Hearthloom".into()),
+                ],
+                "high",
+                "opus",
             )
             .unwrap();
         let names = mentioned(&store, &ep);
         assert!(names.contains(&"Alice Chen".to_string()));
         assert!(names.contains(&"Hearthloom".to_string()));
-        assert!(!names.contains(&"Hearthloom Inc".to_string()), "superseded link must go");
+        assert!(
+            !names.contains(&"Hearthloom Inc".to_string()),
+            "superseded link must go"
+        );
     }
 
     #[test]
@@ -335,14 +361,24 @@ mod tests {
         let (b_store, _h2, _t2, _) = seeded(); // same deterministic episode id
         let act = actor();
         a_store
-            .record_verdict(&act, &ep, "personal", &[("Person".into(), "Alice Chen".into())], "medium", "sonnet")
+            .record_verdict(
+                &act,
+                &ep,
+                "personal",
+                &[("Person".into(), "Alice Chen".into())],
+                "medium",
+                "sonnet",
+            )
             .unwrap();
         let batch = a_store.verdicts_since("", 100).unwrap();
         assert_eq!(b_store.apply_verdicts(&act, &batch).unwrap(), 1);
         // applying marks extracted → the receiver stops spending
         let extracted: i64 = {
             let conn = b_store.lock();
-            conn.query_row("SELECT extracted FROM episodes WHERE id = ?1", [&ep], |r| r.get(0)).unwrap()
+            conn.query_row("SELECT extracted FROM episodes WHERE id = ?1", [&ep], |r| {
+                r.get(0)
+            })
+            .unwrap()
         };
         assert_eq!(extracted, 1);
         // re-apply = no-op-ish, never duplicates links
@@ -350,10 +386,21 @@ mod tests {
         assert_eq!(mentioned(&b_store, &ep), vec!["Alice Chen"]);
         // a locally-held HIGH verdict resists an incoming MEDIUM one
         b_store
-            .record_verdict(&act, &ep, "personal", &[("Person".into(), "Alice C".into())], "high", "opus")
+            .record_verdict(
+                &act,
+                &ep,
+                "personal",
+                &[("Person".into(), "Alice C".into())],
+                "high",
+                "opus",
+            )
             .unwrap();
         b_store.apply_verdicts(&act, &batch).unwrap();
-        assert_eq!(mentioned(&b_store, &ep), vec!["Alice C"], "stronger tier must win");
+        assert_eq!(
+            mentioned(&b_store, &ep),
+            vec!["Alice C"],
+            "stronger tier must win"
+        );
     }
 
     #[test]
@@ -361,16 +408,32 @@ mod tests {
         let (store, _home, _tmp, ep) = seeded();
         let a = actor();
         store
-            .record_verdict(&a, &ep, "personal", &[("Person".into(), "Alice Chen".into())], "low", "haiku")
+            .record_verdict(
+                &a,
+                &ep,
+                "personal",
+                &[("Person".into(), "Alice Chen".into())],
+                "low",
+                "haiku",
+            )
             .unwrap();
         // low verdict → requeue at high
         assert_eq!(store.requeue_below_tier("openai", "high").unwrap(), 1);
         // failed episodes requeue too
-        store.mark_extraction_failed(std::slice::from_ref(&ep)).unwrap();
+        store
+            .mark_extraction_failed(std::slice::from_ref(&ep))
+            .unwrap();
         assert_eq!(store.requeue_below_tier("openai", "high").unwrap(), 1);
         // already-high verdicts don't requeue
         store
-            .record_verdict(&a, &ep, "personal", &[("Person".into(), "Alice Chen".into())], "high", "opus")
+            .record_verdict(
+                &a,
+                &ep,
+                "personal",
+                &[("Person".into(), "Alice Chen".into())],
+                "high",
+                "opus",
+            )
             .unwrap();
         assert_eq!(store.requeue_below_tier("openai", "high").unwrap(), 0);
     }
@@ -380,11 +443,19 @@ mod tests {
         let (store, _home, _tmp, ep) = seeded();
         let a = actor();
         store
-            .record_verdict(&a, &ep, "personal", &[("Person".into(), "Alice Chen".into())], "low", "h")
+            .record_verdict(
+                &a,
+                &ep,
+                "personal",
+                &[("Person".into(), "Alice Chen".into())],
+                "low",
+                "h",
+            )
             .unwrap();
         {
             let conn = store.lock();
-            conn.execute("UPDATE episodes SET scope = 'private' WHERE id = ?1", [&ep]).unwrap();
+            conn.execute("UPDATE episodes SET scope = 'private' WHERE id = ?1", [&ep])
+                .unwrap();
         }
         let batch = store.verdicts_since("", 100).unwrap();
         assert_eq!(batch.get("verdicts").unwrap().as_array().unwrap().len(), 0);

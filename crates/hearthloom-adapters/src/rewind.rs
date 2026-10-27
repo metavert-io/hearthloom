@@ -66,12 +66,13 @@ fn to_unix(raw: f64) -> Option<i64> {
         return None;
     };
     // sanity: 2015..2035
-    (1_420_070_400..2_051_222_400).contains(&unix).then_some(unix)
+    (1_420_070_400..2_051_222_400)
+        .contains(&unix)
+        .then_some(unix)
 }
 
 fn tables(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt =
-        conn.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','view')")?;
+    let mut stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type IN ('table','view')")?;
     let names = stmt
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -99,7 +100,11 @@ fn pick<'a>(cols: &[String], candidates: &[&'a str]) -> Option<&'a str> {
 /// or an already-clean name.
 fn app_name(raw: &str) -> String {
     let last = raw.rsplit('.').next().unwrap_or(raw);
-    if last.is_empty() { raw.to_string() } else { last.to_string() }
+    if last.is_empty() {
+        raw.to_string()
+    } else {
+        last.to_string()
+    }
 }
 
 pub fn ingest(path: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
@@ -167,8 +172,16 @@ fn segments_to_days(conn: &Connection, scope: Option<&str>) -> Result<Vec<Episod
         return Ok(Vec::new());
     };
     let end = pick(&cols, &["endDate", "end", "endTime"]);
-    let Some(app) = pick(&cols, &["bundleID", "bundleIdentifier", "bundle_id", "appName", "app"])
-    else {
+    let Some(app) = pick(
+        &cols,
+        &[
+            "bundleID",
+            "bundleIdentifier",
+            "bundle_id",
+            "appName",
+            "app",
+        ],
+    ) else {
         tracing::warn!("rewind: segment table has no recognizable app column — skipped");
         return Ok(Vec::new());
     };
@@ -177,15 +190,28 @@ fn segments_to_days(conn: &Connection, scope: Option<&str>) -> Result<Vec<Episod
 
     let select = format!(
         "SELECT CAST({start} AS REAL), {}, {app}, {}, {} FROM segment ORDER BY {start}",
-        end.map(|c| format!("CAST({c} AS REAL)")).unwrap_or_else(|| "NULL".into()),
+        end.map(|c| format!("CAST({c} AS REAL)"))
+            .unwrap_or_else(|| "NULL".into()),
         window.unwrap_or("NULL"),
         url.unwrap_or("NULL"),
     );
     let mut stmt = conn.prepare(&select)?;
-    type Row = (f64, Option<f64>, Option<String>, Option<String>, Option<String>);
+    type Row = (
+        f64,
+        Option<f64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
     let rows: Vec<Row> = stmt
         .query_map([], |row| {
-            Ok((row.get(0)?, row.get(1).ok(), row.get(2).ok(), row.get(3).ok(), row.get(4).ok()))
+            Ok((
+                row.get(0)?,
+                row.get(1).ok(),
+                row.get(2).ok(),
+                row.get(3).ok(),
+                row.get(4).ok(),
+            ))
         })?
         .collect::<std::result::Result<_, _>>()?;
 
@@ -193,20 +219,27 @@ fn segments_to_days(conn: &Connection, scope: Option<&str>) -> Result<Vec<Episod
     type Session = (i64, String, String, String, f64);
     let mut buckets: BTreeMap<String, Vec<Session>> = BTreeMap::new();
     for (start_raw, end_raw, app, window, url) in rows {
-        let Some(unix) = to_unix(start_raw) else { continue };
-        let Some(dt) = DateTime::from_timestamp(unix, 0) else { continue };
+        let Some(unix) = to_unix(start_raw) else {
+            continue;
+        };
+        let Some(dt) = DateTime::from_timestamp(unix, 0) else {
+            continue;
+        };
         let minutes = end_raw
             .and_then(to_unix)
             .map(|e| ((e - unix).max(0) as f64) / 60.0)
             .unwrap_or(0.0);
         let app = app_name(app.as_deref().unwrap_or("unknown"));
-        buckets.entry(dt.format("%Y-%m-%d").to_string()).or_default().push((
-            unix,
-            app,
-            window.unwrap_or_default(),
-            url.unwrap_or_default(),
-            minutes,
-        ));
+        buckets
+            .entry(dt.format("%Y-%m-%d").to_string())
+            .or_default()
+            .push((
+                unix,
+                app,
+                window.unwrap_or_default(),
+                url.unwrap_or_default(),
+                minutes,
+            ));
     }
 
     let mut drafts = Vec::new();
@@ -218,7 +251,10 @@ fn segments_to_days(conn: &Connection, scope: Option<&str>) -> Result<Vec<Episod
         let mut top: Vec<(String, f64)> = minutes_by_app.into_iter().collect();
         top.sort_by(|a, b| b.1.total_cmp(&a.1));
 
-        let mut body = format!("screen activity on {date}: {} app sessions\n", sessions.len());
+        let mut body = format!(
+            "screen activity on {date}: {} app sessions\n",
+            sessions.len()
+        );
         let top_list: Vec<String> = top
             .iter()
             .take(8)
@@ -227,7 +263,9 @@ fn segments_to_days(conn: &Connection, scope: Option<&str>) -> Result<Vec<Episod
         body.push_str(&format!("top apps: {}\n\n", top_list.join(", ")));
         let mut last_line = String::new();
         for (unix, app, window, url, _) in &sessions {
-            let Some(dt) = DateTime::from_timestamp(*unix, 0) else { continue };
+            let Some(dt) = DateTime::from_timestamp(*unix, 0) else {
+                continue;
+            };
             let detail = if !url.is_empty() {
                 format!("{window} ({url})")
             } else {
@@ -262,7 +300,11 @@ fn segments_to_days(conn: &Connection, scope: Option<&str>) -> Result<Vec<Episod
             kind: "rewind_day".into(),
             title: format!(
                 "Screen time: {}",
-                top.iter().take(3).map(|(a, _)| a.clone()).collect::<Vec<_>>().join(", ")
+                top.iter()
+                    .take(3)
+                    .map(|(a, _)| a.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             body,
             event_time: EventTime {
@@ -294,13 +336,18 @@ fn transcripts(conn: &Connection, scope: Option<&str>) -> Result<Vec<EpisodeDraf
     // The audio table gives each session its start time; without it the
     // words still bundle by their foreign key, dated by first offset.
     let audio_cols = columns(conn, "audio");
-    let audio_start = pick(&audio_cols, &["startTime", "startDate", "createdAt", "start"]);
+    let audio_start = pick(
+        &audio_cols,
+        &["startTime", "startDate", "createdAt", "start"],
+    );
 
     let select = format!(
         "SELECT {}, {word}, {}, {} FROM transcript_word ORDER BY {}, {}",
         audio_fk.unwrap_or("1"),
         speaker.unwrap_or("NULL"),
-        offset.map(|c| format!("CAST({c} AS REAL)")).unwrap_or_else(|| "0".into()),
+        offset
+            .map(|c| format!("CAST({c} AS REAL)"))
+            .unwrap_or_else(|| "0".into()),
         audio_fk.unwrap_or("1"),
         offset.unwrap_or("rowid"),
     );
@@ -396,7 +443,10 @@ mod tests {
         assert_eq!(to_unix(1_686_787_200_000.0), Some(unix));
         assert_eq!(to_unix(1_686_787_200_000_000.0), Some(unix));
         assert_eq!(to_unix((unix - APPLE_EPOCH_OFFSET) as f64), Some(unix));
-        assert_eq!(to_unix(((unix - APPLE_EPOCH_OFFSET) as f64) * 1e3), Some(unix));
+        assert_eq!(
+            to_unix(((unix - APPLE_EPOCH_OFFSET) as f64) * 1e3),
+            Some(unix)
+        );
         // garbage stays out
         assert_eq!(to_unix(0.0), None);
         assert_eq!(to_unix(42.0), None);
@@ -446,14 +496,23 @@ mod tests {
         assert!(days[0].body.contains("Rust docs"));
         assert!(days[0].body.contains("doc.rust-lang.org"));
         // top apps became Artifact entities
-        assert!(days[0].entities.iter().any(|e| e.name == "Safari" && e.entity_type == "Artifact"));
+        assert!(days[0]
+            .entities
+            .iter()
+            .any(|e| e.name == "Safari" && e.entity_type == "Artifact"));
 
-        let scripts: Vec<_> = drafts.iter().filter(|d| d.kind == "rewind_transcript").collect();
+        let scripts: Vec<_> = drafts
+            .iter()
+            .filter(|d| d.kind == "rewind_transcript")
+            .collect();
         assert_eq!(scripts.len(), 1);
         assert_eq!(scripts[0].source_ref, "audio#7");
         assert!(scripts[0].body.contains("[me] hello there"));
         assert!(scripts[0].body.contains("[others] hi this is"));
-        assert_eq!(scripts[0].event_time.utc.as_deref(), Some("2023-06-15T00:01:00Z"));
+        assert_eq!(
+            scripts[0].event_time.utc.as_deref(),
+            Some("2023-06-15T00:01:00Z")
+        );
 
         // idempotency comes from source_ref stability
         let again = ingest(tmp.path(), Some("personal")).unwrap();
@@ -464,7 +523,11 @@ mod tests {
     #[test]
     fn test_encrypted_only_install_gets_instructions() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("db-enc.sqlite3"), b"SQLite format 3\0garbage").unwrap();
+        std::fs::write(
+            tmp.path().join("db-enc.sqlite3"),
+            b"SQLite format 3\0garbage",
+        )
+        .unwrap();
         let err = ingest(tmp.path(), None).unwrap_err().to_string();
         assert!(err.contains("sqlcipher_export"), "got: {err}");
     }

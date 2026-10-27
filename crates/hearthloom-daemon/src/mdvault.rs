@@ -103,10 +103,15 @@ fn parse_fm_date(raw: &str) -> Option<String> {
         return None;
     }
     let (hour, minute) = match time.split(':').collect::<Vec<_>>().as_slice() {
-        [h, m, ..] => (h.parse::<u32>().ok()?.min(23), m[..2.min(m.len())].parse::<u32>().ok()?.min(59)),
+        [h, m, ..] => (
+            h.parse::<u32>().ok()?.min(23),
+            m[..2.min(m.len())].parse::<u32>().ok()?.min(59),
+        ),
         _ => (12, 0),
     };
-    Some(format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:00Z"))
+    Some(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:00Z"
+    ))
 }
 
 /// Split a leading `---` frontmatter block off the body. Returns
@@ -170,7 +175,10 @@ fn split_frontmatter(raw: &str) -> (Frontmatter, String) {
         // an unterminated "---" is a horizontal rule, not frontmatter
         return (Frontmatter::default(), raw.to_string());
     }
-    (fm, raw.get(consumed.min(raw.len())..).unwrap_or("").to_string())
+    (
+        fm,
+        raw.get(consumed.min(raw.len())..).unwrap_or("").to_string(),
+    )
 }
 
 /// A daily-note filename is a date: "2024-03-15" (Obsidian default) or
@@ -227,7 +235,9 @@ fn rewrite_media(
         images_copied += 1;
         image_bytes += bytes;
         let encoded = filename.replace(' ', "%20");
-        out.push_str(&format!("![{filename}](/notes-media/{media_key}/{encoded})"));
+        out.push_str(&format!(
+            "![{filename}](/notes-media/{media_key}/{encoded})"
+        ));
         Ok(())
     };
 
@@ -292,7 +302,12 @@ fn rewrite_media(
         out.push(c);
         rest = &rest[c.len_utf8()..];
     }
-    Ok(MediaOut { body: out, stripped, images_copied, image_bytes })
+    Ok(MediaOut {
+        body: out,
+        stripped,
+        images_copied,
+        image_bytes,
+    })
 }
 
 /// Folder path → up to 2 slug tags (the vault's own organization).
@@ -323,7 +338,11 @@ pub fn import(store: &Store, home: &Home, root: &Path, scope: &str) -> Result<Md
     while let Some(dir) = stack.pop() {
         for entry in std::fs::read_dir(&dir)? {
             let path = entry?.path();
-            let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
             if path.is_dir() {
                 if !skip_dir(&name) {
                     stack.push(path);
@@ -363,11 +382,16 @@ pub fn import(store: &Store, home: &Home, root: &Path, scope: &str) -> Result<Md
             }
         }
         // frontmatter > daily-note filename > file mtime
-        let created = fm.created.or_else(|| date_from_stem(stem)).or_else(|| mtime_of(path));
-        let updated = fm.updated.clone().or_else(|| mtime_of(path)).or_else(|| created.clone());
-        let timestamps = created
-            .as_deref()
-            .zip(updated.as_deref());
+        let created = fm
+            .created
+            .or_else(|| date_from_stem(stem))
+            .or_else(|| mtime_of(path));
+        let updated = fm
+            .updated
+            .clone()
+            .or_else(|| mtime_of(path))
+            .or_else(|| created.clone());
+        let timestamps = created.as_deref().zip(updated.as_deref());
 
         let media = rewrite_media(
             &body,
@@ -384,7 +408,11 @@ pub fn import(store: &Store, home: &Home, root: &Path, scope: &str) -> Result<Md
         if let Some(first) = body.trim_start().lines().next() {
             if first.trim_start_matches('#').trim() == title {
                 let trimmed = body.trim_start();
-                body = trimmed.split_once('\n').map(|x| x.1).unwrap_or("").to_string();
+                body = trimmed
+                    .split_once('\n')
+                    .map(|x| x.1)
+                    .unwrap_or("")
+                    .to_string();
             }
         }
         let body = body.trim();
@@ -396,7 +424,15 @@ pub fn import(store: &Store, home: &Home, root: &Path, scope: &str) -> Result<Md
         body.truncate(BODY_CAP);
         report.files += 1;
         match store.import_note(
-            &actor, home, &title, &body, &tags, scope, "markdown", &origin_ref, timestamps,
+            &actor,
+            home,
+            &title,
+            &body,
+            &tags,
+            scope,
+            "markdown",
+            &origin_ref,
+            timestamps,
         )? {
             NoteImport::Created => report.created += 1,
             NoteImport::Updated => report.updated += 1,
@@ -439,8 +475,14 @@ mod tests {
         assert!(body.starts_with("---"));
 
         // daily-note stems
-        assert_eq!(date_from_stem("2024-03-15").as_deref(), Some("2024-03-15T12:00:00Z"));
-        assert_eq!(date_from_stem("2024_03_15").as_deref(), Some("2024-03-15T12:00:00Z"));
+        assert_eq!(
+            date_from_stem("2024-03-15").as_deref(),
+            Some("2024-03-15T12:00:00Z")
+        );
+        assert_eq!(
+            date_from_stem("2024_03_15").as_deref(),
+            Some("2024-03-15T12:00:00Z")
+        );
         assert_eq!(date_from_stem("Meeting Notes"), None);
         assert_eq!(date_from_stem("2024-03"), None);
     }

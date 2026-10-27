@@ -23,8 +23,16 @@ pub fn node_kind() -> &'static str {
 }
 
 /// Structured event helper — never breaks the caller.
-pub fn log(state: &AppState, level: &str, event: &str, message: &str, meta: Option<serde_json::Value>) {
-    let _ = state.store.log_event(node_kind(), level, event, message, meta);
+pub fn log(
+    state: &AppState,
+    level: &str,
+    event: &str,
+    message: &str,
+    meta: Option<serde_json::Value>,
+) {
+    let _ = state
+        .store
+        .log_event(node_kind(), level, event, message, meta);
 }
 
 /// CPU% between ticks needs the previous reading: (proc jiffies, total jiffies).
@@ -42,9 +50,13 @@ fn sample_process(state: &AppState) {
         let mut parts = text.split_whitespace();
         if let (Some(rss), Some(cpu)) = (parts.next(), parts.next()) {
             if let Ok(kb) = rss.parse::<f64>() {
-                let _ = state
-                    .store
-                    .record_health(node, "mem_mb", None, Some((kb / 1024.0).round()), Some("mb"));
+                let _ = state.store.record_health(
+                    node,
+                    "mem_mb",
+                    None,
+                    Some((kb / 1024.0).round()),
+                    Some("mb"),
+                );
                 sampled = true;
             }
             if let Ok(pct) = cpu.parse::<f64>() {
@@ -65,19 +77,25 @@ fn sample_process(state: &AppState) {
                     .and_then(|r| r.split_whitespace().next())
                     .and_then(|n| n.parse::<f64>().ok())
             }) {
-                let _ = state
-                    .store
-                    .record_health(node, "mem_mb", None, Some((kb / 1024.0).round()), Some("mb"));
+                let _ = state.store.record_health(
+                    node,
+                    "mem_mb",
+                    None,
+                    Some((kb / 1024.0).round()),
+                    Some("mb"),
+                );
             }
         }
-        let proc_jiffies = std::fs::read_to_string("/proc/self/stat").ok().and_then(|s| {
-            // fields 14+15 (utime+stime), AFTER the parenthesized comm
-            let rest = s.rsplit_once(") ")?.1;
-            let mut f = rest.split_whitespace();
-            let ut: u64 = f.nth(11)?.parse().ok()?;
-            let st: u64 = f.next()?.parse().ok()?;
-            Some(ut + st)
-        });
+        let proc_jiffies = std::fs::read_to_string("/proc/self/stat")
+            .ok()
+            .and_then(|s| {
+                // fields 14+15 (utime+stime), AFTER the parenthesized comm
+                let rest = s.rsplit_once(") ")?.1;
+                let mut f = rest.split_whitespace();
+                let ut: u64 = f.nth(11)?.parse().ok()?;
+                let st: u64 = f.next()?.parse().ok()?;
+                Some(ut + st)
+            });
         let total_jiffies = std::fs::read_to_string("/proc/stat").ok().and_then(|s| {
             let line = s.lines().next()?;
             let sum: u64 = line
@@ -91,12 +109,17 @@ fn sample_process(state: &AppState) {
             let mut last = LAST_CPU.lock().unwrap();
             if let Some((lp, lt)) = *last {
                 if t > lt {
-                    let ncpu = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-                    let pct = 100.0 * (p.saturating_sub(lp)) as f64 / (t - lt) as f64
-                        * ncpu as f64;
-                    let _ = state
-                        .store
-                        .record_health(node, "cpu_pct", None, Some((pct * 10.0).round() / 10.0), Some("%"));
+                    let ncpu = std::thread::available_parallelism()
+                        .map(|n| n.get())
+                        .unwrap_or(1);
+                    let pct = 100.0 * (p.saturating_sub(lp)) as f64 / (t - lt) as f64 * ncpu as f64;
+                    let _ = state.store.record_health(
+                        node,
+                        "cpu_pct",
+                        None,
+                        Some((pct * 10.0).round() / 10.0),
+                        Some("%"),
+                    );
                 }
             }
             *last = Some((p, t));
@@ -156,11 +179,7 @@ async fn probe_dependencies(state: &AppState) {
     // …then the network probes, store-free…
     // general internet reachability — separates "my network is down"
     // from "a dependency is down" when comparing nodes
-    let net_ok = client
-        .get("https://one.one.one.one/")
-        .send()
-        .await
-        .is_ok();
+    let net_ok = client.get("https://one.one.one.one/").send().await.is_ok();
     // Anthropic reachability from EVERY node, LLM key or not — the
     // point is comparing what each node can see. Unauthenticated; any
     // HTTP answer (401 included) proves the wire. Never spends tokens.
@@ -200,13 +219,19 @@ async fn probe_dependencies(state: &AppState) {
     // included — writing it proves the daemon + store are alive).
     let st = state.clone();
     let _ = tokio::task::spawn_blocking(move || {
-        let _ = st.store.record_health(node, "daemon", Some(true), None, None);
-        let _ = st.store.record_health(node, "internet", Some(net_ok), None, None);
+        let _ = st
+            .store
+            .record_health(node, "daemon", Some(true), None, None);
+        let _ = st
+            .store
+            .record_health(node, "internet", Some(net_ok), None, None);
         let _ = st
             .store
             .record_health(node, "anthropic_api", Some(anthropic_ok), None, None);
         if let Some(ok) = peer_ok {
-            let _ = st.store.record_health(node, "peer_node", Some(ok), None, None);
+            let _ = st
+                .store
+                .record_health(node, "peer_node", Some(ok), None, None);
         }
     })
     .await;

@@ -77,7 +77,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/ask/{id}/trace", get(ask_trace))
         .route("/v1/ask/{id}/keep", post(ask_keep))
         .route("/v1/ask/{id}/thread", get(ask_thread))
-        .route("/v1/ask/{id}/privacy", get(ask_privacy_get).post(ask_privacy_set))
+        .route(
+            "/v1/ask/{id}/privacy",
+            get(ask_privacy_get).post(ask_privacy_set),
+        )
         .route("/v1/browse/episodes", get(browse_episodes))
         .route("/v1/browse/entities", get(browse_entities))
         .route("/v1/browse/identities", get(browse_identities))
@@ -100,20 +103,14 @@ pub fn router(state: AppState) -> Router {
             "/v1/integrations/extraction",
             get(extraction_status).post(extraction_set),
         )
-        .route(
-            "/v1/integrations/gmail",
-            get(gmail_status).post(gmail_save),
-        )
+        .route("/v1/integrations/gmail", get(gmail_status).post(gmail_save))
         .route(
             "/v1/integrations/embeddings",
             get(embeddings_status).post(embeddings_download),
         )
         .route("/v1/ingest/discover-git", get(discover_git))
         .route("/v1/health/today", get(health_today))
-        .route(
-            "/v1/integrations/openai/estimate",
-            get(openai_estimate),
-        )
+        .route("/v1/integrations/openai/estimate", get(openai_estimate))
         .route("/v1/integrations/imports", get(imports_status))
         .route("/v1/integrations/downloads", get(downloads_scan))
         .route("/v1/integrations/downloads/place", post(downloads_place))
@@ -141,12 +138,30 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/peer/sync-now", post(peer_sync_now))
         .route("/v1/peer/heartbeat", post(peer_heartbeat))
         .route("/v1/peer/pubkey", get(peer_pubkey))
-        .route("/v1/sync/telemetry", get(sync_telemetry_get).post(sync_telemetry_post))
-        .route("/v1/sync/llm_usage", get(sync_llm_usage_get).post(sync_llm_usage_post))
-        .route("/v1/sync/locations", get(sync_locations_get).post(sync_locations_post))
-        .route("/v1/sync/movements", get(sync_movements_get).post(sync_movements_post))
-        .route("/v1/sync/vehicles", get(sync_vehicles_get).post(sync_vehicles_post))
-        .route("/v1/sync/contacts", get(sync_contacts_get).post(sync_contacts_post))
+        .route(
+            "/v1/sync/telemetry",
+            get(sync_telemetry_get).post(sync_telemetry_post),
+        )
+        .route(
+            "/v1/sync/llm_usage",
+            get(sync_llm_usage_get).post(sync_llm_usage_post),
+        )
+        .route(
+            "/v1/sync/locations",
+            get(sync_locations_get).post(sync_locations_post),
+        )
+        .route(
+            "/v1/sync/movements",
+            get(sync_movements_get).post(sync_movements_post),
+        )
+        .route(
+            "/v1/sync/vehicles",
+            get(sync_vehicles_get).post(sync_vehicles_post),
+        )
+        .route(
+            "/v1/sync/contacts",
+            get(sync_contacts_get).post(sync_contacts_post),
+        )
         .route(
             "/v1/sync/device_state",
             get(sync_device_state_get).post(sync_device_state_post),
@@ -172,8 +187,14 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/llm/budget", post(llm_budget_set))
         .route("/v1/peer/pause", post(peer_pause))
         .route("/v1/sync/declared", post(sync_declared))
-        .route("/v1/sync/scopes", get(sync_scopes_get).post(sync_scopes_post))
-        .route("/v1/sync/operational", get(sync_operational_get).post(sync_operational))
+        .route(
+            "/v1/sync/scopes",
+            get(sync_scopes_get).post(sync_scopes_post),
+        )
+        .route(
+            "/v1/sync/operational",
+            get(sync_operational_get).post(sync_operational),
+        )
         .route("/v1/sync/paused", post(sync_paused_informed))
         .route("/v1/bus/stream", get(bus_stream))
         .route("/v1/bus/publish", post(bus_publish))
@@ -186,22 +207,46 @@ pub fn router(state: AppState) -> Router {
             "/v1/import/restore",
             post(import_restore).layer(axum::extract::DefaultBodyLimit::disable()),
         )
-        .route("/v1/notifications", get(notifications_list).post(notification_create))
+        .route(
+            "/v1/notifications",
+            get(notifications_list).post(notification_create),
+        )
         .route("/v1/notifications/read-all", post(notifications_read_all))
         .route("/v1/notifications/{id}/read", post(notification_read))
         .route("/v1/notifications/{id}/dismiss", post(notification_dismiss))
         .route("/v1/provisioner/killswitch", post(provisioner_killswitch))
         .route("/v1/provisioner/notify", post(provisioner_notify))
-        .route("/v1/provisioner/link-domains", post(provisioner_link_domains))
+        .route(
+            "/v1/provisioner/link-domains",
+            post(provisioner_link_domains),
+        )
         .route("/v1/provisioner/status", get(provisioner_status))
-        .route("/v1/sync/notifications", get(sync_notifications_get).post(sync_notifications_post))
-        .route("/v1/sync/extractions", get(sync_extractions_get).post(sync_extractions_post))
-        .route("/v1/sync/journal", get(sync_journal_get).post(sync_journal_post))
-        .route("/v1/sync/photos", get(sync_photos_get).post(sync_photos_post))
-        .route("/v1/sync/sharing", get(sync_sharing_get).post(sync_sharing_post))
+        .route(
+            "/v1/sync/notifications",
+            get(sync_notifications_get).post(sync_notifications_post),
+        )
+        .route(
+            "/v1/sync/extractions",
+            get(sync_extractions_get).post(sync_extractions_post),
+        )
+        .route(
+            "/v1/sync/journal",
+            get(sync_journal_get).post(sync_journal_post),
+        )
+        .route(
+            "/v1/sync/photos",
+            get(sync_photos_get).post(sync_photos_post),
+        )
+        .route(
+            "/v1/sync/sharing",
+            get(sync_sharing_get).post(sync_sharing_post),
+        )
         .route("/v1/integrations/llm-resume", post(llm_resume))
         .route("/v1/integrations/extraction/rerun", post(extraction_rerun))
-        .route("/v1/integrations/extraction/retry-failed", post(extraction_retry_failed))
+        .route(
+            "/v1/integrations/extraction/retry-failed",
+            post(extraction_retry_failed),
+        )
         // plugins: lifecycle (session-authed; plugin keys denied by prefix)
         .route("/v1/plugins", get(plugins_list))
         .route("/v1/plugins/inspect", get(plugins_inspect))
@@ -210,26 +255,38 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/plugins/ui", get(plugins_ui))
         .route("/v1/plugins/{name}/enable", post(plugins_toggle))
         .route("/v1/plugins/{name}/ui-token", post(plugin_ui_token))
-        .route("/v1/plugins/{name}/config", get(plugin_config_get).post(plugin_config_set))
+        .route(
+            "/v1/plugins/{name}/config",
+            get(plugin_config_get).post(plugin_config_set),
+        )
         .route("/v1/plugins/{name}/oauth", get(plugin_oauth_get))
-        .route("/v1/plugins/{name}", axum::routing::delete(plugins_uninstall))
+        .route(
+            "/v1/plugins/{name}",
+            axum::routing::delete(plugins_uninstall),
+        )
         // plugins: self storage (plugin keys only — always allowed by the table)
         .route("/v1/plugins/self/kv", get(plugin_kv_list))
         .route(
             "/v1/plugins/self/kv/{key}",
-            get(plugin_kv_get).put(plugin_kv_put).delete(plugin_kv_delete),
+            get(plugin_kv_get)
+                .put(plugin_kv_put)
+                .delete(plugin_kv_delete),
         )
         .route("/v1/plugins/self/secrets", get(plugin_secret_list))
         .route(
             "/v1/plugins/self/secrets/{key}",
-            get(plugin_secret_get).put(plugin_secret_put).delete(plugin_secret_delete),
+            get(plugin_secret_get)
+                .put(plugin_secret_put)
+                .delete(plugin_secret_delete),
         )
         .route("/v1/plugins/self/oauth/pending", post(plugin_oauth_pending))
         .route("/v1/plugins/self/oauth/take", post(plugin_oauth_take))
         .route("/v1/plugins/self/files", get(plugin_file_list))
         .route(
             "/v1/plugins/self/files/{*path}",
-            get(plugin_file_get).put(plugin_file_put).delete(plugin_file_delete),
+            get(plugin_file_get)
+                .put(plugin_file_put)
+                .delete(plugin_file_delete),
         )
         // plugins: peer awareness (what runs on the counterpart)
         .route("/v1/sync/plugins/installed", get(sync_plugins_installed))
@@ -240,7 +297,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/version", get(version_get))
         .route("/v1/upgrade", post(upgrade_post))
         // plugins: the peering leg (peer scope)
-        .route("/v1/sync/plugins", get(sync_plugins_get).post(sync_plugins_post))
+        .route(
+            "/v1/sync/plugins",
+            get(sync_plugins_get).post(sync_plugins_post),
+        )
         .route("/v1/sync/plugins/file", get(sync_plugin_file_get))
         // plugins: sandboxed UI assets
         .route("/plugins/{name}/ui/{*path}", get(plugin_ui_asset))
@@ -262,13 +322,22 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/network/groups", get(network_groups_get))
         .route("/v1/groups", get(groups_list).post(groups_mutate))
         .route("/v1/network/mycard", get(mycard_get).post(mycard_set))
-        .route("/v1/grants/default", get(grants_default_get).post(grants_default_set))
+        .route(
+            "/v1/grants/default",
+            get(grants_default_get).post(grants_default_set),
+        )
         .route("/v1/grants/sharing", post(grants_sharing_set))
         .route("/v1/sharing", get(sharing_list).post(sharing_mutate))
         .route("/v1/friends/shared", get(friends_shared))
-        .route("/v1/friends/{name}/tasks/{id}/toggle", post(friends_task_toggle))
+        .route(
+            "/v1/friends/{name}/tasks/{id}/toggle",
+            post(friends_task_toggle),
+        )
         .route("/v1/friends/{name}/fork", post(friends_fork))
-        .route("/v1/friends/{name}/refresh-card", post(friends_refresh_card))
+        .route(
+            "/v1/friends/{name}/refresh-card",
+            post(friends_refresh_card),
+        )
         .route("/v1/friends/{name}/offer", get(friends_offer))
         .route("/v1/friends", get(friends_list).post(friend_connect))
         .route("/v1/friends/{name}", axum::routing::delete(friend_remove))
@@ -279,11 +348,20 @@ pub fn router(state: AppState) -> Router {
         .route("/api/discovery/manifest", get(discovery_manifest))
         .route("/brain/{*path}", get(brain_tree))
         .route("/v1/vault", get(vault_status).post(vault_set))
-        .route("/v1/privacy/rules", get(privacy_rules_list).post(privacy_rules_add))
+        .route(
+            "/v1/privacy/rules",
+            get(privacy_rules_list).post(privacy_rules_add),
+        )
         .route("/v1/notes/vaulted", get(vaulted_notes))
-        .route("/v1/privacy/rules/{id}", axum::routing::delete(privacy_rules_remove))
+        .route(
+            "/v1/privacy/rules/{id}",
+            axum::routing::delete(privacy_rules_remove),
+        )
         .route("/v1/intents", get(list_intents).post(add_intent))
-        .route("/v1/intents/{name}", post(update_goal).delete(remove_intent))
+        .route(
+            "/v1/intents/{name}",
+            post(update_goal).delete(remove_intent),
+        )
         .route("/v1/intents/{name}/matches", get(intent_matches))
         .route("/v1/intents/{name}/queries", post(goal_queries))
         .route("/v1/selfmodel", get(selfmodel_list).post(selfmodel_add))
@@ -310,7 +388,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/notes/{id}/versions/{entry}", get(note_version))
         .route("/v1/metrics", get(metrics_query))
         .route("/v1/exercises/recent", get(exercises_recent))
-        .route("/v1/relationships", get(relationships_get).post(relationship_add))
+        .route(
+            "/v1/relationships",
+            get(relationships_get).post(relationship_add),
+        )
         .route("/v1/entities/similar", get(entities_similar))
         .route("/v1/projects", get(projects_list).post(project_declare))
         .route("/v1/entities/rename", post(entity_rename))
@@ -334,8 +415,14 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/agents/tasks/{id}/cancel", post(agents_task_cancel))
         .route("/v1/agents/tasks/{id}/report", post(agents_task_report))
         .route("/v1/agents/hook/{agent_id}", post(agents_hook))
-        .route("/v1/sync/agents", get(sync_agents_get).post(sync_agents_post))
-        .route("/v1/sync/retirements", get(sync_retirements_get).post(sync_retirements_post))
+        .route(
+            "/v1/sync/agents",
+            get(sync_agents_get).post(sync_agents_post),
+        )
+        .route(
+            "/v1/sync/retirements",
+            get(sync_retirements_get).post(sync_retirements_post),
+        )
         .route("/v1/retire/preview", get(retire_preview))
         .route("/v1/retire", post(retire_post))
         .route("/v1/retirements", get(retirements_list))
@@ -385,7 +472,10 @@ async fn cors_bearer(
             .headers()
             .get(header::ACCESS_CONTROL_REQUEST_HEADERS)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.split(',').any(|h| h.trim().eq_ignore_ascii_case("authorization")));
+            .is_some_and(|v| {
+                v.split(',')
+                    .any(|h| h.trim().eq_ignore_ascii_case("authorization"))
+            });
         if !wants_bearer {
             return StatusCode::NO_CONTENT.into_response();
         }
@@ -393,8 +483,14 @@ async fn cors_bearer(
             StatusCode::NO_CONTENT,
             [
                 (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
-                (header::ACCESS_CONTROL_ALLOW_METHODS, "GET, POST, PUT, DELETE"),
-                (header::ACCESS_CONTROL_ALLOW_HEADERS, "authorization, content-type"),
+                (
+                    header::ACCESS_CONTROL_ALLOW_METHODS,
+                    "GET, POST, PUT, DELETE",
+                ),
+                (
+                    header::ACCESS_CONTROL_ALLOW_HEADERS,
+                    "authorization, content-type",
+                ),
                 (header::ACCESS_CONTROL_MAX_AGE, "600"),
             ],
         )
@@ -403,8 +499,10 @@ async fn cors_bearer(
     let bearer = req.headers().contains_key(header::AUTHORIZATION);
     let mut res = next.run(req).await;
     if bearer {
-        res.headers_mut()
-            .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+        res.headers_mut().insert(
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            HeaderValue::from_static("*"),
+        );
     }
     res
 }
@@ -484,7 +582,9 @@ fn friend_route_allowed(method: &str, path: &str) -> bool {
         "GET" => {
             path == "/health"
                 || READS.contains(&path)
-                || path.strip_prefix("/v1/network/note/").is_some_and(single_segment)
+                || path
+                    .strip_prefix("/v1/network/note/")
+                    .is_some_and(single_segment)
         }
         "POST" => {
             path == "/v1/keys/self-revoke"
@@ -701,31 +801,70 @@ mod write_actor_tests {
     fn test_who_a_write_is_recorded_under() {
         let claimed = || "human:dashboard".to_string();
         // The owner (session, admin key, the paired phone) keeps its claim.
-        assert_eq!(write_actor(&AuthInfo(None), claimed()).actor, "human:dashboard");
-        assert_eq!(write_actor(&key(&["admin"], None), claimed()).actor, "human:dashboard");
-        assert_eq!(write_actor(&key(&["read", "ingest", "notify"], None), claimed()).actor, "human:dashboard");
+        assert_eq!(
+            write_actor(&AuthInfo(None), claimed()).actor,
+            "human:dashboard"
+        );
+        assert_eq!(
+            write_actor(&key(&["admin"], None), claimed()).actor,
+            "human:dashboard"
+        );
+        assert_eq!(
+            write_actor(&key(&["read", "ingest", "notify"], None), claimed()).actor,
+            "human:dashboard"
+        );
         // Any other key is named by the server…
-        assert_eq!(write_actor(&key(&["write"], None), claimed()).actor, "agent:key:watch");
-        let capture = KeyGrants { capture: true, ..Default::default() };
-        assert_eq!(write_actor(&key(&[], Some(capture.clone())), claimed()).actor, "agent:key:watch");
+        assert_eq!(
+            write_actor(&key(&["write"], None), claimed()).actor,
+            "agent:key:watch"
+        );
+        let capture = KeyGrants {
+            capture: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            write_actor(&key(&[], Some(capture.clone())), claimed()).actor,
+            "agent:key:watch"
+        );
         // …unless the owner marked it as one of their own devices.
-        let own = KeyGrants { own_device: true, ..capture };
-        assert_eq!(write_actor(&key(&[], Some(own)), claimed()).actor, "human:device:watch");
+        let own = KeyGrants {
+            own_device: true,
+            ..capture
+        };
+        assert_eq!(
+            write_actor(&key(&[], Some(own)), claimed()).actor,
+            "human:device:watch"
+        );
     }
 
     #[test]
     fn test_the_phone_mints_only_scoped_keys() {
         use super::{device_mints_scoped_key, KeyCreateBody};
         let body = |v: serde_json::Value| serde_json::from_value::<KeyCreateBody>(v).unwrap();
-        let capture_key = body(serde_json::json!({"actor": "x", "name": "capture", "grants": {"capture": true, "own_device": true}}));
-        let admin_key = body(serde_json::json!({"actor": "x", "name": "evil", "scopes": ["admin"]}));
+        let capture_key = body(
+            serde_json::json!({"actor": "x", "name": "capture", "grants": {"capture": true, "own_device": true}}),
+        );
+        let admin_key =
+            body(serde_json::json!({"actor": "x", "name": "evil", "scopes": ["admin"]}));
         let phone = key(&["read", "ingest", "notify"], None);
         assert!(device_mints_scoped_key(&phone, &capture_key));
-        assert!(!device_mints_scoped_key(&phone, &admin_key), "never an ordinary key");
+        assert!(
+            !device_mints_scoped_key(&phone, &admin_key),
+            "never an ordinary key"
+        );
         // Keys that aren't the owner's never get the exception.
-        assert!(!device_mints_scoped_key(&key(&["read"], None), &capture_key));
-        let scoped = KeyGrants { capture: true, ..Default::default() };
-        assert!(!device_mints_scoped_key(&key(&[], Some(scoped)), &capture_key));
+        assert!(!device_mints_scoped_key(
+            &key(&["read"], None),
+            &capture_key
+        ));
+        let scoped = KeyGrants {
+            capture: true,
+            ..Default::default()
+        };
+        assert!(!device_mints_scoped_key(
+            &key(&[], Some(scoped)),
+            &capture_key
+        ));
     }
 }
 
@@ -741,7 +880,13 @@ mod key_ceiling_tests {
     /// Every (method, template) the router registers, read from this file.
     fn router_routes() -> Vec<(String, String)> {
         let source = include_str!("http.rs");
-        let body = source.split("pub fn router(").nth(1).unwrap().split("\n}\n").next().unwrap();
+        let body = source
+            .split("pub fn router(")
+            .nth(1)
+            .unwrap()
+            .split("\n}\n")
+            .next()
+            .unwrap();
         let mut out = Vec::new();
         for (at, _) in body.match_indices(".route(") {
             // A real call has only indentation before it on its line, so a
@@ -786,7 +931,11 @@ mod key_ceiling_tests {
     #[test]
     fn test_every_listed_route_exists() {
         let routes = router_routes();
-        assert!(routes.len() > 200, "router parse found only {}", routes.len());
+        assert!(
+            routes.len() > 200,
+            "router parse found only {}",
+            routes.len()
+        );
         for (method, template, _) in KEY_ROUTES {
             assert!(
                 routes.iter().any(|(m, t)| m == method && t == template),
@@ -837,19 +986,37 @@ mod key_ceiling_tests {
             ("POST", "/v1/retire"),
             ("GET", "/v1/notes/vaulted"),
         ] {
-            for scopes in [&["read"][..], &["write"], &["ingest"], &["notify"], &["peer"], &["mcp"], &["friend"],
-                           &["read", "write", "ingest", "peer", "mcp", "friend"]] {
-                assert!(!may(scopes, method, template), "{scopes:?} reached {method} {template}");
+            for scopes in [
+                &["read"][..],
+                &["write"],
+                &["ingest"],
+                &["notify"],
+                &["peer"],
+                &["mcp"],
+                &["friend"],
+                &["read", "write", "ingest", "peer", "mcp", "friend"],
+            ] {
+                assert!(
+                    !may(scopes, method, template),
+                    "{scopes:?} reached {method} {template}"
+                );
             }
         }
         // write, ingest, notify, peer: each its own surface.
         assert!(may(&["write"], "POST", "/v1/tasks") && !may(&["write"], "GET", "/v1/search"));
-        assert!(may(&["ingest"], "POST", "/v1/ingest/health") && !may(&["ingest"], "POST", "/v1/tasks"));
-        assert!(may(&["notify"], "POST", "/v1/notifications") && !may(&["notify"], "GET", "/v1/notifications"));
+        assert!(
+            may(&["ingest"], "POST", "/v1/ingest/health") && !may(&["ingest"], "POST", "/v1/tasks")
+        );
+        assert!(
+            may(&["notify"], "POST", "/v1/notifications")
+                && !may(&["notify"], "GET", "/v1/notifications")
+        );
         assert!(may(&["peer"], "GET", "/v1/sync/journal") && may(&["peer"], "POST", "/v1/ingest"));
         assert!(!may(&["peer"], "GET", "/v1/search"));
         // Any key may retire itself and say hello; HEAD follows GET.
-        assert!(may(&["notify"], "POST", "/v1/keys/self-revoke") && may(&["peer"], "HEAD", "/health"));
+        assert!(
+            may(&["notify"], "POST", "/v1/keys/self-revoke") && may(&["peer"], "HEAD", "/health")
+        );
     }
 }
 
@@ -869,40 +1036,85 @@ mod browser_rule_tests {
     #[test]
     fn test_only_pages_on_other_sites_are_foreign() {
         // The dashboard itself, typed URLs, and non-browser clients.
-        assert!(!foreign_browser_request(&headers(&[("sec-fetch-site", "same-origin")])));
-        assert!(!foreign_browser_request(&headers(&[("sec-fetch-site", "none")])));
-        assert!(!foreign_browser_request(&headers(&[("host", "127.0.0.1:43278")])));
+        assert!(!foreign_browser_request(&headers(&[(
+            "sec-fetch-site",
+            "same-origin"
+        )])));
+        assert!(!foreign_browser_request(&headers(&[(
+            "sec-fetch-site",
+            "none"
+        )])));
+        assert!(!foreign_browser_request(&headers(&[(
+            "host",
+            "127.0.0.1:43278"
+        )])));
         assert!(!foreign_browser_request(&headers(&[
             ("origin", "http://127.0.0.1:43278"),
             ("host", "127.0.0.1:43278"),
         ])));
         // Another site, another port on the same machine, a sandboxed frame.
-        assert!(foreign_browser_request(&headers(&[("sec-fetch-site", "cross-site")])));
-        assert!(foreign_browser_request(&headers(&[("sec-fetch-site", "same-site")])));
+        assert!(foreign_browser_request(&headers(&[(
+            "sec-fetch-site",
+            "cross-site"
+        )])));
+        assert!(foreign_browser_request(&headers(&[(
+            "sec-fetch-site",
+            "same-site"
+        )])));
         assert!(foreign_browser_request(&headers(&[
             ("origin", "https://evil.example"),
             ("host", "127.0.0.1:43278"),
         ])));
-        assert!(foreign_browser_request(&headers(&[("origin", "null"), ("host", "127.0.0.1:43278")])));
+        assert!(foreign_browser_request(&headers(&[
+            ("origin", "null"),
+            ("host", "127.0.0.1:43278")
+        ])));
     }
 
     #[test]
     fn test_dashboard_address_only() {
-        for host in ["127.0.0.1:43278", "localhost:43278", "[::1]:43278", "localhost", "0.0.0.0:43278"] {
-            assert!(dashboard_host_ok(&headers(&[("host", host)]), None), "{host}");
+        for host in [
+            "127.0.0.1:43278",
+            "localhost:43278",
+            "[::1]:43278",
+            "localhost",
+            "0.0.0.0:43278",
+        ] {
+            assert!(
+                dashboard_host_ok(&headers(&[("host", host)]), None),
+                "{host}"
+            );
         }
-        for host in ["evil.example:43278", "192.168.1.5:43278", "127.0.0.1.evil.example", ""] {
-            assert!(!dashboard_host_ok(&headers(&[("host", host)]), None), "{host}");
+        for host in [
+            "evil.example:43278",
+            "192.168.1.5:43278",
+            "127.0.0.1.evil.example",
+            "",
+        ] {
+            assert!(
+                !dashboard_host_ok(&headers(&[("host", host)]), None),
+                "{host}"
+            );
         }
         // HEARTHLOOM_DASHBOARD_URL adds the owner's own name, any port, any case.
-        assert!(dashboard_host_ok(&headers(&[("host", "Hearth.local:8080")]), Some("hearth.local")));
-        assert!(!dashboard_host_ok(&headers(&[("host", "evil.example")]), Some("hearth.local")));
+        assert!(dashboard_host_ok(
+            &headers(&[("host", "Hearth.local:8080")]),
+            Some("hearth.local")
+        ));
+        assert!(!dashboard_host_ok(
+            &headers(&[("host", "evil.example")]),
+            Some("hearth.local")
+        ));
     }
 
     #[test]
     fn test_static_paths() {
-        assert!(is_static_path("/") && is_static_path("/assets/app.js") && is_static_path("/health"));
-        assert!(!is_static_path("/v1/keys") && !is_static_path("/mcp") && !is_static_path("/brain/x"));
+        assert!(
+            is_static_path("/") && is_static_path("/assets/app.js") && is_static_path("/health")
+        );
+        assert!(
+            !is_static_path("/v1/keys") && !is_static_path("/mcp") && !is_static_path("/brain/x")
+        );
     }
 }
 
@@ -976,11 +1188,22 @@ mod friend_ceiling_tests {
         // the owner: an admin key, a paired phone (read + ingest + notify)
         assert!(is_owner_key(&scopes(&["admin"]), false));
         assert!(is_owner_key(&scopes(&["read", "ingest", "notify"]), false));
-        assert!(is_owner_key(&scopes(&["notify", "read", "write", "ingest"]), false));
+        assert!(is_owner_key(
+            &scopes(&["notify", "read", "write", "ingest"]),
+            false
+        ));
         // everyone else
         for narrow in [
-            &["read"][..], &["read", "write"], &["ingest"], &["notify"], &["read", "ingest"],
-            &["peer"], &["mcp"], &["friend"], &["plugins"], &[],
+            &["read"][..],
+            &["read", "write"],
+            &["ingest"],
+            &["notify"],
+            &["read", "ingest"],
+            &["peer"],
+            &["mcp"],
+            &["friend"],
+            &["plugins"],
+            &[],
         ] {
             assert!(!is_owner_key(&scopes(narrow), false), "{narrow:?}");
         }
@@ -1023,7 +1246,10 @@ fn is_pre_auth_path(path: &str) -> bool {
 /// Static files only — the dashboard shell, its assets, plugin page
 /// shells, the health probe. Everything else is API.
 fn is_static_path(path: &str) -> bool {
-    path == "/" || path == "/health" || path.starts_with("/assets/") || path.starts_with("/plugins/")
+    path == "/"
+        || path == "/health"
+        || path.starts_with("/assets/")
+        || path.starts_with("/plugins/")
 }
 
 /// Did a web page on ANOTHER site make this request? Browsers say so in
@@ -1033,10 +1259,16 @@ fn foreign_browser_request(headers: &axum::http::HeaderMap) -> bool {
     if let Some(site) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
         return matches!(site, "cross-site" | "same-site");
     }
-    let Some(origin) = headers.get(axum::http::header::ORIGIN).and_then(|v| v.to_str().ok()) else {
+    let Some(origin) = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    else {
         return false;
     };
-    let host = headers.get(axum::http::header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("");
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
     // "null" (a sandboxed frame) has no authority, so it never matches.
     origin.split_once("://").map(|(_, authority)| authority) != Some(host)
 }
@@ -1045,7 +1277,9 @@ fn foreign_browser_request(headers: &axum::http::HeaderMap) -> bool {
 fn host_name(authority: &str) -> &str {
     match authority.strip_prefix('[') {
         Some(rest) => rest.split(']').next().unwrap_or(""),
-        None => authority.rsplit_once(':').map_or(authority, |(name, _)| name),
+        None => authority
+            .rsplit_once(':')
+            .map_or(authority, |(name, _)| name),
     }
 }
 
@@ -1062,7 +1296,10 @@ fn configured_dashboard_host() -> Option<String> {
 /// names always (and the wildcard a local client may dial), plus the
 /// configured dashboard host.
 fn dashboard_host_ok(headers: &axum::http::HeaderMap, configured: Option<&str>) -> bool {
-    let host = headers.get(axum::http::header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("");
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
     let name = host_name(host);
     matches!(name, "127.0.0.1" | "localhost" | "::1" | "0.0.0.0" | "::")
         || configured.is_some_and(|c| name.eq_ignore_ascii_case(c))
@@ -1102,8 +1339,7 @@ async fn auth_middleware(
         Some(token) => match state.store.verify_api_key(&token) {
             Ok(Some(claims)) => Some(claims),
             Ok(None) => {
-                return ApiError(StatusCode::UNAUTHORIZED, "invalid API key".into())
-                    .into_response()
+                return ApiError(StatusCode::UNAUTHORIZED, "invalid API key".into()).into_response()
             }
             Err(err) => return ApiError::from(err).into_response(),
         },
@@ -1121,8 +1357,7 @@ async fn auth_middleware(
         let auth_override = std::env::var("HEARTHLOOM_AUTH_OVERRIDE")
             .map(|v| v.eq_ignore_ascii_case("open"))
             .unwrap_or(false);
-        let locked =
-            !auth_override && state.auth_locked.load(std::sync::atomic::Ordering::Relaxed);
+        let locked = !auth_override && state.auth_locked.load(std::sync::atomic::Ordering::Relaxed);
         // THE BROWSER RULE (0.5.71): a KEYLESS request that a web page on
         // another site made is refused. On a node with no login it would
         // otherwise act as the owner (read everything, mint keys, unlock
@@ -1167,7 +1402,8 @@ async fn auth_middleware(
             let require = std::env::var("HEARTHLOOM_REQUIRE_KEYS")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
-            let is_ui = path == "/" || path.starts_with("/assets/") || path.starts_with("/.well-known/");
+            let is_ui =
+                path == "/" || path.starts_with("/assets/") || path.starts_with("/.well-known/");
             if require && !is_ui {
                 return ApiError(
                     StatusCode::UNAUTHORIZED,
@@ -1281,13 +1517,18 @@ async fn auth_middleware(
             if !key_route_allowed(&method, &template, &c.scopes) {
                 let needs = key_route_scopes(&method, &template);
                 let reach = if needs.is_empty() {
-                    "only the owner can call it — sign in, or use an admin key or the paired phone".to_string()
+                    "only the owner can call it — sign in, or use an admin key or the paired phone"
+                        .to_string()
                 } else {
                     format!("it needs the {} scope", needs.join(" or "))
                 };
                 return ApiError(
                     StatusCode::FORBIDDEN,
-                    format!("this key ({}) can't call {method} {}: {reach}", c.scopes.join(", "), req.uri().path()),
+                    format!(
+                        "this key ({}) can't call {method} {}: {reach}",
+                        c.scopes.join(", "),
+                        req.uri().path()
+                    ),
                 )
                 .into_response();
             }
@@ -1297,7 +1538,10 @@ async fn auth_middleware(
     // for an area-limited key, its life areas — entered around every poll
     // (crate::scoped). Work it hands to another thread must use the
     // scoped spawns, or it reads locked.
-    let areas = claims.as_ref().and_then(|c| c.grants.as_ref()).and_then(|g| g.areas.clone());
+    let areas = claims
+        .as_ref()
+        .and_then(|c| c.grants.as_ref())
+        .and_then(|g| g.areas.clone());
     let scope = hearthloom_core::store::ReadScope::new(&viewer, areas.as_deref());
     req.extensions_mut().insert(AuthInfo(claims));
     crate::scoped::Scoped::new(scope, next.run(req)).await
@@ -1340,7 +1584,9 @@ pub(crate) fn scoped_key_rate_ok(
                 counts.asks = 0;
             }
             if counts.asks >= cap {
-                return Err(format!("this key's limit of {cap} questions a day is used up"));
+                return Err(format!(
+                    "this key's limit of {cap} questions a day is used up"
+                ));
             }
             counts.asks += 1;
         }
@@ -1351,7 +1597,9 @@ pub(crate) fn scoped_key_rate_ok(
                 counts.writes.pop_front();
             }
             if counts.writes.len() as u32 >= cap {
-                return Err(format!("this key's limit of {cap} writes an hour is used up"));
+                return Err(format!(
+                    "this key's limit of {cap} writes an hour is used up"
+                ));
             }
             counts.writes.push_back(Instant::now());
         }
@@ -1602,10 +1850,9 @@ async fn search(
     Query(params): Query<SearchParams>,
 ) -> Result<Json<Value>, ApiError> {
     let embedding = state.query_embedding(&params.q);
-    let hits =
-        state
-            .store
-            .search_hybrid(&params.q, embedding.as_deref(), params.limit.min(100))?;
+    let hits = state
+        .store
+        .search_hybrid(&params.q, embedding.as_deref(), params.limit.min(100))?;
     Ok(Json(json!({
         "query": params.q,
         "hybrid": embedding.is_some(),
@@ -1680,7 +1927,10 @@ async fn episode(
     // still opens, labelled. Every other caller reads live memories only.
     if require_owner(&auth, "").is_ok() {
         let Some((row, superseded, body)) = state.store.episode_forensic(&id)? else {
-            return Err(ApiError(StatusCode::NOT_FOUND, format!("no episode {id:?}")));
+            return Err(ApiError(
+                StatusCode::NOT_FOUND,
+                format!("no episode {id:?}"),
+            ));
         };
         let mut value = serde_json::to_value(row).unwrap();
         value["body"] = json!(body);
@@ -1876,10 +2126,15 @@ async fn resolve_quarantine(
                 .filter(|name| field("source") == Some(*name))
                 .is_some_and(|name| matches!(state.store.virtual_source(name), Ok(Some(_))));
             let (source, source_ref) = match (promoted, field("source_ref")) {
-                (true, Some(source_ref)) => (field("source").unwrap_or("memory").to_string(), source_ref.to_string()),
+                (true, Some(source_ref)) => (
+                    field("source").unwrap_or("memory").to_string(),
+                    source_ref.to_string(),
+                ),
                 _ => ("memory".to_string(), entry.id.clone()),
             };
-            let kind = if promoted || hearthloom_core::store::PROPOSAL_KINDS.contains(&entry.kind.as_str()) {
+            let kind = if promoted
+                || hearthloom_core::store::PROPOSAL_KINDS.contains(&entry.kind.as_str())
+            {
                 entry.kind.clone()
             } else {
                 "memory".to_string()
@@ -2036,10 +2291,9 @@ async fn register_virtual(
                                 mount.display(),
                                 started.elapsed()
                             ),
-                            Err(err) => tracing::error!(
-                                "mbox index {}: FAILED: {err:#}",
-                                mount.display()
-                            ),
+                            Err(err) => {
+                                tracing::error!("mbox index {}: FAILED: {err:#}", mount.display())
+                            }
                         }
                     });
                 }
@@ -2070,7 +2324,9 @@ async fn search_virtual(
 ) -> Result<Json<Value>, ApiError> {
     let def = crate::virtual_source::resolve(&state, &name)?;
     let hits = crate::virtual_source::search(&def, &params.q, params.limit.unwrap_or(20).min(100))?;
-    Ok(Json(json!({"source": name, "query": params.q, "hits": hits})))
+    Ok(Json(
+        json!({"source": name, "query": params.q, "hits": hits}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -2095,7 +2351,9 @@ async fn query_virtual(
         &params.sql,
         params.limit.unwrap_or(120).min(6000),
     )?;
-    Ok(Json(json!({"source": name, "columns": columns, "rows": rows})))
+    Ok(Json(
+        json!({"source": name, "columns": columns, "rows": rows}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -2187,7 +2445,12 @@ async fn integrations_hearthfs_set(
         other => Err(anyhow::anyhow!("unknown action {other:?} (enable|disable)")),
     })
     .await
-    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("integration task failed: {e}")))??;
+    .map_err(|e| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("integration task failed: {e}"),
+        )
+    })??;
     Ok(Json(serde_json::to_value(status).unwrap_or_default()))
 }
 
@@ -2321,7 +2584,12 @@ async fn anthropic_save(
     if !PROVIDERS.contains(&provider.as_str()) {
         return Err(bad_request(format!("unknown provider {provider}")));
     }
-    let given = |v: &Option<String>| v.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+    let given = |v: &Option<String>| {
+        v.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
     let key = given(&body.key);
 
     // Validate EVERYTHING before the first write — a half-saved config
@@ -2333,7 +2601,10 @@ async fn anthropic_save(
                 .ok_or_else(|| bad_request(format!("unknown tier {tier} (low|medium|high)")))?;
             let (name, model) = (route.provider.trim(), route.model.trim());
             if !name.is_empty() && !PROVIDERS.contains(&name) {
-                return Err(bad_request(format!("unknown provider {name} for the {} tier", tier.as_str())));
+                return Err(bad_request(format!(
+                    "unknown provider {name} for the {} tier",
+                    tier.as_str()
+                )));
             }
             if name == "custom" && model.is_empty() {
                 return Err(bad_request(format!(
@@ -2352,7 +2623,9 @@ async fn anthropic_save(
                 .ok_or_else(|| bad_request(format!("unknown tier {tier} (low|medium|high)")))?;
             let level = level.trim();
             if !level.is_empty() && !hearthloom_core::provider::Efforts::LEVELS.contains(&level) {
-                return Err(bad_request(format!("unknown effort {level} (low|medium|high|xhigh|max)")));
+                return Err(bad_request(format!(
+                    "unknown effort {level} (low|medium|high|xhigh|max)"
+                )));
             }
             out.push((tier, level.to_string()));
         }
@@ -2364,22 +2637,36 @@ async fn anthropic_save(
         None => None,
     };
     if uses_custom {
-        let Some(url) = base_url.clone().or_else(|| crate::custom_base_url(&state.store)) else {
+        let Some(url) = base_url
+            .clone()
+            .or_else(|| crate::custom_base_url(&state.store))
+        else {
             return Err(bad_request(
                 "the custom endpoint needs a base URL (e.g. http://localhost:11434/v1)",
             ));
         };
-        let custom_key = if provider == "custom" { key.clone() } else { None }
-            .or_else(|| std::env::var(crate::integrations::provider_key_env("custom")).ok())
-            .unwrap_or_default();
+        let custom_key = if provider == "custom" {
+            key.clone()
+        } else {
+            None
+        }
+        .or_else(|| std::env::var(crate::integrations::provider_key_env("custom")).ok())
+        .unwrap_or_default();
         crate::integrations::validate_endpoint(&url, &custom_key)
             .await
             .map_err(|e| bad_request(format!("{e:#}")))?;
     }
     if provider == "custom" {
-        for (tier, value) in [("low", &body.low), ("medium", &body.medium), ("high", &body.high)] {
-            let stored = state.store.consolidation_state(&format!("llm.model.{tier}"))?;
-            let was_custom = state.store.consolidation_state("llm.provider")?.as_deref() == Some("custom");
+        for (tier, value) in [
+            ("low", &body.low),
+            ("medium", &body.medium),
+            ("high", &body.high),
+        ] {
+            let stored = state
+                .store
+                .consolidation_state(&format!("llm.model.{tier}"))?;
+            let was_custom =
+                state.store.consolidation_state("llm.provider")?.as_deref() == Some("custom");
             let kept = was_custom && stored.is_some_and(|s| !s.trim().is_empty());
             if given(value).is_none() && !kept {
                 return Err(bad_request(format!(
@@ -2396,7 +2683,10 @@ async fn anthropic_save(
             // Already proven against the endpoint above.
             hearthloom_core::secrets::set_env_vars(
                 state.home.root(),
-                &[(crate::integrations::provider_key_env("custom"), key.as_str())],
+                &[(
+                    crate::integrations::provider_key_env("custom"),
+                    key.as_str(),
+                )],
             )
             .map_err(|e| bad_request(format!("{e:#}")))?;
         } else {
@@ -2420,12 +2710,16 @@ async fn anthropic_save(
         }
         Ok(())
     };
-    state.store.set_consolidation_state("llm.provider", &provider)?;
+    state
+        .store
+        .set_consolidation_state("llm.provider", &provider)?;
     set("llm.model.low", &body.low)?;
     set("llm.model.medium", &body.medium)?;
     set("llm.model.high", &body.high)?;
     if let Some(url) = &base_url {
-        state.store.set_consolidation_state("llm.custom.base_url", url)?;
+        state
+            .store
+            .set_consolidation_state("llm.custom.base_url", url)?;
     }
     for (tier, name, model) in &routes {
         let t = tier.as_str();
@@ -2442,10 +2736,17 @@ async fn anthropic_save(
         )?;
     }
     for (tier, level) in &efforts {
-        state.store.set_consolidation_state(&format!("llm.effort.{}", tier.as_str()), level)?;
+        state
+            .store
+            .set_consolidation_state(&format!("llm.effort.{}", tier.as_str()), level)?;
     }
-    crate::monitor::log(&state, "info", "llm_config_set",
-        &format!("LLM config saved ({provider}) — restarting to load it"), None);
+    crate::monitor::log(
+        &state,
+        "info",
+        "llm_config_set",
+        &format!("LLM config saved ({provider}) — restarting to load it"),
+        None,
+    );
     tokio::spawn(async {
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         std::process::exit(0);
@@ -2470,10 +2771,9 @@ async fn health_today(State(state): State<AppState>) -> Result<Json<Value>, ApiE
             return Ok(json!({"locked": true, "rows": []}));
         }
         let off = state.store.health_latest_tz_offset()?;
-        let day = (chrono::Utc::now()
-            + chrono::Duration::minutes(off as i64))
-        .format("%Y-%m-%d")
-        .to_string();
+        let day = (chrono::Utc::now() + chrono::Duration::minutes(off as i64))
+            .format("%Y-%m-%d")
+            .to_string();
         Ok(json!({"day": day, "rows": state.store.health_day_rollup(&day)?}))
     })
     .await
@@ -2527,8 +2827,13 @@ async fn gmail_save(
             &[("GMAIL_IMAP_USER", ""), ("GMAIL_IMAP_PASSWORD", "")],
         )
         .map_err(|e| bad_request(format!("{e:#}")))?;
-        crate::monitor::log(&state, "info", "gmail_disconnected",
-            "Google Mail live pull disconnected — the live archive stays", None);
+        crate::monitor::log(
+            &state,
+            "info",
+            "gmail_disconnected",
+            "Google Mail live pull disconnected — the live archive stays",
+            None,
+        );
         return Ok(Json(json!({"saved": true, "configured": false})));
     }
     let user = body
@@ -2562,18 +2867,30 @@ async fn gmail_save(
     })
     .await
     .map_err(anyhow::Error::from)?
-    .map_err(|e| bad_request(format!(
-        "Gmail sign-in failed: {e:#}. Check the address, and that this is an app password \
+    .map_err(|e| {
+        bad_request(format!(
+            "Gmail sign-in failed: {e:#}. Check the address, and that this is an app password \
          (myaccount.google.com/apppasswords), not your account password."
-    )))?;
+        ))
+    })?;
     hearthloom_core::secrets::set_env_vars(
         state.home.root(),
-        &[("GMAIL_IMAP_USER", user.as_str()), ("GMAIL_IMAP_PASSWORD", password.as_str())],
+        &[
+            ("GMAIL_IMAP_USER", user.as_str()),
+            ("GMAIL_IMAP_PASSWORD", password.as_str()),
+        ],
     )
     .map_err(|e| bad_request(format!("{e:#}")))?;
-    crate::monitor::log(&state, "info", "gmail_connected",
-        &format!("Google Mail live pull connected ({user}) — pulling each cycle"), None);
-    Ok(Json(json!({"saved": true, "configured": true, "user": user})))
+    crate::monitor::log(
+        &state,
+        "info",
+        "gmail_connected",
+        &format!("Google Mail live pull connected ({user}) — pulling each cycle"),
+        None,
+    );
+    Ok(Json(
+        json!({"saved": true, "configured": true, "user": user}),
+    ))
 }
 
 /* ————— API keys (PATs) ————— */
@@ -2626,7 +2943,9 @@ fn write_actor(auth: &AuthInfo, claimed: String) -> Actor {
         Some(c) if c.grants.as_ref().is_some_and(|g| g.own_device) => {
             Actor::new(format!("human:device:{}", c.name))
         }
-        Some(c) if c.grants.is_some() || !is_owner_key(&c.scopes, false) => Actor::new(c.agent_actor()),
+        Some(c) if c.grants.is_some() || !is_owner_key(&c.scopes, false) => {
+            Actor::new(c.agent_actor())
+        }
         _ => Actor::new(claimed),
     }
 }
@@ -2646,7 +2965,10 @@ fn require_key_admin(auth: &AuthInfo) -> Result<(), ApiError> {
     match &auth.0 {
         None => Ok(()),
         Some(c) if c.scopes.iter().any(|s| s == "admin") => Ok(()),
-        Some(_) => Err(ApiError(StatusCode::FORBIDDEN, "managing keys needs the admin scope".into())),
+        Some(_) => Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "managing keys needs the admin scope".into(),
+        )),
     }
 }
 
@@ -2740,7 +3062,9 @@ async fn key_requests_list(
     axum::Extension(auth): axum::Extension<AuthInfo>,
 ) -> Result<Json<Value>, ApiError> {
     require_key_admin(&auth)?;
-    Ok(Json(json!({"requests": state.store.key_requests_pending()?})))
+    Ok(Json(
+        json!({"requests": state.store.key_requests_pending()?}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -2756,10 +3080,16 @@ async fn key_request_decide(
     Json(body): Json<KeyRequestDecideBody>,
 ) -> Result<Json<Value>, ApiError> {
     require_key_admin(&auth)?;
-    if state.store.key_request_decide(&Actor::new(body.actor), &id, body.approve)? {
+    if state
+        .store
+        .key_request_decide(&Actor::new(body.actor), &id, body.approve)?
+    {
         Ok(Json(json!({"decided": id, "approved": body.approve})))
     } else {
-        Err(ApiError(StatusCode::NOT_FOUND, "no such pending request (it may have lapsed)".into()))
+        Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "no such pending request (it may have lapsed)".into(),
+        ))
     }
 }
 
@@ -2822,20 +3152,30 @@ async fn key_undo(
         .api_key(&id)?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("no key {id}")))?;
     let agent = format!("agent:key:{}", key.name);
-    let made_it = state.store.key_activity(&agent, 500)?.iter().any(|item| {
-        item["op"] == "create" && item["entity_id"] == body.entity_id.as_str()
-    });
+    let made_it = state
+        .store
+        .key_activity(&agent, 500)?
+        .iter()
+        .any(|item| item["op"] == "create" && item["entity_id"] == body.entity_id.as_str());
     if !made_it {
         return Err(bad_request("that key didn't create this item"));
     }
     let actor = Actor::new(body.actor);
     match body.kind.as_str() {
         // Archived, not purged: it leaves the Desk and stays restorable.
-        "task" | "tasks" => {
-            state.store.update_task(&actor, &body.entity_id, None, None, Some("archived"), None, None)?
-        }
+        "task" | "tasks" => state.store.update_task(
+            &actor,
+            &body.entity_id,
+            None,
+            None,
+            Some("archived"),
+            None,
+            None,
+        )?,
         "note" | "notes" => {
-            state.store.set_note_status(&actor, &state.home, &body.entity_id, "archived")?;
+            state
+                .store
+                .set_note_status(&actor, &state.home, &body.entity_id, "archived")?;
         }
         other => return Err(bad_request(format!("can't undo a {other}"))),
     }
@@ -2866,12 +3206,36 @@ struct CaptureBody {
 pub(crate) fn capture_reads_as_task(text: &str) -> bool {
     let t = text.trim().to_lowercase();
     const LEADS: &[&str] = &[
-        "remind me", "remember to", "todo", "to do", "to-do", "don't forget", "dont forget",
-        "call ", "email ", "text ", "message ", "buy ", "pay ", "book ", "schedule ", "send ",
-        "renew ", "cancel ", "order ", "pick up", "follow up", "ask ", "tell ", "fix ", "return ",
+        "remind me",
+        "remember to",
+        "todo",
+        "to do",
+        "to-do",
+        "don't forget",
+        "dont forget",
+        "call ",
+        "email ",
+        "text ",
+        "message ",
+        "buy ",
+        "pay ",
+        "book ",
+        "schedule ",
+        "send ",
+        "renew ",
+        "cancel ",
+        "order ",
+        "pick up",
+        "follow up",
+        "ask ",
+        "tell ",
+        "fix ",
+        "return ",
     ];
     LEADS.iter().any(|lead| t.starts_with(lead))
-        || ["#today", "#tomorrow", "#urgent", "#important", "#task"].iter().any(|tag| t.contains(tag))
+        || ["#today", "#tomorrow", "#urgent", "#important", "#task"]
+            .iter()
+            .any(|tag| t.contains(tag))
 }
 
 /// File one captured thought. WRITE-ONLY by design: it returns what it
@@ -2884,7 +3248,11 @@ async fn ingest_capture(
     axum::Extension(auth): axum::Extension<AuthInfo>,
     Json(body): Json<CaptureBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let scoped = auth.0.as_ref().and_then(|c| c.grants.as_ref()).is_some_and(|g| g.capture);
+    let scoped = auth
+        .0
+        .as_ref()
+        .and_then(|c| c.grants.as_ref())
+        .is_some_and(|g| g.capture);
     if !scoped {
         require_scope(&auth, "ingest")?;
     }
@@ -2893,7 +3261,9 @@ async fn ingest_capture(
         return Err(bad_request("nothing to capture"));
     }
     if text.chars().count() > 8000 {
-        return Err(bad_request("a capture is a thought, not a document (8,000 characters max)"));
+        return Err(bad_request(
+            "a capture is a thought, not a document (8,000 characters max)",
+        ));
     }
     let dedupe = body
         .client_ref
@@ -2902,7 +3272,11 @@ async fn ingest_capture(
         .filter(|r| !r.is_empty() && r.len() <= 100)
         .map(|r| format!("capture.ref.{r}"));
     if let Some(key) = &dedupe {
-        if let Some(prior) = state.store.consolidation_state(key)?.filter(|v| !v.is_empty()) {
+        if let Some(prior) = state
+            .store
+            .consolidation_state(key)?
+            .filter(|v| !v.is_empty())
+        {
             let (kind, id) = prior.split_once(':').unwrap_or(("note", prior.as_str()));
             return Ok(Json(json!({"kind": kind, "id": id, "duplicate": true})));
         }
@@ -2912,7 +3286,11 @@ async fn ingest_capture(
     // scoped key captures as itself (an agent's words).
     let device = |fallback: &str| {
         let device = body.device.trim();
-        if device.is_empty() { fallback.to_string() } else { format!(":{device}") }
+        if device.is_empty() {
+            fallback.to_string()
+        } else {
+            format!(":{device}")
+        }
     };
     let actor = Actor::new(match &auth.0 {
         Some(c) if c.grants.as_ref().is_some_and(|g| g.own_device) => {
@@ -2926,29 +3304,56 @@ async fn ingest_capture(
         "note" => false,
         _ => capture_reads_as_task(&text),
     };
-    let when = body.captured_at.clone().unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    let when = body
+        .captured_at
+        .clone()
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
     let place = match (body.lat, body.lon) {
-        (Some(lat), Some(lon)) if lat.abs() <= 90.0 && lon.abs() <= 180.0 => Some(format!("{lat:.5},{lon:.5}")),
+        (Some(lat), Some(lon)) if lat.abs() <= 90.0 && lon.abs() <= 180.0 => {
+            Some(format!("{lat:.5},{lon:.5}"))
+        }
         _ => None,
     };
     let (kind, id) = if as_task {
         let id = state.store.add_task(
-            &actor, "plain", &text, None, None, "one-time", "personal", None, None,
+            &actor,
+            "plain",
+            &text,
+            None,
+            None,
+            "one-time",
+            "personal",
+            None,
+            None,
             &["capture".to_string()],
         )?;
         ("task", id)
     } else {
         let title: String = text.lines().next().unwrap_or("").chars().take(60).collect();
         let mut note = text.clone();
-        note.push_str(&format!("\n\n_Captured {}{}_", when.chars().take(16).collect::<String>().replace('T', " "),
-            place.as_ref().map(|p| format!(" at {p}")).unwrap_or_default()));
+        note.push_str(&format!(
+            "\n\n_Captured {}{}_",
+            when.chars().take(16).collect::<String>().replace('T', " "),
+            place
+                .as_ref()
+                .map(|p| format!(" at {p}"))
+                .unwrap_or_default()
+        ));
         let id = state.store.create_note(
-            &actor, &state.home, &title, &note, &["capture".to_string()], "personal", None,
+            &actor,
+            &state.home,
+            &title,
+            &note,
+            &["capture".to_string()],
+            "personal",
+            None,
         )?;
         ("note", id)
     };
     if let Some(key) = &dedupe {
-        let _ = state.store.set_consolidation_state(key, &format!("{kind}:{id}"));
+        let _ = state
+            .store
+            .set_consolidation_state(key, &format!("{kind}:{id}"));
     }
     crate::bus::touch(&state, "operational.changed");
     Ok(Json(json!({"kind": kind, "id": id, "duplicate": false})))
@@ -2960,12 +3365,21 @@ mod capture_tests {
 
     #[test]
     fn test_capture_task_guess() {
-        for line in ["Call the plumber tomorrow", "remind me to renew the passport", "buy oat milk",
-                     "thoughts on the lease #today", "TODO: send Ada the deck"] {
+        for line in [
+            "Call the plumber tomorrow",
+            "remind me to renew the passport",
+            "buy oat milk",
+            "thoughts on the lease #today",
+            "TODO: send Ada the deck",
+        ] {
             assert!(capture_reads_as_task(line), "{line}");
         }
-        for line in ["The lease idea: split it over two years", "The ridge hike was harder than I expected",
-                     "callback pattern seems wrong here", ""] {
+        for line in [
+            "The lease idea: split it over two years",
+            "The ridge hike was harder than I expected",
+            "callback pattern seems wrong here",
+            "",
+        ] {
             assert!(!capture_reads_as_task(line), "{line}");
         }
     }
@@ -3048,10 +3462,10 @@ async fn keys_revoke(
 }
 
 /* ————— auth: the login layer (deployment modes, 2026-07-11) —————
-   The posture rule: auth is required iff an admin user exists.
-   Bootstrap (first run only) creates the admin and the door locks in
-   the same gesture. Sessions ride an HttpOnly cookie; PATs are the
-   machine door and stay orthogonal. */
+The posture rule: auth is required iff an admin user exists.
+Bootstrap (first run only) creates the admin and the door locks in
+the same gesture. Sessions ride an HttpOnly cookie; PATs are the
+machine door and stay orthogonal. */
 
 fn session_cookie_header(token: &str) -> (axum::http::HeaderName, String) {
     (
@@ -3108,11 +3522,9 @@ async fn auth_bootstrap(
     State(state): State<AppState>,
     Json(body): Json<BootstrapBody>,
 ) -> Result<Response, ApiError> {
-    state.store.create_admin(
-        &Actor::new("human:bootstrap"),
-        &body.email,
-        &body.password,
-    )?;
+    state
+        .store
+        .create_admin(&Actor::new("human:bootstrap"), &body.email, &body.password)?;
     state
         .auth_locked
         .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -3170,8 +3582,13 @@ async fn auth_login(
         state.store.login(&body.email, &body.password)?
     };
     let Some(token) = token else {
-        crate::monitor::log(&state, "warn", "login_failed",
-            "a sign-in attempt was refused", None);
+        crate::monitor::log(
+            &state,
+            "warn",
+            "login_failed",
+            "a sign-in attempt was refused",
+            None,
+        );
         return Err(ApiError(
             StatusCode::UNAUTHORIZED,
             "that didn't match — check the email and password".into(),
@@ -3214,7 +3631,13 @@ async fn auth_session_from_key(
         StatusCode::CONFLICT,
         "no admin user on this node — nothing to sign in to".into(),
     ))?;
-    crate::monitor::log(&state, "info", "login", "a session was opened from an API key", None);
+    crate::monitor::log(
+        &state,
+        "info",
+        "login",
+        "a session was opened from an API key",
+        None,
+    );
     let (name, value) = session_cookie_header(&token);
     Ok(([(name, value)], Json(json!({"ok": true}))).into_response())
 }
@@ -3270,9 +3693,13 @@ async fn ingest_health(
             span.as_deref(),
         )?;
         if workout_new > 0 {
-            state
-                .store
-                .ingest_log_append(&batch.actor, "apple-health", "workout", workout_new, None)?;
+            state.store.ingest_log_append(
+                &batch.actor,
+                "apple-health",
+                "workout",
+                workout_new,
+                None,
+            )?;
         }
         Ok(json!({
             "accepted": accepted,
@@ -3380,7 +3807,9 @@ struct MovementIngestBatch {
 fn clean_vehicle_id(id: &str) -> Option<String> {
     let ok = !id.is_empty()
         && id.len() <= 64
-        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
     ok.then(|| id.to_string())
 }
 
@@ -3397,7 +3826,10 @@ async fn ingest_movement(
     if batch.items.len() > 5000 {
         return Err(bad_request("at most 5000 movements per batch"));
     }
-    let plugin = auth.0.as_ref().and_then(|c| crate::plugins::plugin_for_claims(&state, c));
+    let plugin = auth
+        .0
+        .as_ref()
+        .and_then(|c| crate::plugins::plugin_for_claims(&state, c));
     let (source, subject, actor) = match &plugin {
         Some(name) => {
             let vehicle = batch
@@ -3406,20 +3838,33 @@ async fn ingest_movement(
                 .and_then(|v| clean_vehicle_id(&v.id))
                 .ok_or_else(|| bad_request("an ember posts a vehicle's movements: give vehicle.id ([A-Za-z0-9_-], ≤64)"))?;
             if batch.subject.as_deref().is_some_and(|s| s != "vehicle") && batch.subject.is_some() {
-                return Err(bad_request("an ember can't post the person's own movement — only a vehicle's"));
+                return Err(bad_request(
+                    "an ember can't post the person's own movement — only a vehicle's",
+                ));
             }
-            (format!("plugin:{name}"), format!("vehicle:{name}:{vehicle}"), format!("plugin:{name}"))
+            (
+                format!("plugin:{name}"),
+                format!("vehicle:{name}:{vehicle}"),
+                format!("plugin:{name}"),
+            )
         }
         None => {
             let source = batch.source.clone().unwrap_or_default();
             let reserved = ["ios-motion", "trips", "photos", "visits"];
-            if source.is_empty() || source.len() > 60 || reserved.contains(&source.as_str()) || source.starts_with("plugin:") {
-                return Err(bad_request("name your source (not ios-motion/trips/plugin:…)"));
+            if source.is_empty()
+                || source.len() > 60
+                || reserved.contains(&source.as_str())
+                || source.starts_with("plugin:")
+            {
+                return Err(bad_request(
+                    "name your source (not ios-motion/trips/plugin:…)",
+                ));
             }
             let subject = match &batch.vehicle {
                 Some(v) => format!(
                     "vehicle:{source}:{}",
-                    clean_vehicle_id(&v.id).ok_or_else(|| bad_request("vehicle.id must be [A-Za-z0-9_-], ≤64"))?
+                    clean_vehicle_id(&v.id)
+                        .ok_or_else(|| bad_request("vehicle.id must be [A-Za-z0-9_-], ≤64"))?
                 ),
                 None => "me".to_string(),
             };
@@ -3435,11 +3880,16 @@ async fn ingest_movement(
                 &v.descriptor.clone().unwrap_or_else(|| json!({})),
             )?;
         }
-        let (accepted, duplicates) = st.store.movements_add(&source, &subject, &actor, &batch.items)?;
+        let (accepted, duplicates) =
+            st.store
+                .movements_add(&source, &subject, &actor, &batch.items)?;
         let span = day_span_ref(batch.items.iter().filter_map(|m| {
-            chrono::DateTime::parse_from_rfc3339(&m.start).ok().map(|d| d.format("%Y-%m-%d").to_string())
+            chrono::DateTime::parse_from_rfc3339(&m.start)
+                .ok()
+                .map(|d| d.format("%Y-%m-%d").to_string())
         }));
-        st.store.ingest_log_append(&actor, &source, "movement_batch", accepted, span.as_deref())?;
+        st.store
+            .ingest_log_append(&actor, &source, "movement_batch", accepted, span.as_deref())?;
         Ok(json!({"accepted": accepted, "duplicates": duplicates, "subject": subject}))
     })
     .await
@@ -3491,7 +3941,10 @@ async fn vehicle_settings_set(
         p.aboard_driver = v.to_string();
     }
     if let Some(v) = body.get("household").and_then(|v| v.as_array()) {
-        p.household = v.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+        p.household = v
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect();
     }
     if let Some(v) = body.get("others_scope").and_then(|v| v.as_str()) {
         p.others_scope = v.to_string();
@@ -3499,9 +3952,14 @@ async fn vehicle_settings_set(
     if let Some(v) = body.get("ask").and_then(|v| v.as_bool()) {
         p.ask = v;
     }
-    state.store.vehicle_profile_set(&p).map_err(|e| bad_request(format!("{e:#}")))?;
+    state
+        .store
+        .vehicle_profile_set(&p)
+        .map_err(|e| bad_request(format!("{e:#}")))?;
     reconcile_trips_soon(&state);
-    Ok(Json(json!({"vehicle": state.store.vehicle_profile(&vehicle)?})))
+    Ok(Json(
+        json!({"vehicle": state.store.vehicle_profile(&vehicle)?}),
+    ))
 }
 
 async fn trip_questions(
@@ -3509,7 +3967,9 @@ async fn trip_questions(
     axum::Extension(auth): axum::Extension<AuthInfo>,
 ) -> Result<Json<Value>, ApiError> {
     require_owner(&auth, "see questions about your trips")?;
-    Ok(Json(json!({"pending": state.store.trip_questions_pending()?})))
+    Ok(Json(
+        json!({"pending": state.store.trip_questions_pending()?}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -3552,8 +4012,7 @@ async fn ingest_contacts(
 ) -> Result<Json<Value>, ApiError> {
     require_device_write(&auth, &batch.actor)?;
     let report = crate::scoped::spawn_blocking(move || -> anyhow::Result<Value> {
-        let (new, updated, unchanged) =
-            state.store.contacts_upsert(&batch.device, &batch.items)?;
+        let (new, updated, unchanged) = state.store.contacts_upsert(&batch.device, &batch.items)?;
         let applied = crate::live_ingest::apply_pending_contacts(&state, new + updated + 200)?;
         state.store.ingest_log_append(
             &batch.actor,
@@ -3628,8 +4087,9 @@ async fn ingest_calendar(
             )?;
             episodes_new += r.episodes_new;
         }
-        let (obs_new, _) =
-            state.store.observations_add("calendar", &batch.actor, &observations)?;
+        let (obs_new, _) = state
+            .store
+            .observations_add("calendar", &batch.actor, &observations)?;
         let span = day_span_ref(batch.items.iter().filter_map(|e| {
             chrono::DateTime::parse_from_rfc3339(&e.start)
                 .ok()
@@ -3744,7 +4204,9 @@ async fn ingest_location(
             batch.source.trim()
         };
         let (accepted, duplicates) =
-            state.store.observations_add(source, &batch.actor, &batch.items)?;
+            state
+                .store
+                .observations_add(source, &batch.actor, &batch.items)?;
         let span = day_span_ref(batch.items.iter().filter_map(|o| {
             chrono::DateTime::parse_from_rfc3339(&o.t_start)
                 .ok()
@@ -3810,7 +4272,10 @@ async fn ingest_motion(
                 attrs: m.steps.map(|s| json!({"steps": s})),
             })
             .collect();
-        if let Err(e) = state.store.movements_add("ios-motion", "me", &batch.actor, &movements) {
+        if let Err(e) = state
+            .store
+            .movements_add("ios-motion", "me", &batch.actor, &movements)
+        {
             tracing::warn!("motion → movement layer: {e:#}");
         }
         let mut episodes_new = 0usize;
@@ -3951,7 +4416,9 @@ async fn ingest_scan(
             )?;
             episodes_new += r.episodes_new;
         }
-        let (obs_new, _) = state.store.observations_add("ios-scan", &batch.actor, &observations)?;
+        let (obs_new, _) = state
+            .store
+            .observations_add("ios-scan", &batch.actor, &observations)?;
         state.store.ingest_log_append(
             &batch.actor,
             "ios-scan",
@@ -3998,7 +4465,9 @@ async fn ingest_focus(
             batch.source.trim()
         };
         let (accepted, duplicates) =
-            state.store.device_states_add(source, &batch.device, &batch.items)?;
+            state
+                .store
+                .device_states_add(source, &batch.device, &batch.items)?;
         state.store.ingest_log_append(
             &batch.actor,
             source,
@@ -4064,8 +4533,16 @@ fn discover_git_repos() -> Vec<Value> {
     let my_email = git(&["config", "--global", "user.email"]).unwrap_or_default();
     // bounded walk: depth ≤ 4, skip the well-known heavy/system dirs
     const SKIP: [&str; 10] = [
-        "Library", "Applications", "Pictures", "Music", "Movies", "node_modules",
-        "target", "vendor", ".Trash", ".cache",
+        "Library",
+        "Applications",
+        "Pictures",
+        "Music",
+        "Movies",
+        "node_modules",
+        "target",
+        "vendor",
+        ".Trash",
+        ".cache",
     ];
     let mut found: Vec<Value> = Vec::new();
     let mut stack: Vec<(std::path::PathBuf, usize)> = vec![(home.clone().into(), 0)];
@@ -4073,7 +4550,9 @@ fn discover_git_repos() -> Vec<Value> {
         if found.len() >= 200 {
             break;
         }
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_dir() {
@@ -4160,10 +4639,9 @@ async fn ingest_status(
     if auth.0.is_some() {
         require_scope(&auth, "read")?;
     }
-    let report =
-        crate::scoped::spawn_blocking(move || state.store.ingest_status())
-            .await
-            .map_err(anyhow::Error::from)??;
+    let report = crate::scoped::spawn_blocking(move || state.store.ingest_status())
+        .await
+        .map_err(anyhow::Error::from)??;
     Ok(Json(report))
 }
 
@@ -4225,7 +4703,9 @@ async fn sync_photos_post(
     Json(batch): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&auth, "peer")?;
-    Ok(Json(json!({"applied": state.store.photo_points_apply(&batch)?})))
+    Ok(Json(
+        json!({"applied": state.store.photo_points_apply(&batch)?}),
+    ))
 }
 
 /// Peer grants/shares feed (v47): ONE sharing posture across a user's
@@ -4245,7 +4725,9 @@ async fn sync_sharing_post(
     Json(batch): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&auth, "peer")?;
-    Ok(Json(json!({"applied": state.store.sharing_sync_apply(&batch)?})))
+    Ok(Json(
+        json!({"applied": state.store.sharing_sync_apply(&batch)?}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -4321,9 +4803,9 @@ async fn auth_logout(
 }
 
 /* ————— hybrid peer sync (deployment modes phase 2) —————
-   The export feed a paired node pulls from; pairing/status/trigger.
-   All traffic is initiated by the node that holds the key (NAT
-   reality) — this daemon never dials out except through sync.rs. */
+The export feed a paired node pulls from; pairing/status/trigger.
+All traffic is initiated by the node that holds the key (NAT
+reality) — this daemon never dials out except through sync.rs. */
 
 #[derive(Deserialize)]
 struct SyncEpisodesParams {
@@ -4378,11 +4860,16 @@ async fn peer_pair(
         return Err(bad_request("peer url must be http(s)://…"));
     }
     if body.key.trim().is_empty() {
-        return Err(bad_request("the peer's key is required (mint it on THAT node)"));
+        return Err(bad_request(
+            "the peer's key is required (mint it on THAT node)",
+        ));
     }
     // Probe before committing: the peer must answer its export feed.
     let probe = reqwest::Client::new()
-        .get(format!("{}/v1/sync/episodes?after=0&limit=1", body.url.trim_end_matches('/')))
+        .get(format!(
+            "{}/v1/sync/episodes?after=0&limit=1",
+            body.url.trim_end_matches('/')
+        ))
         .bearer_auth(body.key.trim())
         .timeout(std::time::Duration::from_secs(10))
         .send()
@@ -4409,17 +4896,31 @@ async fn peer_pair(
     // a NEW pairing always re-offers from zero — stale cursors from a
     // previous peer silently pushed nothing to a fresh node (2026-07-18);
     // idempotency makes this free against a duplicate node
-    state.store.set_consolidation_state("peer_push_cursor", "0")?;
-    state.store.set_consolidation_state("peer_pull_cursor", "0")?;
-    for key in ["peer_scope_push_ts", "peer_scope_pull_ts", "peer_mirror_ts",
-                "peer_telemetry_push_ts", "peer_telemetry_pull_ts",
-                "peer_notif_push_ts", "peer_notif_pull_ts",
-                "peer_verdict_push_ts", "peer_verdict_pull_ts",
-                "peer_bus_cursor", "peer_first_sync_notified", "peer_fail_streak"] {
+    state
+        .store
+        .set_consolidation_state("peer_push_cursor", "0")?;
+    state
+        .store
+        .set_consolidation_state("peer_pull_cursor", "0")?;
+    for key in [
+        "peer_scope_push_ts",
+        "peer_scope_pull_ts",
+        "peer_mirror_ts",
+        "peer_telemetry_push_ts",
+        "peer_telemetry_pull_ts",
+        "peer_notif_push_ts",
+        "peer_notif_pull_ts",
+        "peer_verdict_push_ts",
+        "peer_verdict_pull_ts",
+        "peer_bus_cursor",
+        "peer_first_sync_notified",
+        "peer_fail_streak",
+    ] {
         state.store.set_consolidation_state(key, "")?;
     }
     crate::provisioner::notify_system(
-        &state, "info",
+        &state,
+        "info",
         &format!("Paired with {}", body.name),
         "replication starts within minutes; watch progress on the Peering page",
         Some("peer-paired"),
@@ -4471,7 +4972,9 @@ async fn peer_unpair(
     }
     state.store.remove_peer(&Actor::new(body.actor))?;
     crate::sync::remove_peer_key(&state.home).ok();
-    Ok(Json(json!({"unpaired": true, "remote_key_revoked": remote_revoked})))
+    Ok(Json(
+        json!({"unpaired": true, "remote_key_revoked": remote_revoked}),
+    ))
 }
 
 async fn peer_status(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -4525,10 +5028,9 @@ async fn sync_paused_informed(
     Json(body): Json<PausedInformBody>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&auth, "peer")?;
-    state.store.set_consolidation_state(
-        "peer_sync_paused",
-        if body.paused { "1" } else { "0" },
-    )?;
+    state
+        .store
+        .set_consolidation_state("peer_sync_paused", if body.paused { "1" } else { "0" })?;
     Ok(Json(json!({"paused": body.paused})))
 }
 
@@ -4554,7 +5056,7 @@ async fn peer_sync_now(
 }
 
 /* ————— networked brains (phase 1): the inbound grant surface,
-   outbound friend registry, and grant management ————— */
+outbound friend registry, and grant management ————— */
 
 #[derive(Deserialize)]
 struct ScopesSinceParams {
@@ -4614,7 +5116,9 @@ async fn sync_telemetry_post(
     Json(batch): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&auth, "peer")?;
-    Ok(Json(json!({"applied": state.store.apply_telemetry(&batch)?})))
+    Ok(Json(
+        json!({"applied": state.store.apply_telemetry(&batch)?}),
+    ))
 }
 
 /// v50 ledger peer legs (telemetry pattern: ts watermark, id-keyed
@@ -4635,7 +5139,9 @@ async fn sync_llm_usage_post(
     Json(batch): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&auth, "peer")?;
-    Ok(Json(json!({"applied": state.store.apply_llm_usage(&batch)?})))
+    Ok(Json(
+        json!({"applied": state.store.apply_llm_usage(&batch)?}),
+    ))
 }
 
 /// v51 unified-location peer legs (telemetry pattern) — the phone posts
@@ -4655,7 +5161,9 @@ async fn sync_movements_post(
     Json(batch): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&auth, "peer")?;
-    Ok(Json(json!({"applied": state.store.movements_apply(&batch)?})))
+    Ok(Json(
+        json!({"applied": state.store.movements_apply(&batch)?}),
+    ))
 }
 async fn sync_vehicles_get(
     State(state): State<AppState>,
@@ -4671,7 +5179,9 @@ async fn sync_vehicles_post(
     Json(batch): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&auth, "peer")?;
-    Ok(Json(json!({"applied": state.store.vehicles_apply(&batch)?})))
+    Ok(Json(
+        json!({"applied": state.store.vehicles_apply(&batch)?}),
+    ))
 }
 async fn sync_locations_get(
     State(state): State<AppState>,
@@ -4688,7 +5198,9 @@ async fn sync_locations_post(
     Json(batch): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&auth, "peer")?;
-    Ok(Json(json!({"applied": state.store.observations_apply(&batch)?})))
+    Ok(Json(
+        json!({"applied": state.store.observations_apply(&batch)?}),
+    ))
 }
 
 /// v51 contact-card peer legs (LWW by updated_at — the grants
@@ -4710,7 +5222,9 @@ async fn sync_contacts_post(
     Json(batch): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&auth, "peer")?;
-    Ok(Json(json!({"applied": state.store.contacts_apply(&batch)?})))
+    Ok(Json(
+        json!({"applied": state.store.contacts_apply(&batch)?}),
+    ))
 }
 
 /// v51 device-state peer legs (telemetry pattern).
@@ -4729,7 +5243,9 @@ async fn sync_device_state_post(
     Json(batch): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&auth, "peer")?;
-    Ok(Json(json!({"applied": state.store.device_states_apply(&batch)?})))
+    Ok(Json(
+        json!({"applied": state.store.device_states_apply(&batch)?}),
+    ))
 }
 
 /// LLM traces & accounting are BLANKET-GATED on the vault (Jon
@@ -4753,7 +5269,10 @@ fn require_vault_open_for_traces(state: &AppState) -> Result<(), ApiError> {
 /// load` also opens the sealed env (a keychain round trip), and this is
 /// called per ROW — a 200-row spend report did ~600 of those loads and
 /// took over ten seconds before the cache.
-pub(crate) fn priced(home: &hearthloom_core::paths::Home, model: &str) -> Option<hearthloom_core::provider::ModelPricing> {
+pub(crate) fn priced(
+    home: &hearthloom_core::paths::Home,
+    model: &str,
+) -> Option<hearthloom_core::provider::ModelPricing> {
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
     type Overrides = Vec<(String, hearthloom_core::provider::ModelPricing)>;
@@ -4901,8 +5420,11 @@ async fn llm_spend_view(
 
         // Month to date — independent of the window being looked at.
         let month_start = today.with_day(1).unwrap_or(today);
-        let mut month_cells =
-            store.llm_spend_cells(&iso(month_start), &iso(today + Duration::days(1)), node.as_deref())?;
+        let mut month_cells = store.llm_spend_cells(
+            &iso(month_start),
+            &iso(today + Duration::days(1)),
+            node.as_deref(),
+        )?;
         let (mut month_cost, mut today_cost) = (0.0, 0.0);
         for cell in month_cells.iter_mut() {
             let cost = price(cell).unwrap_or(0.0);
@@ -4917,9 +5439,16 @@ async fn llm_spend_view(
             (_, None) => None,
             (None, Some(_)) => Some(month_cost),
             (Some(_), Some(_)) => {
-                let mut all =
-                    store.llm_spend_cells(&iso(month_start), &iso(today + Duration::days(1)), None)?;
-                Some(all.iter_mut().map(|cell| price(cell).unwrap_or(0.0)).sum::<f64>())
+                let mut all = store.llm_spend_cells(
+                    &iso(month_start),
+                    &iso(today + Duration::days(1)),
+                    None,
+                )?;
+                Some(
+                    all.iter_mut()
+                        .map(|cell| price(cell).unwrap_or(0.0))
+                        .sum::<f64>(),
+                )
             }
         };
         let next_month = if month_start.month() == 12 {
@@ -4932,9 +5461,8 @@ async fn llm_spend_view(
         // Project from COMPLETED days only — a half-finished today would
         // drag the rate down every morning.
         let done_days = (today - month_start).num_days();
-        let projected = (done_days > 0).then(|| {
-            (month_cost - today_cost) / done_days as f64 * days_in_month as f64
-        });
+        let projected = (done_days > 0)
+            .then(|| (month_cost - today_cost) / done_days as f64 * days_in_month as f64);
 
         // Per-question cost: fold the (ask, model) rows into one per ask.
         struct AskSpend {
@@ -4964,16 +5492,22 @@ async fn llm_spend_view(
         let mut costs: Vec<f64> = asks.values().filter(|a| a.priced).map(|a| a.cost).collect();
         costs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let mut ranked: Vec<(&String, &AskSpend)> = asks.iter().collect();
-        ranked.sort_by(|a, b| b.1.cost.partial_cmp(&a.1.cost).unwrap_or(std::cmp::Ordering::Equal));
+        ranked.sort_by(|a, b| {
+            b.1.cost
+                .partial_cmp(&a.1.cost)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         let top: Vec<Value> = ranked
             .into_iter()
             .take(10)
             .map(|(id, spend)| {
                 // The question text, when the ask is still in history
                 // (a deleted one keeps its ledger rows but has no text).
-                let question = store.ask_get(id).ok().flatten().map(|r| {
-                    r.question.chars().take(140).collect::<String>()
-                });
+                let question = store
+                    .ask_get(id)
+                    .ok()
+                    .flatten()
+                    .map(|r| r.question.chars().take(140).collect::<String>());
                 json!({
                     "ask_id": id, "ts": spend.ts, "calls": spend.calls,
                     "cost_usd": spend.cost, "question": question,
@@ -5039,7 +5573,9 @@ async fn llm_budget_set(
     let alerted = crate::scoped::spawn_blocking(move || crate::budget::check(&store_state))
         .await
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
-    Ok(Json(json!({ "monthly_usd": crate::budget::current(&state), "alerted": alerted })))
+    Ok(Json(
+        json!({ "monthly_usd": crate::budget::current(&state), "alerted": alerted }),
+    ))
 }
 
 /// Per-chat debug drill-down: the ask row (full fat transcript — per
@@ -5094,8 +5630,20 @@ async fn monitor_summary(State(state): State<AppState>) -> Result<Json<Value>, A
         let timeline_local = state.store.health_timeline("local", 24)?;
         let timeline_cloud = state.store.health_timeline("cloud", 24)?;
         let mut v = Vec::new();
-        if timeline_local.as_object().map(|o| !o.is_empty()).unwrap_or(false) { v.push("local".into()); }
-        if timeline_cloud.as_object().map(|o| !o.is_empty()).unwrap_or(false) { v.push("cloud".into()); }
+        if timeline_local
+            .as_object()
+            .map(|o| !o.is_empty())
+            .unwrap_or(false)
+        {
+            v.push("local".into());
+        }
+        if timeline_cloud
+            .as_object()
+            .map(|o| !o.is_empty())
+            .unwrap_or(false)
+        {
+            v.push("cloud".into());
+        }
         v
     };
     Ok(Json(json!({
@@ -5190,8 +5738,7 @@ async fn settings_telemetry_test(
 async fn settings_automations(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let mut rows = Vec::new();
     for a in crate::consolidate::AUTOMATIONS {
-        let (enabled, frequency) =
-            crate::consolidate::automation_setting(&state.store, a.key);
+        let (enabled, frequency) = crate::consolidate::automation_setting(&state.store, a.key);
         let last_run = state
             .store
             .consolidation_state(&format!("settings.{}.last_run", a.key))?;
@@ -5247,8 +5794,14 @@ async fn settings_automation_set(
     State(state): State<AppState>,
     Json(body): Json<AutomationSet>,
 ) -> Result<Json<Value>, ApiError> {
-    if !crate::consolidate::AUTOMATIONS.iter().any(|a| a.key == body.key) {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "unknown automation".into()));
+    if !crate::consolidate::AUTOMATIONS
+        .iter()
+        .any(|a| a.key == body.key)
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "unknown automation".into(),
+        ));
     }
     if body.calendar_alone.is_some() && body.key != "visits_finalize" {
         return Err(bad_request("calendar_alone belongs to visits_finalize"));
@@ -5265,8 +5818,14 @@ async fn settings_automation_set(
         )?;
     }
     if let Some(frequency) = &body.frequency {
-        if !crate::consolidate::FREQUENCIES.iter().any(|(n, _)| n == frequency) {
-            return Err(ApiError(StatusCode::BAD_REQUEST, "unknown frequency".into()));
+        if !crate::consolidate::FREQUENCIES
+            .iter()
+            .any(|(n, _)| n == frequency)
+        {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                "unknown frequency".into(),
+            ));
         }
         state
             .store
@@ -5481,8 +6040,14 @@ async fn settings_automation_run(
     State(state): State<AppState>,
     Path(key): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let Some(auto) = crate::consolidate::AUTOMATIONS.iter().find(|a| a.key == key) else {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "unknown automation".into()));
+    let Some(auto) = crate::consolidate::AUTOMATIONS
+        .iter()
+        .find(|a| a.key == key)
+    else {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "unknown automation".into(),
+        ));
     };
     if auto.llm && state.llm.is_none() {
         return Err(ApiError(
@@ -5530,14 +6095,22 @@ struct MonitorHealthParams {
     #[serde(default = "default_hours")]
     hours: i64,
 }
-fn default_node() -> String { "local".into() }
-fn default_hours() -> i64 { 24 }
+fn default_node() -> String {
+    "local".into()
+}
+fn default_hours() -> i64 {
+    24
+}
 
 async fn monitor_health(
     State(state): State<AppState>,
     Query(params): Query<MonitorHealthParams>,
 ) -> Result<Json<Value>, ApiError> {
-    let series = |name: &str| state.store.telemetry_series(&params.node, name, params.hours);
+    let series = |name: &str| {
+        state
+            .store
+            .telemetry_series(&params.node, name, params.hours)
+    };
     Ok(Json(json!({
         "node": params.node,
         "timeline": state.store.health_timeline(&params.node, params.hours)?,
@@ -5563,9 +6136,15 @@ struct MonitorLogsParams {
     #[serde(default = "default_log_limit")]
     limit: usize,
 }
-fn default_sort() -> String { "ts".into() }
-fn default_desc() -> bool { true }
-fn default_log_limit() -> usize { 50 }
+fn default_sort() -> String {
+    "ts".into()
+}
+fn default_desc() -> bool {
+    true
+}
+fn default_log_limit() -> usize {
+    50
+}
 
 async fn monitor_logs(
     State(state): State<AppState>,
@@ -5613,7 +6192,10 @@ async fn sync_operational_get(
         .map_err(anyhow::Error::from)??;
     // The visit rule travels both ways (visits.rs): set on this node, it
     // reaches the one that dials us through this pull.
-    if let (Some(obj), Some(rule)) = (out.as_object_mut(), crate::visits::rule_envelope(&state.store)) {
+    if let (Some(obj), Some(rule)) = (
+        out.as_object_mut(),
+        crate::visits::rule_envelope(&state.store),
+    ) {
         obj.insert("visit_rule".into(), rule);
     }
     Ok(Json(out))
@@ -5640,7 +6222,9 @@ async fn sync_operational(
                 .consolidation_state("network.profile.updated_at")?
                 .unwrap_or_default();
             if stamp > local_stamp.as_str() {
-                state.store.set_consolidation_state("network.profile", value)?;
+                state
+                    .store
+                    .set_consolidation_state("network.profile", value)?;
                 state
                     .store
                     .set_consolidation_state("network.profile.updated_at", stamp)?;
@@ -5662,12 +6246,16 @@ async fn sync_operational(
     }
     if llm_key_adopted {
         crate::provisioner::notify_system(
-            &state, "info", "AI key adopted from your other node",
+            &state,
+            "info",
+            "AI key adopted from your other node",
             "thinking features come on after the imminent restart",
             Some("llm-key-adopted"),
         );
     }
-    Ok(Json(json!({"applied": applied, "llm_key_adopted": llm_key_adopted})))
+    Ok(Json(
+        json!({"applied": applied, "llm_key_adopted": llm_key_adopted}),
+    ))
 }
 
 /// The push bus (15b), subscribe side: a counterpart holds a long-lived
@@ -5847,7 +6435,9 @@ async fn export_start(State(state): State<AppState>) -> Result<Json<Value>, ApiE
         ));
     }
     let Some(guard) = state.try_start_automation("export-full") else {
-        return Ok(Json(json!({"started": false, "note": "an export is already running"})));
+        return Ok(Json(
+            json!({"started": false, "note": "an export is already running"}),
+        ));
     };
     let bg = state.clone();
     tokio::spawn(async move {
@@ -5860,7 +6450,10 @@ async fn export_start(State(state): State<AppState>) -> Result<Json<Value>, ApiE
 async fn export_status(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let mut p = crate::export::progress(&state);
     if let Some(obj) = p.as_object_mut() {
-        obj.insert("running".into(), json!(state.is_automation_running("export-full")));
+        obj.insert(
+            "running".into(),
+            json!(state.is_automation_running("export-full")),
+        );
         obj.insert("vault_locked".into(), json!(state.store.vault_status().0));
     }
     Ok(Json(p))
@@ -5876,7 +6469,12 @@ async fn export_download(State(state): State<AppState>) -> Result<Response, ApiE
                 .filter(|e| e.file_name().to_string_lossy().ends_with(".zip"))
                 .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
         })
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no export is ready — start one first".into()))?;
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::NOT_FOUND,
+                "no export is ready — start one first".into(),
+            )
+        })?;
     let name = newest.file_name().to_string_lossy().into_owned();
     let file = tokio::fs::File::open(newest.path())
         .await
@@ -5888,7 +6486,8 @@ async fn export_download(State(state): State<AppState>) -> Result<Response, ApiE
         "application/zip".parse().unwrap(),
     );
     if let Ok(cd) = format!("attachment; filename=\"{name}\"").parse() {
-        resp.headers_mut().insert(axum::http::header::CONTENT_DISPOSITION, cd);
+        resp.headers_mut()
+            .insert(axum::http::header::CONTENT_DISPOSITION, cd);
     }
     Ok(resp)
 }
@@ -5905,7 +6504,8 @@ async fn import_restore(
     use futures_util::StreamExt;
     use tokio::io::AsyncWriteExt;
     let staging = state.home.root().join("exports");
-    std::fs::create_dir_all(&staging).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    std::fs::create_dir_all(&staging)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let upload = staging.join("restore-upload.zip");
     let mut file = tokio::fs::File::create(&upload)
         .await
@@ -5925,7 +6525,8 @@ async fn import_restore(
         let _ = std::fs::remove_file(&upload);
         return Err(bad_request("upload the export zip as the request body"));
     }
-    let out = crate::export::stage_restore(&state, &upload).map_err(|e| bad_request(format!("{e:#}")))?;
+    let out =
+        crate::export::stage_restore(&state, &upload).map_err(|e| bad_request(format!("{e:#}")))?;
     let _ = std::fs::remove_file(&upload);
     tokio::spawn(async {
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
@@ -5936,7 +6537,7 @@ async fn import_restore(
 }
 
 /* ————— onboarding state: "" = active (nag), done, dismissed —
-   server-side so it follows the record across browsers/peers ————— */
+server-side so it follows the record across browsers/peers ————— */
 
 async fn onboarding_get(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!({
@@ -5955,9 +6556,13 @@ async fn onboarding_set(
     Json(body): Json<OnboardingBody>,
 ) -> Result<Json<Value>, ApiError> {
     if !["", "active", "done", "dismissed"].contains(&body.state.as_str()) {
-        return Err(bad_request("state must be \"\", active, done, or dismissed"));
+        return Err(bad_request(
+            "state must be \"\", active, done, or dismissed",
+        ));
     }
-    state.store.set_consolidation_state("onboarding.state", &body.state)?;
+    state
+        .store
+        .set_consolidation_state("onboarding.state", &body.state)?;
     Ok(Json(json!({"state": body.state})))
 }
 
@@ -6003,7 +6608,9 @@ async fn notification_create(
         body.severity.as_deref().unwrap_or("info"),
         &body.title,
         &body.body,
-        body.link.as_deref().map(|l| (l, body.link_label.as_deref())),
+        body.link
+            .as_deref()
+            .map(|l| (l, body.link_label.as_deref())),
         body.dedupe_key.as_deref(),
     )?;
     crate::bus::touch(&state, "notification.created");
@@ -6014,18 +6621,24 @@ async fn notification_read(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    Ok(Json(json!({"changed": state.store.notification_mark(Some(&id), "read")?})))
+    Ok(Json(
+        json!({"changed": state.store.notification_mark(Some(&id), "read")?}),
+    ))
 }
 
 async fn notification_dismiss(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    Ok(Json(json!({"changed": state.store.notification_mark(Some(&id), "dismiss")?})))
+    Ok(Json(
+        json!({"changed": state.store.notification_mark(Some(&id), "dismiss")?}),
+    ))
 }
 
 async fn notifications_read_all(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(json!({"changed": state.store.notification_mark(None, "read_all")?})))
+    Ok(Json(
+        json!({"changed": state.store.notification_mark(None, "read_all")?}),
+    ))
 }
 
 /// Extract + verify the control token (X-Provisioner-Token). 404 when no
@@ -6062,7 +6675,12 @@ async fn provisioner_killswitch(
             .map_err(|e| bad_request(format!("{e:#}")))?;
     }
     crate::provisioner::set_killswitch(
-        &state, &sub, body.active, &body.message, body.link.as_deref(), body.allow_export,
+        &state,
+        &sub,
+        body.active,
+        &body.message,
+        body.link.as_deref(),
+        body.allow_export,
     )?;
     Ok(Json(json!({"active": body.active})))
 }
@@ -6094,7 +6712,9 @@ async fn provisioner_notify(
         body.severity.as_deref().unwrap_or("info"),
         &body.title,
         &body.body,
-        body.link.as_deref().map(|l| (l, body.link_label.as_deref())),
+        body.link
+            .as_deref()
+            .map(|l| (l, body.link_label.as_deref())),
         body.dedupe_key.as_deref(),
     )?;
     crate::bus::touch(&state, "notification.created");
@@ -6218,7 +6838,11 @@ async fn sync_journal_get(
     require_scope(&auth, "peer")?;
     // relay what other nodes sent; skip only the caller's own entries
     let caller = auth.0.as_ref().map(|c| c.name.clone()).unwrap_or_default();
-    Ok(Json(state.store.journal_export_for(params.after, 500, Some(&caller))?))
+    Ok(Json(state.store.journal_export_for(
+        params.after,
+        500,
+        Some(&caller),
+    )?))
 }
 
 async fn sync_journal_post(
@@ -6239,7 +6863,9 @@ async fn sync_journal_post(
 async fn llm_resume(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     state.store.set_consolidation_state("llm.blocked", "")?;
     crate::provisioner::notify_system(
-        &state, "info", "AI provider resumed",
+        &state,
+        "info",
+        "AI provider resumed",
         "thinking passes pick the backlog back up from the next cycle",
         Some("llm-blocked"),
     );
@@ -6302,7 +6928,9 @@ async fn sync_notifications_post(
     Json(batch): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&auth, "peer")?;
-    Ok(Json(json!({"applied": state.store.apply_notifications(&batch)?})))
+    Ok(Json(
+        json!({"applied": state.store.apply_notifications(&batch)?}),
+    ))
 }
 
 /// Phase-5 receiver: adopt the sender's LLM config from the operational
@@ -6323,7 +6951,9 @@ fn apply_llm_envelope(state: &AppState, llm: Option<&Value>) -> bool {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or("anthropic")
         .to_string();
-    let _ = state.store.set_consolidation_state("llm.provider", &provider);
+    let _ = state
+        .store
+        .set_consolidation_state("llm.provider", &provider);
     for tier in ["low", "medium", "high"] {
         if let Some(m) = llm
             .get(&format!("model_{tier}"))
@@ -6357,7 +6987,10 @@ fn apply_llm_envelope(state: &AppState, llm: Option<&Value>) -> bool {
     // different keys for the same provider (rotation stays a deliberate
     // per-node act). See the design log 2026-07-13.
     let env = crate::integrations::provider_key_env(&provider);
-    if std::env::var(env).ok().is_some_and(|k| !k.trim().is_empty()) {
+    if std::env::var(env)
+        .ok()
+        .is_some_and(|k| !k.trim().is_empty())
+    {
         return false; // already keyed for this provider — leave it
     }
     if hearthloom_core::secrets::set_env_vars(state.home.root(), &[(env, &key)]).is_err() {
@@ -6434,7 +7067,13 @@ async fn network_profile(
             .consolidation_state("network.profile")?
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_else(|| json!({}));
-        if card.get("name").and_then(|n| n.as_str()).map(str::trim).unwrap_or("").is_empty() {
+        if card
+            .get("name")
+            .and_then(|n| n.as_str())
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+        {
             // an uncurated card still has a name: the admin's email localpart
             let fallback = store
                 .admin_email()?
@@ -6477,7 +7116,9 @@ async fn network_tasks_get(
     .await
     .map_err(anyhow::Error::from)?
     .map_err(|e| ApiError(StatusCode::FORBIDDEN, format!("{e:#}")))?;
-    Ok(Json(json!({"tasks": tasks, "preferred_url": state.store.network_address()?})))
+    Ok(Json(
+        json!({"tasks": tasks, "preferred_url": state.store.network_address()?}),
+    ))
 }
 
 async fn network_relationships_get(
@@ -6487,10 +7128,11 @@ async fn network_relationships_get(
     require_scope(&auth, "friend")?;
     let friend = friend_name(&auth);
     let store = state.store.clone();
-    let relationships = crate::scoped::spawn_blocking(move || store.network_relationships(&friend, 200))
-        .await
-        .map_err(anyhow::Error::from)?
-        .map_err(|e| ApiError(StatusCode::FORBIDDEN, format!("{e:#}")))?;
+    let relationships =
+        crate::scoped::spawn_blocking(move || store.network_relationships(&friend, 200))
+            .await
+            .map_err(anyhow::Error::from)?
+            .map_err(|e| ApiError(StatusCode::FORBIDDEN, format!("{e:#}")))?;
     Ok(Json(json!({"relationships": relationships,
                    "preferred_url": state.store.network_address()?})))
 }
@@ -6506,7 +7148,9 @@ async fn network_notes_get(
         .await
         .map_err(anyhow::Error::from)?
         .map_err(|e| ApiError(StatusCode::FORBIDDEN, format!("{e:#}")))?;
-    Ok(Json(json!({"notes": notes, "preferred_url": state.store.network_address()?})))
+    Ok(Json(
+        json!({"notes": notes, "preferred_url": state.store.network_address()?}),
+    ))
 }
 
 async fn network_note_get(
@@ -6554,8 +7198,7 @@ async fn network_offer(
         for (group, group_grant) in &access.groups {
             grants.push(json!({"via": "group", "group": group.name, "grant": group_grant}));
         }
-        let bundle_cursor = store
-            .network_shared_cursor(&friend)?;
+        let bundle_cursor = store.network_shared_cursor(&friend)?;
         Ok(json!({
             "grants": grants,
             "classes": grant.classes, "spheres": grant.spheres,
@@ -6652,7 +7295,9 @@ async fn groups_mutate(
     let refuse = |e: anyhow::Error| bad_request(format!("{e:#}"));
     let out = match body.action.as_str() {
         "create" => json!({"group": store.create_group(&actor, &body.name).map_err(refuse)?}),
-        "rename" => json!({"group": store.rename_group(&actor, &body.id, &body.name).map_err(refuse)?}),
+        "rename" => {
+            json!({"group": store.rename_group(&actor, &body.id, &body.name).map_err(refuse)?})
+        }
         "members" => {
             json!({"group": store.set_group_members(&actor, &body.id, &body.members).map_err(refuse)?})
         }
@@ -6660,7 +7305,11 @@ async fn groups_mutate(
             json!({"group": store.set_group_sharing(&actor, &body.id, &body.sharing).map_err(refuse)?})
         }
         "delete" => json!({"deleted": store.delete_group(&actor, &body.id)?}),
-        _ => return Err(bad_request("action must be create|rename|members|sharing|delete")),
+        _ => {
+            return Err(bad_request(
+                "action must be create|rename|members|sharing|delete",
+            ))
+        }
     };
     crate::bus::touch(&state, "operational.changed");
     Ok(Json(out))
@@ -6709,8 +7358,12 @@ async fn network_task_toggle(
     let what = out.get("done").and_then(|d| d.as_i64()).unwrap_or(0);
     let total = out.get("total").and_then(|t| t.as_i64()).unwrap_or(0);
     crate::provisioner::notify_system(
-        &state, "info",
-        &format!("{fname} {} an item", if done { "checked off" } else { "unchecked" }),
+        &state,
+        "info",
+        &format!(
+            "{fname} {} an item",
+            if done { "checked off" } else { "unchecked" }
+        ),
         &format!("\"{text}\" — now {what} of {total} done"),
         None,
     );
@@ -6761,7 +7414,9 @@ async fn mycard_set(
         return Err(bad_request("that avatar is too big — keep it under 1MB"));
     }
     if !avatar.is_empty() && !avatar.starts_with("https://") && !avatar.starts_with("data:image/") {
-        return Err(bad_request("avatar must be an https:// URL or an uploaded image"));
+        return Err(bad_request(
+            "avatar must be an https:// URL or an uploaded image",
+        ));
     }
     let card = json!({
         "name": body.name.trim(),
@@ -6775,9 +7430,10 @@ async fn mycard_set(
         .store
         .set_consolidation_state("network.profile", &card.to_string())?;
     // the LWW stamp the peer mirror uses — the card follows the record
-    state
-        .store
-        .set_consolidation_state("network.profile.updated_at", &hearthloom_core::time::now_utc())?;
+    state.store.set_consolidation_state(
+        "network.profile.updated_at",
+        &hearthloom_core::time::now_utc(),
+    )?;
     Ok(Json(card))
 }
 
@@ -6820,10 +7476,14 @@ async fn sharing_list(
     Query(params): Query<SharingListParams>,
 ) -> Result<Json<Value>, ApiError> {
     if !params.friend.is_empty() {
-        return Ok(Json(json!({"shares": state.store.shares_to_friend(&params.friend)?})));
+        return Ok(Json(
+            json!({"shares": state.store.shares_to_friend(&params.friend)?}),
+        ));
     }
     if !params.kind.is_empty() && !params.item_id.is_empty() {
-        return Ok(Json(json!({"shares": state.store.item_shares(&params.kind, &params.item_id)?})));
+        return Ok(Json(
+            json!({"shares": state.store.item_shares(&params.kind, &params.item_id)?}),
+        ));
     }
     // no filter: everything — one fetch paints every badge
     Ok(Json(json!({"shares": state.store.all_shares()?})))
@@ -6873,7 +7533,9 @@ struct UnclaimBody {
 }
 
 #[derive(Deserialize)]
-struct RetriageBody { actor: String }
+struct RetriageBody {
+    actor: String,
+}
 
 async fn reviews_retriage(
     State(state): State<AppState>,
@@ -6883,11 +7545,10 @@ async fn reviews_retriage(
         return Err(bad_request("actor is required on every write"));
     }
     let store = state.store.clone();
-    let cleared = crate::scoped::spawn_blocking(move || {
-        store.retriage_reviews(&Actor::new(body.actor))
-    })
-    .await
-    .map_err(anyhow::Error::from)??;
+    let cleared =
+        crate::scoped::spawn_blocking(move || store.retriage_reviews(&Actor::new(body.actor)))
+            .await
+            .map_err(anyhow::Error::from)??;
     Ok(Json(json!({"cleared": cleared})))
 }
 
@@ -6915,13 +7576,20 @@ async fn sharing_mutate(
     let out = match body.action.as_str() {
         "share" => state
             .store
-            .share_item(&actor, &body.kind, &body.item_id, &body.friend,
-                body.collaborate, body.expires_at.as_deref())
+            .share_item(
+                &actor,
+                &body.kind,
+                &body.item_id,
+                &body.friend,
+                body.collaborate,
+                body.expires_at.as_deref(),
+            )
             .map_err(|e| bad_request(format!("{e:#}")))?,
         "unshare" => {
-            let removed = state
-                .store
-                .unshare_item(&actor, &body.kind, &body.item_id, &body.friend)?;
+            let removed =
+                state
+                    .store
+                    .unshare_item(&actor, &body.kind, &body.item_id, &body.friend)?;
             json!({"unshared": removed})
         }
         _ => return Err(bad_request("action must be share|unshare")),
@@ -6999,7 +7667,9 @@ async fn friends_fork(
                 task.get("kind").and_then(|k| k.as_str()).unwrap_or("plain"),
                 &format!(
                     "{} (from {name}'s hearth)",
-                    task.get("description").and_then(|d| d.as_str()).unwrap_or("")
+                    task.get("description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("")
                 ),
                 payload.as_ref(),
                 None,
@@ -7023,7 +7693,9 @@ async fn friends_fork(
                 &state.home,
                 &format!(
                     "{} (from {name})",
-                    note.get("title").and_then(|t| t.as_str()).unwrap_or("Shared note")
+                    note.get("title")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("Shared note")
                 ),
                 note.get("body").and_then(|b| b.as_str()).unwrap_or(""),
                 &[],
@@ -7052,8 +7724,8 @@ async fn friends_offer(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let out = crate::network_out::offer(&state, &name)
-        .map_err(|e| bad_request(format!("{e:#}")))?;
+    let out =
+        crate::network_out::offer(&state, &name).map_err(|e| bad_request(format!("{e:#}")))?;
     Ok(Json(out))
 }
 
@@ -7184,7 +7856,8 @@ async fn friend_connect(
     // the minimal card from the connection name.
     let card = crate::network_out::ensure_friend_card(&state, &body.name).ok();
     crate::provisioner::notify_system(
-        &state, "info",
+        &state,
+        "info",
         &format!("Connected to {}'s brain", body.name),
         "Ask can now search what they've granted you — manage grants on the Network page",
         None,
@@ -7250,7 +7923,9 @@ async fn friend_remove(
     // what their node told us about its groups goes with the connection
     state.store.clear_peer_groups(&name).ok();
     crate::network_keys::remove_friend_key(&state.home, &name).ok();
-    Ok(Json(json!({"removed": name, "remote_key_revoked": remote_revoked})))
+    Ok(Json(
+        json!({"removed": name, "remote_key_revoked": remote_revoked}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -7343,7 +8018,8 @@ async fn grant_revoke(
     // Also revoke their key so the door is fully shut.
     if let Ok(keys) = state.store.list_api_keys() {
         for key in keys {
-            if key.name == friend && key.revoked_at.is_none()
+            if key.name == friend
+                && key.revoked_at.is_none()
                 && key.scopes.iter().any(|s| s == "friend")
             {
                 let _ = state
@@ -7367,12 +8043,12 @@ async fn network_accesses(State(state): State<AppState>) -> Result<Json<Value>, 
 }
 
 /* ————— the discovery manifest + /brain tree (Tier 2a) —————
-   The brain rendered as a mountable filesystem for HearthFS's manifest-
-   driven ApiSource. Requires a PAT with the `read` scope ALWAYS (new
-   integration surfaces launch authenticated). Every leaf resolves
-   through `brain_fs.rs`, which hardcodes the vault-LOCKED view — mount
-   clients cache responses, so an unlock window must never cross this
-   boundary (BRAIN.md itself is private-excluded by construction). */
+The brain rendered as a mountable filesystem for HearthFS's manifest-
+driven ApiSource. Requires a PAT with the `read` scope ALWAYS (new
+integration surfaces launch authenticated). Every leaf resolves
+through `brain_fs.rs`, which hardcodes the vault-LOCKED view — mount
+clients cache responses, so an unlock window must never cross this
+boundary (BRAIN.md itself is private-excluded by construction). */
 
 async fn discovery_manifest(
     axum::Extension(auth): axum::Extension<AuthInfo>,
@@ -7411,7 +8087,10 @@ async fn discovery_manifest(
 
 fn markdown_response(body: String) -> Response {
     (
-        [(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/markdown; charset=utf-8",
+        )],
         body,
     )
         .into_response()
@@ -7574,61 +8253,63 @@ async fn ingest_local(
     }
     let adapter = body.adapter.clone();
     let st = state.clone();
-    let result = crate::scoped::spawn_blocking(move || -> anyhow::Result<Vec<hearthloom_core::EpisodeDraft>> {
-        let scope = body.scope.as_deref();
-        match body.adapter.as_str() {
-            "imessage" => {
-                let path = match &body.path {
-                    Some(p) => std::path::PathBuf::from(p),
-                    None => std::path::PathBuf::from(std::env::var("HOME")?)
-                        .join("Library/Messages/chat.db"),
-                };
-                hearthloom_adapters::imessage::ingest(&path, scope)
-            }
-            "photos" => {
-                let path = match &body.path {
-                    Some(p) => std::path::PathBuf::from(p),
-                    None => hearthloom_adapters::photos::default_library()?,
-                };
-                // v47: the manual scan feeds the photo-point union too
-                if let Ok(points) = hearthloom_adapters::photos::scan_points(&path) {
-                    let _ = crate::live_photos::store_scan_points(&st, "mac", &points);
+    let result = crate::scoped::spawn_blocking(
+        move || -> anyhow::Result<Vec<hearthloom_core::EpisodeDraft>> {
+            let scope = body.scope.as_deref();
+            match body.adapter.as_str() {
+                "imessage" => {
+                    let path = match &body.path {
+                        Some(p) => std::path::PathBuf::from(p),
+                        None => std::path::PathBuf::from(std::env::var("HOME")?)
+                            .join("Library/Messages/chat.db"),
+                    };
+                    hearthloom_adapters::imessage::ingest(&path, scope)
                 }
-                hearthloom_adapters::photos::ingest(&path, scope)
+                "photos" => {
+                    let path = match &body.path {
+                        Some(p) => std::path::PathBuf::from(p),
+                        None => hearthloom_adapters::photos::default_library()?,
+                    };
+                    // v47: the manual scan feeds the photo-point union too
+                    if let Ok(points) = hearthloom_adapters::photos::scan_points(&path) {
+                        let _ = crate::live_photos::store_scan_points(&st, "mac", &points);
+                    }
+                    hearthloom_adapters::photos::ingest(&path, scope)
+                }
+                "chrome" => {
+                    let path = match &body.path {
+                        Some(p) => std::path::PathBuf::from(p),
+                        None => hearthloom_adapters::chrome::default_data_dir()?,
+                    };
+                    hearthloom_adapters::chrome::ingest(&path, scope)
+                }
+                "rewind" => {
+                    let path = match &body.path {
+                        Some(p) => std::path::PathBuf::from(p),
+                        None => hearthloom_adapters::rewind::default_dir()?,
+                    };
+                    hearthloom_adapters::rewind::ingest(&path, scope)
+                }
+                "claude-code" => {
+                    let path = match &body.path {
+                        Some(p) => std::path::PathBuf::from(p),
+                        None => std::path::PathBuf::from(std::env::var("HOME")?)
+                            .join(".claude/projects"),
+                    };
+                    hearthloom_adapters::claude_code::ingest(&path, scope)
+                }
+                // The wizard's instant-kindling path: one repo by path.
+                "git" => {
+                    let path = body
+                        .path
+                        .as_deref()
+                        .ok_or_else(|| anyhow::anyhow!("git needs a repo path"))?;
+                    hearthloom_adapters::git::ingest(std::path::Path::new(path), scope)
+                }
+                other => Err(anyhow::anyhow!("unknown local adapter: {other}")),
             }
-            "chrome" => {
-                let path = match &body.path {
-                    Some(p) => std::path::PathBuf::from(p),
-                    None => hearthloom_adapters::chrome::default_data_dir()?,
-                };
-                hearthloom_adapters::chrome::ingest(&path, scope)
-            }
-            "rewind" => {
-                let path = match &body.path {
-                    Some(p) => std::path::PathBuf::from(p),
-                    None => hearthloom_adapters::rewind::default_dir()?,
-                };
-                hearthloom_adapters::rewind::ingest(&path, scope)
-            }
-            "claude-code" => {
-                let path = match &body.path {
-                    Some(p) => std::path::PathBuf::from(p),
-                    None => std::path::PathBuf::from(std::env::var("HOME")?)
-                        .join(".claude/projects"),
-                };
-                hearthloom_adapters::claude_code::ingest(&path, scope)
-            }
-            // The wizard's instant-kindling path: one repo by path.
-            "git" => {
-                let path = body
-                    .path
-                    .as_deref()
-                    .ok_or_else(|| anyhow::anyhow!("git needs a repo path"))?;
-                hearthloom_adapters::git::ingest(std::path::Path::new(path), scope)
-            }
-            other => Err(anyhow::anyhow!("unknown local adapter: {other}")),
-        }
-    })
+        },
+    )
     .await
     .map_err(anyhow::Error::from)?;
 
@@ -7660,10 +8341,7 @@ async fn ingest_local(
 /// into the store, logs progress, and lands an `mbox_ingest_done`
 /// mutations event on completion (idempotency makes crashed or repeated
 /// runs safe to re-issue).
-fn ingest_mbox_background(
-    state: AppState,
-    body: IngestLocalBody,
-) -> Result<Json<Value>, ApiError> {
+fn ingest_mbox_background(state: AppState, body: IngestLocalBody) -> Result<Json<Value>, ApiError> {
     let path = std::path::PathBuf::from(
         body.path
             .clone()
@@ -7722,9 +8400,13 @@ fn ingest_mbox_background(
                     started.elapsed()
                 );
                 crate::provisioner::notify_system(
-                    &state, "info", "✓ mbox import finished",
-                    "the archive is in the record — details in daemon.log", Some("mbox-import"));
-                    let _ = state.store.record_event(
+                    &state,
+                    "info",
+                    "✓ mbox import finished",
+                    "the archive is in the record — details in daemon.log",
+                    Some("mbox-import"),
+                );
+                let _ = state.store.record_event(
                     &Actor::new(body.actor),
                     "mbox_ingest_done",
                     &json!({
@@ -7786,8 +8468,7 @@ fn ingest_openai_background(
         let scope = body.scope.as_deref();
         let media_out = state.home.raw_dir().join("openai/media");
         let result = (|| -> anyhow::Result<(usize, usize, usize)> {
-            let drafts =
-                hearthloom_adapters::openai::ingest(&root, Some(&media_out), scope)?;
+            let drafts = hearthloom_adapters::openai::ingest(&root, Some(&media_out), scope)?;
             let parsed = drafts.len();
             tracing::info!(
                 "openai ingest {}: {parsed} conversations parsed, applying…",
@@ -7820,9 +8501,13 @@ fn ingest_openai_background(
                     started.elapsed()
                 );
                 crate::provisioner::notify_system(
-                    &state, "info", "✓ openai import finished",
-                    "the archive is in the record — details in daemon.log", Some("openai-import"));
-                    let _ = state.store.record_event(
+                    &state,
+                    "info",
+                    "✓ openai import finished",
+                    "the archive is in the record — details in daemon.log",
+                    Some("openai-import"),
+                );
+                let _ = state.store.record_event(
                     &Actor::new(body.actor),
                     "openai_ingest_done",
                     &json!({
@@ -7871,7 +8556,10 @@ fn ingest_facebook_background(
         let result = (|| -> anyhow::Result<(usize, usize, usize, usize)> {
             let drafts = hearthloom_adapters::facebook::ingest(&root, scope)?;
             let parsed = drafts.len();
-            tracing::info!("facebook ingest {}: {parsed} drafts parsed, applying…", root.display());
+            tracing::info!(
+                "facebook ingest {}: {parsed} drafts parsed, applying…",
+                root.display()
+            );
             let mut new = 0usize;
             let mut existing = 0usize;
             for chunk in drafts.chunks(500) {
@@ -7916,9 +8604,13 @@ fn ingest_facebook_background(
                     started.elapsed()
                 );
                 crate::provisioner::notify_system(
-                    &state, "info", "✓ facebook import finished",
-                    "the archive is in the record — details in daemon.log", Some("facebook-import"));
-                    let _ = state.store.record_event(
+                    &state,
+                    "info",
+                    "✓ facebook import finished",
+                    "the archive is in the record — details in daemon.log",
+                    Some("facebook-import"),
+                );
+                let _ = state.store.record_event(
                     &Actor::new(body.actor),
                     "facebook_ingest_done",
                     &json!({
@@ -7993,13 +8685,16 @@ fn ingest_mdvault_background(
                     &serde_json::to_value(&report).unwrap_or_default(),
                 );
                 crate::provisioner::notify_system(
-                    &state, "info",
+                    &state,
+                    "info",
                     "✓ markdown import finished",
                     "the archive is in the record — details in daemon.log",
                     Some("markdown-import"),
                 );
             }
-            Err(err) => tracing::error!("markdown vault import {}: FAILED: {err:#}", root.display()),
+            Err(err) => {
+                tracing::error!("markdown vault import {}: FAILED: {err:#}", root.display())
+            }
         }
     });
     Ok(Json(json!({
@@ -8026,7 +8721,10 @@ fn ingest_notion_background(
         )
     }));
     if !root.is_dir() {
-        return Err(bad_request(format!("no such directory: {}", root.display())));
+        return Err(bad_request(format!(
+            "no such directory: {}",
+            root.display()
+        )));
     }
     let display = root.display().to_string();
     crate::scoped::spawn_blocking(move || {
@@ -8053,7 +8751,10 @@ fn ingest_notion_background(
                     if report.big_csvs.is_empty() {
                         String::new()
                     } else {
-                        format!(", databases too big for table notes: {}", report.big_csvs.join("; "))
+                        format!(
+                            ", databases too big for table notes: {}",
+                            report.big_csvs.join("; ")
+                        )
                     },
                     started.elapsed()
                 );
@@ -8063,7 +8764,8 @@ fn ingest_notion_background(
                     &serde_json::to_value(&report).unwrap_or_default(),
                 );
                 crate::provisioner::notify_system(
-                    &state, "info",
+                    &state,
+                    "info",
                     "✓ notion import finished",
                     "the archive is in the record — details in daemon.log",
                     Some("notion-import"),
@@ -8159,9 +8861,13 @@ fn ingest_linkedin_background(
                     started.elapsed()
                 );
                 crate::provisioner::notify_system(
-                    &state, "info", "✓ linkedin import finished",
-                    "the archive is in the record — details in daemon.log", Some("linkedin-import"));
-                    let _ = state.store.record_event(
+                    &state,
+                    "info",
+                    "✓ linkedin import finished",
+                    "the archive is in the record — details in daemon.log",
+                    Some("linkedin-import"),
+                );
+                let _ = state.store.record_event(
                     &Actor::new(body.actor),
                     "linkedin_ingest_done",
                     &json!({
@@ -8238,16 +8944,28 @@ fn ingest_health_background(
                 }
                 Ok(())
             })?;
-            tracing::info!("apple-health {}: scanned {samples} samples, building sidecar rollups", xml.display());
+            tracing::info!(
+                "apple-health {}: scanned {samples} samples, building sidecar rollups",
+                xml.display()
+            );
             writer.finish(&table.map)?;
 
             let scope = body.scope.as_deref();
-            let export_dir = xml.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
+            let export_dir = xml
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default();
             let mut episodes = table.into_episodes(scope);
             let day_count = episodes.len();
             episodes.extend(workouts.iter().map(|w| ah::workout_to_episode(w, scope)));
-            episodes.extend(ah::ingest_clinical(&export_dir.join("clinical-records"), scope)?);
-            episodes.extend(ah::ingest_ecg(&export_dir.join("electrocardiograms"), scope)?);
+            episodes.extend(ah::ingest_clinical(
+                &export_dir.join("clinical-records"),
+                scope,
+            )?);
+            episodes.extend(ah::ingest_ecg(
+                &export_dir.join("electrocardiograms"),
+                scope,
+            )?);
             let total = episodes.len();
 
             let mut new = 0usize;
@@ -8273,9 +8991,13 @@ fn ingest_health_background(
                     started.elapsed()
                 );
                 crate::provisioner::notify_system(
-                    &state, "info", "✓ health import finished",
-                    "the archive is in the record — details in daemon.log", Some("health-import"));
-                    let _ = state.store.record_event(
+                    &state,
+                    "info",
+                    "✓ health import finished",
+                    "the archive is in the record — details in daemon.log",
+                    Some("health-import"),
+                );
+                let _ = state.store.record_event(
                     &Actor::new(body.actor),
                     "health_ingest_done",
                     &json!({
@@ -8321,7 +9043,11 @@ async fn propose(
         actor: write_actor(&auth, body.actor).actor,
         session_id: body.session_id,
     };
-    let entries: Vec<Value> = body.entries.iter().map(hearthloom_core::store::outside_proposal).collect();
+    let entries: Vec<Value> = body
+        .entries
+        .iter()
+        .map(hearthloom_core::store::outside_proposal)
+        .collect();
     let ids = state.store.propose_memories(&actor, &entries)?;
     Ok(Json(json!({"quarantined": ids})))
 }
@@ -8426,9 +9152,7 @@ async fn reviews(
     State(state): State<AppState>,
     Query(params): Query<ReviewsParams>,
 ) -> Result<Json<Value>, ApiError> {
-    let rows = state
-        .store
-        .reviews_in_state(params.state.as_deref(), 100)?;
+    let rows = state.store.reviews_in_state(params.state.as_deref(), 100)?;
     Ok(Json(json!({"pending": rows})))
 }
 
@@ -8450,7 +9174,9 @@ async fn resolve_review(
     let merge_id = state
         .store
         .resolve_review(&Actor::new(body.actor), &id, &body.resolution)?;
-    Ok(Json(json!({"review": id, "resolution": body.resolution, "merge_id": merge_id})))
+    Ok(Json(
+        json!({"review": id, "resolution": body.resolution, "merge_id": merge_id}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -8539,7 +9265,9 @@ async fn set_scope(
         ),
         (None, Some(source), None) => (
             format!("source:{source}"),
-            state.store.set_scope_by_source(&actor, source, &body.scope)?,
+            state
+                .store
+                .set_scope_by_source(&actor, source, &body.scope)?,
         ),
         (None, None, Some(ids)) if !ids.is_empty() => (
             format!("{} episode(s)", ids.len()),
@@ -8590,7 +9318,11 @@ fn thread_context(
         if root.is_none() {
             root = Some(record.thread.clone().unwrap_or_else(|| record.id.clone()));
         }
-        let tainted = state.store.ask_turns_tainted(std::slice::from_ref(&record.id)).ok().flatten();
+        let tainted = state
+            .store
+            .ask_turns_tainted(std::slice::from_ref(&record.id))
+            .ok()
+            .flatten();
         turns.push(crate::rlm::ThreadTurn {
             question: record.question,
             answer: record.answer,
@@ -8610,9 +9342,12 @@ async fn deep_query(
     }
     let actor = Actor::new(body.actor);
     let (context, root) = thread_context(&state, &body.thread);
-    let ask_id = state.store.ask_start(&actor, &body.question, root.as_deref())?;
+    let ask_id = state
+        .store
+        .ask_start(&actor, &body.question, root.as_deref())?;
     let started = std::time::Instant::now();
-    let outcome = crate::rlm::run_query(&state, &ask_id, &body.question, &actor, &context, None).await;
+    let outcome =
+        crate::rlm::run_query(&state, &ask_id, &body.question, &actor, &context, None).await;
     let elapsed = started.elapsed().as_millis() as i64;
     match outcome {
         Ok(outcome) => {
@@ -8676,14 +9411,27 @@ fn propose_from_ask(
 ) -> anyhow::Result<Value> {
     let needs: Vec<String> = delegate["needs"]
         .as_array()
-        .map(|list| list.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|list| {
+            list.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
-    let needs = if needs.is_empty() { vec!["other".to_string()] } else { needs };
+    let needs = if needs.is_empty() {
+        vec!["other".to_string()]
+    } else {
+        needs
+    };
     let sensitive = state.store.ask_sensitive(ask_id).unwrap_or(true);
     crate::agents::propose(
-        state, Some(ask_id), sensitive, question,
-        delegate["task"].as_str().unwrap_or(question), &needs,
-        delegate["agent"].as_str(), tainted,
+        state,
+        Some(ask_id),
+        sensitive,
+        question,
+        delegate["task"].as_str().unwrap_or(question),
+        &needs,
+        delegate["agent"].as_str(),
+        tainted,
     )
 }
 
@@ -8718,7 +9466,12 @@ async fn nodes_set(
     Json(body): Json<NodesSetBody>,
 ) -> Result<Json<Value>, ApiError> {
     require_owner(&auth, "change this node")?;
-    if let Some(name) = body.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+    if let Some(name) = body
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
         if name.chars().count() > 40 {
             return Err(bad_request("a name of up to 40 characters"));
         }
@@ -8732,7 +9485,9 @@ async fn nodes_set(
         state.store.set_consolidation_state("node.thinking", mode)?;
     }
     crate::agents::publish_self(&state);
-    Ok(Json(json!({"node_id": crate::agents::node_id(&state), "thinking_here": crate::agents::thinking_here(&state)})))
+    Ok(Json(
+        json!({"node_id": crate::agents::node_id(&state), "thinking_here": crate::agents::thinking_here(&state)}),
+    ))
 }
 
 fn agents_vault_open(state: &AppState) -> Result<(), ApiError> {
@@ -8755,19 +9510,26 @@ async fn agents_view(
     let locked = state.store.vault_status().0;
     let catalog: Vec<Value> = crate::agents::CATALOG
         .iter()
-        .map(|h| json!({"id": h.id, "label": h.label, "depth": h.depth, "runs": h.runs,
-                        "good_for": h.good_for, "blurb": h.blurb}))
+        .map(|h| {
+            json!({"id": h.id, "label": h.label, "depth": h.depth, "runs": h.runs,
+                        "good_for": h.good_for, "blurb": h.blurb})
+        })
         .collect();
     let approvals = state.store.pending_approvals(!locked)?;
     if locked {
-        return Ok(Json(json!({"locked": true, "approvals": approvals, "catalog": catalog})));
+        return Ok(Json(
+            json!({"locked": true, "approvals": approvals, "catalog": catalog}),
+        ));
     }
     let agents: Vec<Value> = state
         .store
         .agents()?
         .into_iter()
         .map(|a| {
-            let overrides = state.store.agent_policy_overrides(&a.id).unwrap_or_else(|_| json!({}));
+            let overrides = state
+                .store
+                .agent_policy_overrides(&a.id)
+                .unwrap_or_else(|_| json!({}));
             json!({
                 "agent": a,
                 "depth": crate::agents::harness(&a.harness).map(|h| h.depth),
@@ -8787,9 +9549,13 @@ async fn agents_view(
         .store
         .agent_directory()?
         .into_iter()
-        .filter(|(a, node_id, _)| node_id != &here && state.store.agent(&a.id).ok().flatten().is_none())
-        .map(|(a, _, node)| json!({"id": a.id, "name": a.name, "harness": a.harness, "enabled": a.enabled,
-            "node": node, "depth": crate::agents::harness(&a.harness).map(|h| h.depth)}))
+        .filter(|(a, node_id, _)| {
+            node_id != &here && state.store.agent(&a.id).ok().flatten().is_none()
+        })
+        .map(|(a, _, node)| {
+            json!({"id": a.id, "name": a.name, "harness": a.harness, "enabled": a.enabled,
+            "node": node, "depth": crate::agents::harness(&a.harness).map(|h| h.depth)})
+        })
         .collect();
     Ok(Json(json!({
         "locked": false,
@@ -8828,7 +9594,8 @@ fn agents_peer(state: &AppState) -> Result<(String, String, String), ApiError> {
         .store
         .peer()?
         .ok_or_else(|| bad_request("this machine isn't paired with another node (☰ → Peering)"))?;
-    let key = crate::sync::peer_key().ok_or_else(|| bad_request("the pairing key is missing — re-pair (☰ → Peering)"))?;
+    let key = crate::sync::peer_key()
+        .ok_or_else(|| bad_request("the pairing key is missing — re-pair (☰ → Peering)"))?;
     Ok((name, url, key))
 }
 
@@ -8843,7 +9610,10 @@ async fn agents_mutate(
     let refuse = |e: anyhow::Error| bad_request(format!("{e:#}"));
     let need_agent = |id: &Option<String>| -> Result<hearthloom_core::store::AgentRow, ApiError> {
         let id = id.as_deref().ok_or_else(|| bad_request("which agent?"))?;
-        state.store.agent(id)?.ok_or_else(|| bad_request("no such agent"))
+        state
+            .store
+            .agent(id)?
+            .ok_or_else(|| bad_request("no such agent"))
     };
     let home = state.home.root().to_path_buf();
     let out = match body.action.as_str() {
@@ -8954,7 +9724,9 @@ async fn agents_mutate(
 async fn agents_test(agent: &hearthloom_core::store::AgentRow) -> Value {
     match agent.harness.as_str() {
         "claude_code" => {
-            let workdir_ok = agent.config["workdir"].as_str().is_some_and(|w| std::path::Path::new(w).is_dir());
+            let workdir_ok = agent.config["workdir"]
+                .as_str()
+                .is_some_and(|w| std::path::Path::new(w).is_dir());
             // the same `claude` the bridge will run
             let version = match crate::agents::claude_code::find_claude(agent) {
                 Ok(path) => tokio::process::Command::new(path)
@@ -8969,10 +9741,17 @@ async fn agents_test(agent: &hearthloom_core::store::AgentRow) -> Value {
             json!({"ok": workdir_ok && version.is_some(), "claude": version, "workdir_ok": workdir_ok})
         }
         _ => {
-            let Some(url) = agent.config["url"].as_str().filter(|u| !u.trim().is_empty()) else {
+            let Some(url) = agent.config["url"]
+                .as_str()
+                .filter(|u| !u.trim().is_empty())
+            else {
                 return json!({"ok": false, "error": "no address set"});
             };
-            let path = if agent.harness == "hermes" { "/v1/models" } else { "/" };
+            let path = if agent.harness == "hermes" {
+                "/v1/models"
+            } else {
+                "/"
+            };
             let mut req = reqwest::Client::new()
                 .get(format!("{}{path}", url.trim_end_matches('/')))
                 .timeout(std::time::Duration::from_secs(8));
@@ -8980,8 +9759,10 @@ async fn agents_test(agent: &hearthloom_core::store::AgentRow) -> Value {
                 req = req.bearer_auth(token);
             }
             match req.send().await {
-                Ok(r) => json!({"ok": r.status().is_success() || r.status().as_u16() == 404 && agent.harness == "openclaw",
-                                "status": r.status().as_u16()}),
+                Ok(r) => {
+                    json!({"ok": r.status().is_success() || r.status().as_u16() == 404 && agent.harness == "openclaw",
+                                "status": r.status().as_u16()})
+                }
                 Err(e) => json!({"ok": false, "error": e.to_string()}),
             }
         }
@@ -9006,7 +9787,8 @@ async fn agents_policy_set(
     agents_vault_open(&state)?;
     let raw = match (&body.preset, &body.policy) {
         (Some(name), _) => serde_json::to_value(
-            hearthloom_core::store::Policy::preset(name).ok_or_else(|| bad_request("unknown preset"))?,
+            hearthloom_core::store::Policy::preset(name)
+                .ok_or_else(|| bad_request("unknown preset"))?,
         )
         .map_err(|e| bad_request(e.to_string()))?,
         (None, Some(policy)) => policy.clone(),
@@ -9028,7 +9810,9 @@ async fn agents_approvals(
 ) -> Result<Json<Value>, ApiError> {
     require_owner(&auth, "see what waits for your OK")?;
     let open = !state.store.vault_status().0;
-    Ok(Json(json!({"approvals": state.store.pending_approvals(open)?, "vault_open": open})))
+    Ok(Json(
+        json!({"approvals": state.store.pending_approvals(open)?, "vault_open": open}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -9043,11 +9827,18 @@ async fn agents_approval_decide(
     Json(body): Json<ApprovalBody>,
 ) -> Result<Json<Value>, ApiError> {
     require_owner(&auth, "approve agent actions")?;
-    let approval = state.store.approval(&id)?.ok_or_else(|| bad_request("no such approval"))?;
+    let approval = state
+        .store
+        .approval(&id)?
+        .ok_or_else(|| bad_request("no such approval"))?;
     if approval["sensitive"] == json!(true) {
         agents_vault_open(&state)?;
     }
-    let by = auth.0.as_ref().map(|c| format!("key:{}", c.name)).unwrap_or_else(|| "human:dashboard".into());
+    let by = auth
+        .0
+        .as_ref()
+        .map(|c| format!("key:{}", c.name))
+        .unwrap_or_else(|| "human:dashboard".into());
     let decided = crate::agents::decide_approval(&state, &id, body.approve, &by)
         .map_err(|e| bad_request(format!("{e:#}")))?;
     Ok(Json(json!({"approval": decided})))
@@ -9059,7 +9850,10 @@ async fn agents_task_get(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     require_owner(&auth, "see agent tasks")?;
-    let task = state.store.agent_task(&id)?.ok_or_else(|| bad_request("no such task"))?;
+    let task = state
+        .store
+        .agent_task(&id)?
+        .ok_or_else(|| bad_request("no such task"))?;
     if task.sensitive {
         agents_vault_open(&state)?;
     }
@@ -9072,11 +9866,15 @@ async fn agents_task_cancel(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     require_owner(&auth, "stop agent tasks")?;
-    let task = state.store.agent_task(&id)?.ok_or_else(|| bad_request("no such task"))?;
+    let task = state
+        .store
+        .agent_task(&id)?
+        .ok_or_else(|| bad_request("no such task"))?;
     if task.sensitive {
         agents_vault_open(&state)?;
     }
-    let task = crate::agents::cancel(&state, &id, "human:dashboard").map_err(|e| bad_request(format!("{e:#}")))?;
+    let task = crate::agents::cancel(&state, &id, "human:dashboard")
+        .map_err(|e| bad_request(format!("{e:#}")))?;
     crate::bus::touch(&state, "operational.changed");
     Ok(Json(crate::agents::task_card(&state, &task)?))
 }
@@ -9096,13 +9894,18 @@ async fn agents_task_report(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    let token = bearer(&headers).ok_or(ApiError(StatusCode::UNAUTHORIZED, "token required".into()))?;
+    let token =
+        bearer(&headers).ok_or(ApiError(StatusCode::UNAUTHORIZED, "token required".into()))?;
     if crate::agents::task_for_token(&token).as_deref() != Some(id.as_str()) {
         return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token".into()));
     }
     let ok = body["ok"].as_bool().unwrap_or(true);
-    let text = body["result"].as_str().or(body["error"].as_str()).unwrap_or("");
-    let task = crate::agents::report(&state, &id, ok, text).map_err(|e| bad_request(format!("{e:#}")))?;
+    let text = body["result"]
+        .as_str()
+        .or(body["error"].as_str())
+        .unwrap_or("");
+    let task =
+        crate::agents::report(&state, &id, ok, text).map_err(|e| bad_request(format!("{e:#}")))?;
     Ok(Json(json!({"status": task.status})))
 }
 
@@ -9115,11 +9918,17 @@ async fn agents_hook(
     Json(body): Json<Value>,
 ) -> Json<Value> {
     let deny = |why: &str| Json(json!({"decision": "deny", "reason": why}));
-    let (Some(token), Some(expected)) = (bearer(&headers), crate::agents::secret(&agent_id, "HOOK")) else {
+    let (Some(token), Some(expected)) =
+        (bearer(&headers), crate::agents::secret(&agent_id, "HOOK"))
+    else {
         return deny("unauthorized");
     };
     if token.len() != expected.len()
-        || token.bytes().zip(expected.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) != 0
+        || token
+            .bytes()
+            .zip(expected.bytes())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            != 0
     {
         return deny("unauthorized");
     }
@@ -9135,7 +9944,11 @@ async fn agents_hook(
     let tool = body["tool"].as_str().unwrap_or("command");
     let input = json!({"command": body["command"], "reason": body["reason"]});
     // a command Hermes flags as dangerous is a files/exec action
-    let tool = if tool.is_empty() || tool == "terminal" || tool == "command" { "Bash" } else { tool };
+    let tool = if tool.is_empty() || tool == "terminal" || tool == "command" {
+        "Bash"
+    } else {
+        tool
+    };
     let (allow, reason) = crate::agents::tool_permission(&state, &task.id, tool, &input).await;
     Json(json!({"decision": if allow { "approve" } else { "deny" }, "reason": reason}))
 }
@@ -9171,7 +9984,8 @@ async fn agents_governance_mcp(
             let args = &request["params"]["arguments"];
             let tool = args["tool_name"].as_str().unwrap_or("");
             let input = args.get("input").cloned().unwrap_or_else(|| json!({}));
-            let (allow, reason) = crate::agents::tool_permission(&state, &task_id, tool, &input).await;
+            let (allow, reason) =
+                crate::agents::tool_permission(&state, &task_id, tool, &input).await;
             let payload = if allow {
                 json!({"behavior": "allow", "updatedInput": input})
             } else {
@@ -9181,7 +9995,8 @@ async fn agents_governance_mcp(
         }
         other => {
             return Json(json!({"jsonrpc": "2.0", "id": id,
-                "error": {"code": -32601, "message": format!("method not found: {other}")}})).into_response();
+                "error": {"code": -32601, "message": format!("method not found: {other}")}}))
+            .into_response();
         }
     };
     Json(json!({"jsonrpc": "2.0", "id": id, "result": result})).into_response()
@@ -9198,7 +10013,12 @@ struct RetireTarget {
 /// Owner only; a memory must be visible under the vault as it stands; a
 /// whole source needs the vault open (it may hold private memories, and
 /// counting them while locked would say they exist).
-fn retire_allowed(state: &AppState, auth: &AuthInfo, kind: &str, target: &str) -> Result<(), ApiError> {
+fn retire_allowed(
+    state: &AppState,
+    auth: &AuthInfo,
+    kind: &str,
+    target: &str,
+) -> Result<(), ApiError> {
     require_owner(auth, "retire memories")?;
     match kind {
         "memory" => {
@@ -9229,10 +10049,12 @@ async fn retire_preview(
 ) -> Result<Json<Value>, ApiError> {
     retire_allowed(&state, &auth, &params.kind, &params.target)?;
     let store = state.store.clone();
-    let preview = crate::scoped::spawn_blocking(move || store.retirement_preview(&params.kind, &params.target))
-        .await
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| bad_request(format!("{e:#}")))?;
+    let preview = crate::scoped::spawn_blocking(move || {
+        store.retirement_preview(&params.kind, &params.target)
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| bad_request(format!("{e:#}")))?;
     Ok(Json(preview))
 }
 
@@ -9257,14 +10079,22 @@ async fn retire_post(
     retire_allowed(&state, &auth, &body.kind, &body.target)?;
     let row = state
         .store
-        .retire(&Actor::new("human:dashboard"), &body.kind, &body.target, &body.regenerate, &body.reason)
+        .retire(
+            &Actor::new("human:dashboard"),
+            &body.kind,
+            &body.target,
+            &body.regenerate,
+            &body.reason,
+        )
         .map_err(|e| bad_request(format!("{e:#}")))?;
     let id = row.id.clone();
     if body.kind == "memory" {
         let counts = crate::retire::apply_now(&state, &id)
             .await
             .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
-        return Ok(Json(json!({"retirement": row, "state": "done", "counts": counts})));
+        return Ok(Json(
+            json!({"retirement": row, "state": "done", "counts": counts}),
+        ));
     }
     let background = state.clone();
     tokio::spawn(async move {
@@ -9347,9 +10177,12 @@ async fn sync_agents_adopt(
     Json(bundle): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&auth, "peer")?;
-    let installed = crate::agents::unpack(&state, &bundle).map_err(|e| bad_request(format!("{e:#}")))?;
-    Ok(Json(json!({"agent_id": installed.id, "node_id": crate::agents::node_id(&state),
-                   "node_name": crate::agents::node_name(&state)})))
+    let installed =
+        crate::agents::unpack(&state, &bundle).map_err(|e| bad_request(format!("{e:#}")))?;
+    Ok(Json(
+        json!({"agent_id": installed.id, "node_id": crate::agents::node_id(&state),
+                   "node_name": crate::agents::node_name(&state)}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -9367,9 +10200,15 @@ async fn sync_agents_release(
     Json(body): Json<AgentReleaseBody>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&auth, "peer")?;
-    let agent = state.store.agent(&body.id)?.ok_or_else(|| bad_request("no such agent on this node"))?;
+    let agent = state
+        .store
+        .agent(&body.id)?
+        .ok_or_else(|| bad_request("no such agent on this node"))?;
     crate::agents::movable(&state, &agent.id).map_err(|e| bad_request(format!("{e:#}")))?;
-    Ok(Json(crate::agents::pack(&agent, &body.recipient_public).map_err(|e| bad_request(format!("{e:#}")))?))
+    Ok(Json(
+        crate::agents::pack(&agent, &body.recipient_public)
+            .map_err(|e| bad_request(format!("{e:#}")))?,
+    ))
 }
 
 async fn sync_agents_released(
@@ -9405,8 +10244,9 @@ async fn sync_agents_post(
 async fn deep_query_stream(
     State(state): State<AppState>,
     Query(params): Query<QueryStreamParams>,
-) -> axum::response::Sse<impl futures_core::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>>
-{
+) -> axum::response::Sse<
+    impl futures_core::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
     use axum::response::sse::Event;
     let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<Value>();
     let question = params.question;
@@ -9425,7 +10265,10 @@ async fn deep_query_stream(
         let actor = Actor::new("human:dashboard");
         let (context, root) = thread_context(&state_clone, &thread_ids);
         // Every ask is traced start-to-finish (QA/improvement loop).
-        let ask_id = match state_clone.store.ask_start(&actor, &question, root.as_deref()) {
+        let ask_id = match state_clone
+            .store
+            .ask_start(&actor, &question, root.as_deref())
+        {
             Ok(id) => id,
             Err(err) => {
                 let _ = sender_final.send(json!({"type": "fail", "message": err.to_string()}));
@@ -9434,7 +10277,16 @@ async fn deep_query_stream(
         };
         let _ = sender_final.send(json!({"type": "meta", "ask_id": ask_id}));
         let started = std::time::Instant::now();
-        match crate::rlm::run_query(&state_clone, &ask_id, &question, &actor, &context, Some(sender)).await {
+        match crate::rlm::run_query(
+            &state_clone,
+            &ask_id,
+            &question,
+            &actor,
+            &context,
+            Some(sender),
+        )
+        .await
+        {
             Ok(outcome) => {
                 crate::rlm::record_query(&state_clone, &actor, &question, outcome.rounds);
                 if let Some(reason) = &outcome.tainted {
@@ -9453,10 +10305,21 @@ async fn deep_query_stream(
                 // BEFORE the answer — the panel closes the stream on
                 // `answer`, and shows the card right under it.
                 if let Some(delegate) = &outcome.delegate {
-                    match propose_from_ask(&state_clone, &ask_id, &question, delegate, outcome.tainted.as_deref()) {
-                        Ok(card) => { let _ = sender_final.send(json!({"type": "task", "ask_id": ask_id, "card": card})); }
-                        Err(err) => { let _ = sender_final.send(json!({"type": "fail", "ask_id": ask_id,
-                            "message": format!("couldn't set up the task: {err:#}")})); }
+                    match propose_from_ask(
+                        &state_clone,
+                        &ask_id,
+                        &question,
+                        delegate,
+                        outcome.tainted.as_deref(),
+                    ) {
+                        Ok(card) => {
+                            let _ = sender_final
+                                .send(json!({"type": "task", "ask_id": ask_id, "card": card}));
+                        }
+                        Err(err) => {
+                            let _ = sender_final.send(json!({"type": "fail", "ask_id": ask_id,
+                            "message": format!("couldn't set up the task: {err:#}")}));
+                        }
                     }
                 }
                 let _ = sender_final.send(json!({
@@ -9480,7 +10343,8 @@ async fn deep_query_stream(
                 );
                 // NB: named "fail", not "error" — "error" collides with
                 // EventSource's built-in connection-error event.
-                let _ = sender_final.send(json!({"type": "fail", "ask_id": ask_id, "message": message}));
+                let _ = sender_final
+                    .send(json!({"type": "fail", "ask_id": ask_id, "message": message}));
             }
         }
         // channel drop closes the stream
@@ -9531,7 +10395,9 @@ async fn ask_history(
             })
         })
         .collect();
-    Ok(Json(json!({"items": list, "next_offset": params.offset + items.len()})))
+    Ok(Json(
+        json!({"items": list, "next_offset": params.offset + items.len()}),
+    ))
 }
 
 async fn ask_get(
@@ -9605,7 +10471,12 @@ async fn ask_keep(
         .unwrap_or_else(|| {
             format!(
                 "Finding: {}",
-                record.question.replace('\n', " ").chars().take(70).collect::<String>()
+                record
+                    .question
+                    .replace('\n', " ")
+                    .chars()
+                    .take(70)
+                    .collect::<String>()
             )
         });
     // An answer produced with the vault open may quote private episodes
@@ -9672,7 +10543,9 @@ async fn ask_privacy_get(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     match state.store.ask_privacy(&id)? {
-        Some((private, can_unseal)) => Ok(Json(json!({"private": private, "can_unseal": can_unseal}))),
+        Some((private, can_unseal)) => {
+            Ok(Json(json!({"private": private, "can_unseal": can_unseal})))
+        }
         None => Err(ApiError(StatusCode::NOT_FOUND, format!("no ask {id}"))),
     }
 }
@@ -9898,14 +10771,22 @@ async fn vault_set(
             let minutes = body.minutes.unwrap_or(15).clamp(1, 60);
             state.store.vault_unlock(minutes);
             // Who did it, as the server knows it — not as the request says.
-            let via = auth.0.as_ref().map(|c| format!("key:{}", c.name)).unwrap_or_else(|| "session".into());
-            state
-                .store
-                .record_event(&actor, "vault_unlocked", &json!({"minutes": minutes, "via": via}))?;
+            let via = auth
+                .0
+                .as_ref()
+                .map(|c| format!("key:{}", c.name))
+                .unwrap_or_else(|| "session".into());
+            state.store.record_event(
+                &actor,
+                "vault_unlocked",
+                &json!({"minutes": minutes, "via": via}),
+            )?;
         }
         "lock" => {
             state.store.vault_lock();
-            state.store.record_event(&actor, "vault_locked", &json!({}))?;
+            state
+                .store
+                .record_event(&actor, "vault_locked", &json!({}))?;
         }
         other => {
             return Err(bad_request(format!(
@@ -9932,10 +10813,14 @@ async fn privacy_rules_list(State(state): State<AppState>) -> Result<Json<Value>
     if locked {
         let masked: Vec<Value> = rules
             .iter()
-            .map(|r| json!({"id": r.id, "kind": r.kind, "pattern": null,
-                            "created_at": r.created_at}))
+            .map(|r| {
+                json!({"id": r.id, "kind": r.kind, "pattern": null,
+                            "created_at": r.created_at})
+            })
             .collect();
-        return Ok(Json(json!({"rules": masked, "locked": true, "count": rules.len()})));
+        return Ok(Json(
+            json!({"rules": masked, "locked": true, "count": rules.len()}),
+        ));
     }
     Ok(Json(json!({"rules": rules, "locked": false})))
 }
@@ -10051,7 +10936,9 @@ async fn goal_queries(
         .intent_id_by_name(&name)?
         .ok_or_else(|| bad_request(format!("no goal named {name:?}")))?;
     for query in &body.remove {
-        state.store.remove_standing_query(&actor, &intent_id, query)?;
+        state
+            .store
+            .remove_standing_query(&actor, &intent_id, query)?;
     }
     if !body.add.is_empty() {
         let queries: Vec<(String, Option<Vec<f32>>)> = body
@@ -10062,7 +10949,9 @@ async fn goal_queries(
                 (q.clone(), embedding)
             })
             .collect();
-        state.store.add_standing_queries(&actor, &intent_id, &queries)?;
+        state
+            .store
+            .add_standing_queries(&actor, &intent_id, &queries)?;
         let store = state.store.clone();
         let scan_actor = actor.clone();
         let id = intent_id.clone();
@@ -10186,8 +11075,9 @@ async fn selfmodel_list(
     State(state): State<AppState>,
     Query(params): Query<SelfModelListParams>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut propositions = serde_json::to_value(state.store.list_propositions(params.status.as_deref())?)
-        .unwrap_or_default();
+    let mut propositions =
+        serde_json::to_value(state.store.list_propositions(params.status.as_deref())?)
+            .unwrap_or_default();
     // Beliefs a retirement sent back say why they are asking again.
     let back = state.store.beliefs_sent_back()?;
     if !back.is_empty() {
@@ -10279,7 +11169,9 @@ async fn selfmodel_resolve(
 }
 
 async fn opportunities_list(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(json!({"opportunities": state.store.list_opportunities(50)?})))
+    Ok(Json(
+        json!({"opportunities": state.store.list_opportunities(50)?}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -10300,13 +11192,19 @@ async fn opportunity_resolve(
     let keep = match body.action.as_str() {
         "keep" => true,
         "dismiss" => false,
-        other => return Err(bad_request(format!("action must be keep|dismiss, got {other:?}"))),
+        other => {
+            return Err(bad_request(format!(
+                "action must be keep|dismiss, got {other:?}"
+            )))
+        }
     };
     let episode_id =
         state
             .store
             .resolve_opportunity(&Actor::new(body.actor), &state.home, &id, keep)?;
-    Ok(Json(json!({"id": id, "action": body.action, "episode_id": episode_id})))
+    Ok(Json(
+        json!({"id": id, "action": body.action, "episode_id": episode_id}),
+    ))
 }
 
 /* ————— the record lint: report-only findings, human-resolved ————— */
@@ -10355,7 +11253,9 @@ async fn tasks_list(
 ) -> Result<Json<Value>, ApiError> {
     if let Some(name) = params.mentions.as_deref().filter(|n| !n.trim().is_empty()) {
         let entity = resolve_entity_row(&state, name)?;
-        let tasks = state.store.tasks_mentioning(&entity.id, params.limit.min(100))?;
+        let tasks = state
+            .store
+            .tasks_mentioning(&entity.id, params.limit.min(100))?;
         return Ok(Json(json!({"tasks": tasks, "mentions": entity.name})));
     }
     let tasks = state
@@ -10554,13 +11454,17 @@ async fn tasks_deleted(State(state): State<AppState>) -> Result<Json<Value>, Api
     let rows = state.store.deleted_tasks(100)?;
     let deleted: Vec<Value> = rows
         .into_iter()
-        .map(|(id, description, ts)| json!({"id": id, "description": description, "deleted_at": ts}))
+        .map(
+            |(id, description, ts)| json!({"id": id, "description": description, "deleted_at": ts}),
+        )
         .collect();
     Ok(Json(json!({ "deleted": deleted })))
 }
 
 async fn templates_list(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(json!({"templates": state.store.list_templates(&state.home)?})))
+    Ok(Json(
+        json!({"templates": state.store.list_templates(&state.home)?}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -10602,12 +11506,18 @@ async fn template_add(
         }
         front.push('\n');
     }
-    front.push_str(&format!("note-on-complete: {}\n---\n", body.note_on_complete));
-    let note_body = format!("{front}{}", if body.skeleton.is_empty() {
-        "## What I learned\n\n"
-    } else {
-        &body.skeleton
-    });
+    front.push_str(&format!(
+        "note-on-complete: {}\n---\n",
+        body.note_on_complete
+    ));
+    let note_body = format!(
+        "{front}{}",
+        if body.skeleton.is_empty() {
+            "## What I learned\n\n"
+        } else {
+            &body.skeleton
+        }
+    );
     let id = state.store.create_note_kind(
         &write_actor(&auth, body.actor),
         &state.home,
@@ -10644,7 +11554,9 @@ async fn notes_list(
 ) -> Result<Json<Value>, ApiError> {
     if let Some(name) = params.mentions.as_deref().filter(|m| !m.trim().is_empty()) {
         let entity = resolve_entity_row(&state, name)?;
-        let notes = state.store.notes_mentioning(&entity.id, params.limit.min(500))?;
+        let notes = state
+            .store
+            .notes_mentioning(&entity.id, params.limit.min(500))?;
         return Ok(Json(json!({"notes": notes, "mentions": entity.name})));
     }
     if params.tag.is_some() || params.offset > 0 {
@@ -10759,9 +11671,10 @@ async fn connection_materialize(
     if body.actor.trim().is_empty() {
         return Err(bad_request("actor is required on every write"));
     }
-    let id = state
-        .store
-        .materialize_connection(&Actor::new(body.actor), &body.network, &body.name)?;
+    let id =
+        state
+            .store
+            .materialize_connection(&Actor::new(body.actor), &body.network, &body.name)?;
     Ok(Json(json!({"entity_id": id, "name": body.name})))
 }
 
@@ -10829,7 +11742,11 @@ async fn notes_media(
     use axum::response::IntoResponse;
     let not_found = || (axum::http::StatusCode::NOT_FOUND, "no such media").into_response();
     // path hygiene: single segments only, no traversal
-    if media_ref.contains("..") || file.contains("..") || media_ref.contains('/') || file.contains('/') {
+    if media_ref.contains("..")
+        || file.contains("..")
+        || media_ref.contains('/')
+        || file.contains('/')
+    {
         return not_found();
     }
     let Ok(Some(scope)) = state.store.media_owner_scope(&media_ref) else {
@@ -10842,7 +11759,13 @@ async fn notes_media(
     let Ok(bytes) = std::fs::read(&path) else {
         return not_found();
     };
-    let mime = match file.rsplit('.').next().unwrap_or("").to_lowercase().as_str() {
+    let mime = match file
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_lowercase()
+        .as_str()
+    {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
         "gif" => "image/gif",
@@ -10885,7 +11808,9 @@ async fn project_declare(
     if body.actor.trim().is_empty() {
         return Err(bad_request("actor is required on every write"));
     }
-    let id = state.store.declare_project(&Actor::new(body.actor), &body.name)?;
+    let id = state
+        .store
+        .declare_project(&Actor::new(body.actor), &body.name)?;
     crate::bus::touch(&state, "operational.changed");
     Ok(Json(json!({"id": id, "name": body.name})))
 }
@@ -10929,7 +11854,9 @@ async fn project_detail(
         .store
         .primary_note_meta(&state.home, &id)?
         .map(|(nid, title, excerpt)| json!({"id": nid, "title": title, "excerpt": excerpt}));
-    Ok(Json(json!({"repos": repos, "goals": goals, "primary_note": primary})))
+    Ok(Json(
+        json!({"repos": repos, "goals": goals, "primary_note": primary}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -10949,7 +11876,9 @@ async fn project_attach(
     }
     let project = resolve_entity_arg(&state, &id)?; // {id} may be a name
     let child = resolve_entity_arg(&state, &body.child)?;
-    state.store.attach_to_project(&Actor::new(body.actor), &project, &child)?;
+    state
+        .store
+        .attach_to_project(&Actor::new(body.actor), &project, &child)?;
     crate::bus::touch(&state, "operational.changed");
     Ok(Json(json!({"project": project, "child": child})))
 }
@@ -10963,7 +11892,9 @@ async fn project_detach(
     }
     let project = resolve_entity_arg(&state, &id)?;
     let child = resolve_entity_arg(&state, &body.child)?;
-    state.store.detach_from_project(&Actor::new(body.actor), &project, &child)?;
+    state
+        .store
+        .detach_from_project(&Actor::new(body.actor), &project, &child)?;
     crate::bus::touch(&state, "operational.changed");
     Ok(Json(json!({"project": project, "child": child})))
 }
@@ -10990,7 +11921,9 @@ async fn goal_link_project(
         .store
         .link_goal_project(&Actor::new(body.actor), &body.goal, &project_id, body.link)?;
     crate::bus::touch(&state, "operational.changed");
-    Ok(Json(json!({"goal": body.goal, "project": project_id, "linked": body.link})))
+    Ok(Json(
+        json!({"goal": body.goal, "project": project_id, "linked": body.link}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -11097,7 +12030,9 @@ async fn notes_scope_by_origin(
         &body.scope,
     )?;
     crate::bus::touch(&state, "privacy.changed");
-    Ok(Json(json!({"origin": body.origin, "scope": body.scope, "notes": changed})))
+    Ok(Json(
+        json!({"origin": body.origin, "scope": body.scope, "notes": changed}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -11153,7 +12088,11 @@ async fn note_add(
         let subject = if subject.starts_with("en_") || subject.starts_with("in_") {
             subject.to_string()
         } else {
-            state.store.entity_by_name(subject)?.map(|e| e.id).unwrap_or_else(|| subject.to_string())
+            state
+                .store
+                .entity_by_name(subject)?
+                .map(|e| e.id)
+                .unwrap_or_else(|| subject.to_string())
         };
         state
             .store
@@ -11209,9 +12148,7 @@ async fn note_get(
                 .store
                 .note_resonant(&id, 5)?
                 .into_iter()
-                .map(|(nid, title, score)| {
-                    json!({"id": nid, "title": title, "score": score})
-                })
+                .map(|(nid, title, score)| json!({"id": nid, "title": title, "score": score}))
                 .collect();
             Ok(Json(json!({
                 "note": note,
@@ -11277,12 +12214,16 @@ async fn note_status(
     if body.actor.trim().is_empty() {
         return Err(bad_request("actor is required on every write"));
     }
-    let episode_id =
-        state
-            .store
-            .set_note_status(&write_actor(&auth, body.actor), &state.home, &id, &body.status)?;
+    let episode_id = state.store.set_note_status(
+        &write_actor(&auth, body.actor),
+        &state.home,
+        &id,
+        &body.status,
+    )?;
     crate::bus::touch(&state, "operational.changed");
-    Ok(Json(json!({"id": id, "status": body.status, "episode_id": episode_id})))
+    Ok(Json(
+        json!({"id": id, "status": body.status, "episode_id": episode_id}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -11432,10 +12373,10 @@ async fn regenerate_index(State(state): State<AppState>) -> Result<Json<Value>, 
 }
 
 /* ————— plugins (docs/plugins.md — the sidecar contract, 2026-07-20) —————
-   Lifecycle + storage + UI + the peering leg. Admin surfaces (list/
-   install/…) ride the normal session auth; plugin-bound keys are
-   DEFAULT-DENIED down to plugins::plugin_route_allowed in
-   auth_middleware, so a plugin key can never reach these. */
+Lifecycle + storage + UI + the peering leg. Admin surfaces (list/
+install/…) ride the normal session auth; plugin-bound keys are
+DEFAULT-DENIED down to plugins::plugin_route_allowed in
+auth_middleware, so a plugin key can never reach these. */
 
 /// The bound plugin for this request's key, or 403.
 fn bound_plugin(state: &AppState, auth: &AuthInfo) -> Result<String, ApiError> {
@@ -11445,7 +12386,8 @@ fn bound_plugin(state: &AppState, auth: &AuthInfo) -> Result<String, ApiError> {
         .ok_or_else(|| {
             ApiError(
                 StatusCode::FORBIDDEN,
-                "this surface is for plugin keys (the daemon hands one to every installed plugin)".into(),
+                "this surface is for plugin keys (the daemon hands one to every installed plugin)"
+                    .into(),
             )
         })
 }
@@ -11517,11 +12459,12 @@ async fn plugins_install(
 ) -> Result<Json<Value>, ApiError> {
     let dir = std::path::PathBuf::from(body.path);
     let st = state.clone();
-    let (row, secret) =
-        crate::scoped::spawn_blocking(move || crate::plugins::install_from_dir(&st, &dir, body.scopes))
-            .await
-            .map_err(anyhow::Error::from)?
-            .map_err(|e| bad_request(format!("{e:#}")))?;
+    let (row, secret) = crate::scoped::spawn_blocking(move || {
+        crate::plugins::install_from_dir(&st, &dir, body.scopes)
+    })
+    .await
+    .map_err(anyhow::Error::from)?
+    .map_err(|e| bad_request(format!("{e:#}")))?;
     crate::bus::touch(&state, "operational.changed");
     Ok(Json(json!({
         "installed": row.name, "version": row.version,
@@ -11626,7 +12569,9 @@ async fn plugin_ui_token(
         &row.granted_scopes,
         Some(&expires),
     )?;
-    Ok(Json(json!({"token": secret, "expires_at": expires, "scopes": row.granted_scopes})))
+    Ok(Json(
+        json!({"token": secret, "expires_at": expires, "scopes": row.granted_scopes}),
+    ))
 }
 
 /// Serve a plugin's static UI assets (pkg/ui/…) into its sandbox.
@@ -11643,7 +12588,9 @@ async fn plugin_ui_asset(
     if !enabled {
         return not_found();
     }
-    let path = crate::plugins::plugin_dir(&state, &name).join("pkg/ui").join(rel);
+    let path = crate::plugins::plugin_dir(&state, &name)
+        .join("pkg/ui")
+        .join(rel);
     let Ok(bytes) = std::fs::read(&path) else {
         return not_found();
     };
@@ -11663,7 +12610,10 @@ async fn plugin_ui_asset(
     (
         [
             (axum::http::header::CONTENT_TYPE, mime),
-            (axum::http::header::CACHE_CONTROL, "no-cache, must-revalidate"),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "no-cache, must-revalidate",
+            ),
             (axum::http::header::CONTENT_SECURITY_POLICY, EMBER_PAGE_CSP),
         ],
         bytes,
@@ -11712,8 +12662,14 @@ async fn well_known_asset(
     (
         [
             (axum::http::header::CONTENT_TYPE, mime),
-            (axum::http::header::CACHE_CONTROL, "public, max-age=300".to_string()),
-            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=300".to_string(),
+            ),
+            (
+                axum::http::header::X_CONTENT_TYPE_OPTIONS,
+                "nosniff".to_string(),
+            ),
         ],
         bytes,
     )
@@ -11721,7 +12677,7 @@ async fn well_known_asset(
 }
 
 /* —— plugin self-storage: the ONLY way a plugin persists anything ——
-   (law #4 — the daemon writes; the plugin never opens files or the db) */
+(law #4 — the daemon writes; the plugin never opens files or the db) */
 
 async fn plugin_kv_list(
     State(state): State<AppState>,
@@ -11744,7 +12700,10 @@ async fn plugin_kv_get(
     let plugin = bound_plugin(&state, &auth)?;
     match state.store.plugin_kv_get(&plugin, &key)? {
         Some(value) => Ok(Json(json!({"key": key, "value": value}))),
-        None => Err(ApiError(StatusCode::NOT_FOUND, format!("no value at {key:?}"))),
+        None => Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("no value at {key:?}"),
+        )),
     }
 }
 
@@ -11756,10 +12715,14 @@ async fn plugin_kv_put(
 ) -> Result<Json<Value>, ApiError> {
     let plugin = bound_plugin(&state, &auth)?;
     if key.starts_with("__") {
-        return Err(bad_request("keys starting with __ are reserved for the daemon (the runner lease lives there)"));
+        return Err(bad_request(
+            "keys starting with __ are reserved for the daemon (the runner lease lives there)",
+        ));
     }
     if body.len() > 256 * 1024 {
-        return Err(bad_request("kv values cap at 256KB — larger state goes in /files"));
+        return Err(bad_request(
+            "kv values cap at 256KB — larger state goes in /files",
+        ));
     }
     state.store.plugin_kv_set(&plugin, &key, &body)?;
     Ok(Json(json!({"key": key, "bytes": body.len()})))
@@ -11772,7 +12735,9 @@ async fn plugin_kv_delete(
 ) -> Result<Json<Value>, ApiError> {
     let plugin = bound_plugin(&state, &auth)?;
     if key.starts_with("__") {
-        return Err(bad_request("keys starting with __ are reserved for the daemon"));
+        return Err(bad_request(
+            "keys starting with __ are reserved for the daemon",
+        ));
     }
     let deleted = state.store.plugin_kv_delete(&plugin, &key)?;
     Ok(Json(json!({"key": key, "deleted": deleted})))
@@ -11784,7 +12749,10 @@ async fn plugin_kv_delete(
 /// token a UI page holds. Reading a secret back is the binary's right.
 fn bound_sidecar(state: &AppState, auth: &AuthInfo) -> Result<String, ApiError> {
     let plugin = bound_plugin(state, auth)?;
-    let is_ui_token = auth.0.as_ref().is_some_and(|c| c.name.starts_with("plugin-ui:"));
+    let is_ui_token = auth
+        .0
+        .as_ref()
+        .is_some_and(|c| c.name.starts_with("plugin-ui:"));
     if is_ui_token {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
@@ -11827,7 +12795,10 @@ async fn plugin_secret_get(
             "key": key,
             "value": String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("secret isn't text"))?,
         }))),
-        None => Err(ApiError(StatusCode::NOT_FOUND, format!("no secret {key:?}"))),
+        None => Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("no secret {key:?}"),
+        )),
     }
 }
 
@@ -11839,14 +12810,18 @@ async fn plugin_secret_put(
 ) -> Result<Json<Value>, ApiError> {
     let plugin = bound_plugin(&state, &auth)?;
     if key.starts_with("__") {
-        return Err(bad_request("secret names starting with __ are written by the daemon"));
+        return Err(bad_request(
+            "secret names starting with __ are written by the daemon",
+        ));
     }
     let st = state.clone();
     let k = key.clone();
-    tokio::task::spawn_blocking(move || crate::plugins::secret_put(&st, &plugin, &k, body.as_bytes()))
-        .await
-        .map_err(anyhow::Error::from)?
-        .map_err(|e| bad_request(format!("{e:#}")))?;
+    tokio::task::spawn_blocking(move || {
+        crate::plugins::secret_put(&st, &plugin, &k, body.as_bytes())
+    })
+    .await
+    .map_err(anyhow::Error::from)?
+    .map_err(|e| bad_request(format!("{e:#}")))?;
     Ok(Json(json!({"key": key, "set": true})))
 }
 
@@ -11876,8 +12851,13 @@ async fn plugin_oauth_pending(
     Json(body): Json<OAuthPendingBody>,
 ) -> Result<Json<Value>, ApiError> {
     let plugin = bound_plugin(&state, &auth)?;
-    crate::plugins::oauth_register(&plugin, &body.state, &body.authorize_url, body.ttl_secs.unwrap_or(900))
-        .map_err(|e| bad_request(format!("{e:#}")))?;
+    crate::plugins::oauth_register(
+        &plugin,
+        &body.state,
+        &body.authorize_url,
+        body.ttl_secs.unwrap_or(900),
+    )
+    .map_err(|e| bad_request(format!("{e:#}")))?;
     Ok(Json(json!({
         "pending": true,
         // where the provider must send the user back
@@ -11905,7 +12885,10 @@ async fn plugin_oauth_take(
     .map_err(anyhow::Error::from)??;
     match taken {
         Some((code, st)) => Ok(Json(json!({"code": code, "state": st}))),
-        None => Err(ApiError(StatusCode::NOT_FOUND, "no sign-in code waiting".into())),
+        None => Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "no sign-in code waiting".into(),
+        )),
     }
 }
 
@@ -11957,7 +12940,10 @@ main{{max-width:30rem}}h1{{font-size:1.4rem;margin:0 0 .5rem}}p{{color:var(--fai
 }
 
 fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 /// The provider sends the user back here. Pre-auth (it's a browser
@@ -11970,7 +12956,11 @@ async fn plugin_oauth_callback(
 ) -> axum::response::Response {
     let enabled = matches!(state.store.plugin(&name), Ok(Some(row)) if row.enabled);
     if !enabled {
-        return oauth_page(StatusCode::NOT_FOUND, "Nothing to sign in to", "That ember isn't installed here.");
+        return oauth_page(
+            StatusCode::NOT_FOUND,
+            "Nothing to sign in to",
+            "That ember isn't installed here.",
+        );
     }
     if let Some(err) = params.error {
         let why = params.error_description.unwrap_or(err);
@@ -11981,7 +12971,11 @@ async fn plugin_oauth_callback(
         );
     }
     let (Some(code), Some(st)) = (params.code, params.state) else {
-        return oauth_page(StatusCode::BAD_REQUEST, "Sign-in didn't finish", "The provider sent no code back.");
+        return oauth_page(
+            StatusCode::BAD_REQUEST,
+            "Sign-in didn't finish",
+            "The provider sent no code back.",
+        );
     };
     if code.len() > 4096 || !crate::plugins::oauth_consume(&name, &st) {
         return oauth_page(
@@ -12009,7 +13003,9 @@ async fn plugin_oauth_callback(
     oauth_page(
         StatusCode::OK,
         "Signed in",
-        &format!("{name} can finish connecting now. You can close this tab and go back to Hearthloom."),
+        &format!(
+            "{name} can finish connecting now. You can close this tab and go back to Hearthloom."
+        ),
     )
 }
 
@@ -12123,10 +13119,10 @@ async fn plugin_file_delete(
 }
 
 /* —— the peering leg (item: plugins participate in replication) ——
-   KV: push+pull with LWW by updated_at (apply_plugin_kv refuses
-   plugins this node doesn't mirror). Files: fingerprint listing +
-   per-file fetch, newer-mtime-wins. Wire discipline: additive JSON,
-   404 → the peer predates plugins → skip. */
+KV: push+pull with LWW by updated_at (apply_plugin_kv refuses
+plugins this node doesn't mirror). Files: fingerprint listing +
+per-file fetch, newer-mtime-wins. Wire discipline: additive JSON,
+404 → the peer predates plugins → skip. */
 
 #[derive(Deserialize)]
 struct SyncPluginsParams {
@@ -12250,7 +13246,9 @@ struct RegistryIndexParams {
 async fn plugins_registry_index(
     Query(params): Query<RegistryIndexParams>,
 ) -> Result<Json<Value>, ApiError> {
-    Ok(Json(crate::registry_client::index(params.registry, &params.q).await?))
+    Ok(Json(
+        crate::registry_client::index(params.registry, &params.q).await?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -12269,9 +13267,9 @@ async fn plugins_registry_stage(
     State(state): State<AppState>,
     Json(body): Json<RegistryStageBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let staged =
-        crate::registry_client::stage(&state, body.registry, &body.name, body.version).await
-            .map_err(|e| bad_request(format!("{e:#}")))?;
+    let staged = crate::registry_client::stage(&state, body.registry, &body.name, body.version)
+        .await
+        .map_err(|e| bad_request(format!("{e:#}")))?;
     Ok(Json(json!({
         "path": staged.path.display().to_string(),
         "name": staged.name,
@@ -12297,9 +13295,10 @@ async fn sync_plugins_installed(
         .list_plugins()?
         .into_iter()
         .map(|row| {
-            let placement = serde_json::from_value::<crate::plugins::Manifest>(row.manifest.clone())
-                .map(|m| m.effective_placement().to_string())
-                .unwrap_or_else(|_| "any".into());
+            let placement =
+                serde_json::from_value::<crate::plugins::Manifest>(row.manifest.clone())
+                    .map(|m| m.effective_placement().to_string())
+                    .unwrap_or_else(|_| "any".into());
             json!({
                 "name": row.name,
                 "version": row.version,
@@ -12311,7 +13310,9 @@ async fn sync_plugins_installed(
             })
         })
         .collect();
-    Ok(Json(json!({"plugins": list, "version": env!("CARGO_PKG_VERSION")})))
+    Ok(Json(
+        json!({"plugins": list, "version": env!("CARGO_PKG_VERSION")}),
+    ))
 }
 
 /// The counterpart's ember list, proxied with this node's peer key
@@ -12405,7 +13406,9 @@ async fn plugin_config_set(
         .unwrap_or_default();
     for (k, v) in incoming {
         if !allowed.contains(k.as_str()) {
-            return Err(bad_request(format!("{k:?} isn't in {name}'s declared config")));
+            return Err(bad_request(format!(
+                "{k:?} isn't in {name}'s declared config"
+            )));
         }
         current.insert(k.clone(), v.clone());
     }
@@ -12517,9 +13520,15 @@ async fn upgrade_post(State(_state): State<AppState>) -> Result<Json<Value>, Api
         if let Ok(out) = std::process::Command::new("id").arg("-u").output() {
             let uid = String::from_utf8_lossy(&out.stdout).trim().to_string();
             let _ = std::process::Command::new("launchctl")
-                .args(["kickstart", "-k", &format!("gui/{uid}/com.hearthloom.daemon")])
+                .args([
+                    "kickstart",
+                    "-k",
+                    &format!("gui/{uid}/com.hearthloom.daemon"),
+                ])
                 .output();
         }
     });
-    Ok(Json(json!({"upgrading": true, "to": to, "restarting": true})))
+    Ok(Json(
+        json!({"upgrading": true, "to": to, "restarting": true}),
+    ))
 }

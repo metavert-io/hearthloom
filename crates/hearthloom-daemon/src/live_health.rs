@@ -21,10 +21,14 @@ use crate::AppState;
 /// identical means `parse_ts`, event times, and workout bodies come out
 /// exactly as the export path produces them.
 pub(crate) fn to_raw_local(rfc3339_utc: &str, tz_off_min: i32) -> String {
-    let off = FixedOffset::east_opt(tz_off_min * 60)
-        .unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
+    let off =
+        FixedOffset::east_opt(tz_off_min * 60).unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
     DateTime::parse_from_rfc3339(rfc3339_utc)
-        .map(|dt| dt.with_timezone(&off).format("%Y-%m-%d %H:%M:%S %z").to_string())
+        .map(|dt| {
+            dt.with_timezone(&off)
+                .format("%Y-%m-%d %H:%M:%S %z")
+                .to_string()
+        })
         .unwrap_or_else(|_| rfc3339_utc.to_string())
 }
 
@@ -99,8 +103,8 @@ pub(crate) fn finalize_health_days(state: &AppState) -> anyhow::Result<(usize, u
     // sealing the user's still-running local day.
     let (today_local, grace_cutoff) = {
         let tz_off = state.store.health_latest_tz_offset().unwrap_or(0);
-        let off = FixedOffset::east_opt(tz_off * 60)
-            .unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
+        let off =
+            FixedOffset::east_opt(tz_off * 60).unwrap_or_else(|| FixedOffset::east_opt(0).unwrap());
         let now = chrono::Utc::now();
         (
             now.with_timezone(&off).format("%Y-%m-%d").to_string(),
@@ -248,7 +252,10 @@ mod tests {
         assert_eq!(live_eps.len(), 1);
         assert_eq!(export_eps.len(), 1);
         assert_eq!(live_eps[0].source_ref, "day:2026-07-24");
-        assert_eq!(live_eps[0].body, export_eps[0].body, "live body must equal export body");
+        assert_eq!(
+            live_eps[0].body, export_eps[0].body,
+            "live body must equal export body"
+        );
         assert_eq!(live_eps[0].title, export_eps[0].title);
     }
 
@@ -307,7 +314,10 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(r.episodes_new, 0, "live-minted day must win over the later export");
+        assert_eq!(
+            r.episodes_new, 0,
+            "live-minted day must win over the later export"
+        );
         assert_eq!(r.episodes_existing, 1);
     }
 

@@ -68,8 +68,8 @@ pub fn parse_csv(text: &str) -> Vec<Vec<String>> {
 /// LinkedIn prefixes some files with a "Notes:" preamble — skip until a
 /// row that looks like a header for `want` columns.
 fn read_csv(path: &Path, want: &[&str]) -> Result<(Vec<String>, Vec<Vec<String>>)> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let rows = parse_csv(&text);
     let header_at = rows.iter().position(|r| {
         let lower: Vec<String> = r.iter().map(|c| c.trim().to_lowercase()).collect();
@@ -102,20 +102,25 @@ fn parse_date(s: &str) -> Option<(String, TimeUncertainty)> {
     if s.is_empty() {
         return None;
     }
-    let parts: Vec<&str> = s
-        .split([' ', ','])
-        .filter(|p| !p.is_empty())
-        .collect();
+    let parts: Vec<&str> = s.split([' ', ',']).filter(|p| !p.is_empty()).collect();
     let month_of = |t: &str| MONTHS.iter().position(|m| t.to_lowercase().starts_with(m));
     match parts.as_slice() {
         // 10 Jul 2026
         [d, m, y] if d.parse::<u32>().is_ok() && month_of(m).is_some() => Some((
-            format!("{y}-{:02}-{:02}", month_of(m).unwrap() + 1, d.parse::<u32>().unwrap()),
+            format!(
+                "{y}-{:02}-{:02}",
+                month_of(m).unwrap() + 1,
+                d.parse::<u32>().unwrap()
+            ),
             TimeUncertainty::Day,
         )),
         // Apr 12, 2011
         [m, d, y] if d.parse::<u32>().is_ok() && month_of(m).is_some() => Some((
-            format!("{y}-{:02}-{:02}", month_of(m).unwrap() + 1, d.parse::<u32>().unwrap()),
+            format!(
+                "{y}-{:02}-{:02}",
+                month_of(m).unwrap() + 1,
+                d.parse::<u32>().unwrap()
+            ),
             TimeUncertainty::Day,
         )),
         // Apr 2020
@@ -255,8 +260,12 @@ pub fn ingest(root: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
         ));
     }
     let mut drafts = Vec::new();
-    let mk = |source_ref: String, kind: &str, title: String, body: String,
-              time: EventTime, entities: Vec<EntityRef>| EpisodeDraft {
+    let mk = |source_ref: String,
+              kind: &str,
+              title: String,
+              body: String,
+              time: EventTime,
+              entities: Vec<EntityRef>| EpisodeDraft {
         source: "linkedin".into(),
         source_ref,
         kind: kind.into(),
@@ -285,7 +294,11 @@ pub fn ingest(root: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
             if !location.is_empty() {
                 body.push_str(&format!("location: {location}\n"));
             }
-            let span_end = if finished.is_empty() { "present".to_string() } else { finished.to_string() };
+            let span_end = if finished.is_empty() {
+                "present".to_string()
+            } else {
+                finished.to_string()
+            };
             body.push_str(&format!("span: {started} → {span_end}\n"));
             if !description.is_empty() {
                 body.push_str(&format!("\n{description}\n"));
@@ -372,7 +385,10 @@ pub fn ingest(root: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
                 format!("publication:{name}:{published}"),
                 "li_publication",
                 format!("Published — {name}"),
-                format!("{name}\npublisher: {publisher}\n\n{}\n", col(&h, row, "description")),
+                format!(
+                    "{name}\npublisher: {publisher}\n\n{}\n",
+                    col(&h, row, "description")
+                ),
                 event_time(parse_date(published)),
                 vec![],
             ));
@@ -388,12 +404,21 @@ pub fn ingest(root: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
             }
             // "Aug 13, 2020 01:00 PM - …" → date words lead
             let time_raw = col(&h, row, "event time");
-            let date = parse_date(&time_raw.split_whitespace().take(3).collect::<Vec<_>>().join(" "));
+            let date = parse_date(
+                &time_raw
+                    .split_whitespace()
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
             drafts.push(mk(
                 format!("event:{name}:{time_raw}"),
                 "li_event",
                 format!("Event — {name}"),
-                format!("event: {name}\nwhen: {time_raw}\nstatus: {}\n", col(&h, row, "status")),
+                format!(
+                    "event: {name}\nwhen: {time_raw}\nstatus: {}\n",
+                    col(&h, row, "status")
+                ),
                 event_time(date),
                 vec![],
             ));
@@ -411,12 +436,19 @@ pub fn ingest(root: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
             let html = std::fs::read_to_string(&path)?;
             let (title, mut text) = html_to_text(&html);
             text.truncate(48 * 1024);
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("article");
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("article");
             let date = stem
                 .get(0..10)
                 .filter(|d| d.as_bytes().get(4) == Some(&b'-'))
                 .map(|d| (d.to_string(), TimeUncertainty::Day));
-            let display = if title.is_empty() { stem.replace('-', " ") } else { title };
+            let display = if title.is_empty() {
+                stem.replace('-', " ")
+            } else {
+                title
+            };
             drafts.push(mk(
                 format!("article:{stem}"),
                 "li_article",
@@ -439,7 +471,8 @@ pub fn ingest(root: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
             .trim()
             .to_string();
             let mut attrs = Vec::new();
-            if let Ok((eh, erows)) = read_csv(&root.join("Email Addresses.csv"), &["email address"]) {
+            if let Ok((eh, erows)) = read_csv(&root.join("Email Addresses.csv"), &["email address"])
+            {
                 for erow in &erows {
                     let email = col(&eh, erow, "email address");
                     if !email.is_empty() {
@@ -514,15 +547,27 @@ mod tests {
         assert_eq!(conns[0].name, "Priya Nair");
         assert_eq!(conns[0].company.as_deref(), Some("Ledger & Co"));
         assert_eq!(conns[0].position.as_deref(), Some("Accountant"));
-        assert_eq!(conns[0].handle.as_deref(), Some("priya.nair@ledger.example"));
+        assert_eq!(
+            conns[0].handle.as_deref(),
+            Some("priya.nair@ledger.example")
+        );
         assert_eq!(conns[0].connected_at.as_deref(), Some("2026-07-10"));
 
         let drafts = ingest(root, Some("work")).unwrap();
         let position = drafts.iter().find(|d| d.kind == "li_position").unwrap();
         assert_eq!(position.title, "CPO at Harbor Labs LLC");
-        assert_eq!(position.event_time.utc.as_deref(), Some("2020-04-01T12:00:00Z"));
-        assert!(position.entities.iter().any(|e| e.name == "Harbor Labs LLC" && e.entity_type == "Org"));
+        assert_eq!(
+            position.event_time.utc.as_deref(),
+            Some("2020-04-01T12:00:00Z")
+        );
+        assert!(position
+            .entities
+            .iter()
+            .any(|e| e.name == "Harbor Labs LLC" && e.entity_type == "Org"));
         let profile = drafts.iter().find(|d| d.kind == "li_profile").unwrap();
-        assert!(profile.entities[0].attributes.iter().any(|(k, v)| k == "email" && v == "jon+li@example.com"));
+        assert!(profile.entities[0]
+            .attributes
+            .iter()
+            .any(|(k, v)| k == "email" && v == "jon+li@example.com"));
     }
 }

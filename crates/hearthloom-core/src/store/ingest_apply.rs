@@ -31,7 +31,15 @@ pub const REVISIONED_SOURCES: &[&str] = &["photos", "visits", "contacts", "trips
 /// location index). Only the owner's keys and peers may ingest under
 /// these names (http.rs `ingest`).
 pub const OWNER_ONLY_SOURCES: &[&str] = &[
-    "photos", "visits", "contacts", "consolidation", "desk", "notes", "codi", "memory", "facebook",
+    "photos",
+    "visits",
+    "contacts",
+    "consolidation",
+    "desk",
+    "notes",
+    "codi",
+    "memory",
+    "facebook",
 ];
 
 impl Store {
@@ -120,7 +128,8 @@ impl Store {
                 scope: scope.clone(),
                 content_ref: Some(content_ref),
                 content_hash: ids::content_hash(draft.body.as_bytes()),
-                derivation: super::episodes::derivation_for(&draft.source, &draft.trust).to_string(),
+                derivation: super::episodes::derivation_for(&draft.source, &draft.trust)
+                    .to_string(),
             };
 
             if !insert_episode(&tx, &row, actor.session_id.as_deref(), &draft.body)? {
@@ -218,8 +227,7 @@ impl Store {
             }
 
             for edge in &draft.edges {
-                let (Some(src), Some(dst)) =
-                    (entity_ids.get(edge.src), entity_ids.get(edge.dst))
+                let (Some(src), Some(dst)) = (entity_ids.get(edge.src), entity_ids.get(edge.dst))
                 else {
                     continue; // malformed assertion; skip rather than abort the batch
                 };
@@ -309,7 +317,14 @@ mod tests {
         };
         let apply = |drafts: Vec<EpisodeDraft>| {
             store
-                .apply_batch(&home, &IngestBatch { actor: "adapter:test".into(), session_id: None, episodes: drafts })
+                .apply_batch(
+                    &home,
+                    &IngestBatch {
+                        actor: "adapter:test".into(),
+                        session_id: None,
+                        episodes: drafts,
+                    },
+                )
                 .unwrap();
         };
         let superseded = |source: &str, source_ref: &str| -> bool {
@@ -323,12 +338,22 @@ mod tests {
         };
         // A mail whose Message-ID ends in `#r2` — the sender chose it —
         // must not hide the real message it names. Same for a calendar UID.
-        apply(vec![from("mbox", "invoice-1234@bank.example"), from("ics", "meeting-77@corp.example")]);
-        apply(vec![from("mbox", "invoice-1234@bank.example#r2"), from("ics", "meeting-77@corp.example#r9")]);
+        apply(vec![
+            from("mbox", "invoice-1234@bank.example"),
+            from("ics", "meeting-77@corp.example"),
+        ]);
+        apply(vec![
+            from("mbox", "invoice-1234@bank.example#r2"),
+            from("ics", "meeting-77@corp.example#r9"),
+        ]);
         assert!(!superseded("mbox", "invoice-1234@bank.example"));
         assert!(!superseded("ics", "meeting-77@corp.example"));
         // Our own revisioned sources still supersede.
-        for (source, base) in [("photos", "photos#2026-07-20"), ("visits", "visit:2026-07-20:0"), ("contacts", "ABC-DEF")] {
+        for (source, base) in [
+            ("photos", "photos#2026-07-20"),
+            ("visits", "visit:2026-07-20:0"),
+            ("contacts", "ABC-DEF"),
+        ] {
             assert!(REVISIONED_SOURCES.contains(&source));
             apply(vec![from(source, base)]);
             apply(vec![from(source, &format!("{base}#r2"))]);
@@ -359,7 +384,13 @@ mod tests {
             .unwrap();
         }
         store
-            .claim_identity(&actor, "Jon Hale", "email", "jon@harbor.example", Some("work"))
+            .claim_identity(
+                &actor,
+                "Jon Hale",
+                "email",
+                "jon@harbor.example",
+                Some("work"),
+            )
             .unwrap();
 
         // Draft with no scope, authored via the work identity.

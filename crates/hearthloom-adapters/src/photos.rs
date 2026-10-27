@@ -129,7 +129,13 @@ pub fn day_draft(
         // lines the Atlas reads by shape, so each is `one_line`d: a file's
         // original name can come from someone else (a saved or received
         // image), and a line break in it must not start a line of its own.
-        let place_of = |photo: &PhotoPoint| photo.place.as_deref().map(one_line).filter(|p| !p.is_empty());
+        let place_of = |photo: &PhotoPoint| {
+            photo
+                .place
+                .as_deref()
+                .map(one_line)
+                .filter(|p| !p.is_empty())
+        };
         let mut places: Vec<String> = Vec::new();
         for photo in photos {
             if let Some(place) = place_of(photo) {
@@ -262,7 +268,11 @@ fn try_query(conn: &Connection, sql: &str) -> Result<Vec<Photo>> {
             latitude: latitude.filter(|l| (-90.0..=90.0).contains(l)),
             longitude: longitude
                 .filter(|l| (-180.0..=180.0).contains(l))
-                .filter(|_| latitude.map(|l| (-90.0..=90.0).contains(&l)).unwrap_or(false)),
+                .filter(|_| {
+                    latitude
+                        .map(|l| (-90.0..=90.0).contains(&l))
+                        .unwrap_or(false)
+                }),
             filename: filename.unwrap_or_else(|| "(unnamed)".into()),
             place: place.filter(|p| !p.is_empty()),
         })
@@ -309,7 +319,9 @@ mod tests {
         let first = &drafts[0];
         assert_eq!(first.kind, "photos");
         assert!(first.title.contains("Cambridge"));
-        assert!(first.body.contains("IMG_1.HEIC (42.3736,-71.1097) — Cambridge"));
+        assert!(first
+            .body
+            .contains("IMG_1.HEIC (42.3736,-71.1097) — Cambridge"));
         // -180 sentinel → no coordinates printed for IMG_2.
         assert!(first.body.contains("IMG_2.HEIC —") || first.body.contains("IMG_2.HEIC\n"));
         assert!(!first.body.contains("GONE.HEIC"));

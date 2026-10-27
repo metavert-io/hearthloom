@@ -102,14 +102,20 @@ pub(crate) fn adopt_rule(store: &Store, envelope: &Value) -> anyhow::Result<bool
         envelope.get("calendar_alone").and_then(Value::as_bool),
         envelope.get("updated_at").and_then(Value::as_str),
     ) {
-        let ours = store.consolidation_state(KEY_CALENDAR_ALONE_STAMP)?.unwrap_or_default();
+        let ours = store
+            .consolidation_state(KEY_CALENDAR_ALONE_STAMP)?
+            .unwrap_or_default();
         if stamp > ours.as_str() || (stamp == ours && !on && calendar_alone(store)) {
             store.set_consolidation_state(KEY_CALENDAR_ALONE, if on { "on" } else { "off" })?;
             store.set_consolidation_state(KEY_CALENDAR_ALONE_STAMP, stamp)?;
             changed = true;
         }
     }
-    if let Some(begun) = envelope.get("cleanup").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+    if let Some(begun) = envelope
+        .get("cleanup")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
         if store.consolidation_state(KEY_CLEANUP)?.is_none() {
             store.set_consolidation_state(KEY_CLEANUP, begun)?;
             changed = true;
@@ -129,7 +135,9 @@ pub(crate) struct Cluster {
 }
 
 fn ts_unix(s: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(s).map(|d| d.timestamp()).ok()
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|d| d.timestamp())
+        .ok()
 }
 
 /// Equirectangular approximation — exact enough at venue scale.
@@ -142,7 +150,13 @@ fn dist_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
 
 impl Cluster {
     fn new(o: StoredObservation, start: i64, end: i64) -> Self {
-        Cluster { lat: o.lat, lon: o.lon, members: vec![o], start_unix: start, end_unix: end }
+        Cluster {
+            lat: o.lat,
+            lon: o.lon,
+            members: vec![o],
+            start_unix: start,
+            end_unix: end,
+        }
     }
 
     fn absorb(&mut self, o: StoredObservation, start: i64, end: i64) {
@@ -178,7 +192,9 @@ impl Cluster {
     /// Is every member a declaration (DECLARED_SOURCES) — a cluster no
     /// phone or photo placed you in?
     fn declared_only(&self) -> bool {
-        self.members.iter().all(|m| DECLARED_SOURCES.contains(&m.source.as_str()))
+        self.members
+            .iter()
+            .all(|m| DECLARED_SOURCES.contains(&m.source.as_str()))
     }
 
     /// Is this cluster evidence of a STAY? It must hold at least one
@@ -213,10 +229,15 @@ impl Cluster {
 /// and temporally adjacent to; else it opens a new cluster. Input must
 /// be time-ordered (observations_for_day guarantees it). The setting
 /// only decides which clusters count, never how they form.
-pub(crate) fn cluster_day(observations: Vec<StoredObservation>, declared_alone: bool) -> Vec<Cluster> {
+pub(crate) fn cluster_day(
+    observations: Vec<StoredObservation>,
+    declared_alone: bool,
+) -> Vec<Cluster> {
     let mut clusters: Vec<Cluster> = Vec::new();
     for o in observations {
-        let Some(start) = ts_unix(&o.t_start) else { continue };
+        let Some(start) = ts_unix(&o.t_start) else {
+            continue;
+        };
         let end = o.t_end.as_deref().and_then(ts_unix).unwrap_or(start);
         let radius = BASE_RADIUS_M.max(o.accuracy_m.unwrap_or(0.0));
         let joined = clusters.iter_mut().rev().find(|c| {
@@ -250,7 +271,13 @@ fn fmt_hhmm_local(unix: i64, tz_offset_minutes: i32) -> String {
 /// `[HH:MM] place (lat,lon)` line is the canonical Atlas point for the
 /// whole visit — per-observation points already reach the Atlas through
 /// their own sources; the visit contributes exactly one.
-pub(crate) fn visit_draft(day: &str, slot: &str, revision: u32, c: &Cluster, scope: &str) -> EpisodeDraft {
+pub(crate) fn visit_draft(
+    day: &str,
+    slot: &str,
+    revision: u32,
+    c: &Cluster,
+    scope: &str,
+) -> EpisodeDraft {
     let place = c.place();
     let label = place
         .clone()
@@ -290,7 +317,11 @@ pub(crate) fn visit_draft(day: &str, slot: &str, revision: u32, c: &Cluster, sco
     let base = format!("visit:{day}:{slot}");
     EpisodeDraft {
         source: "visits".into(),
-        source_ref: if revision <= 1 { base } else { format!("{base}#r{revision}") },
+        source_ref: if revision <= 1 {
+            base
+        } else {
+            format!("{base}#r{revision}")
+        },
         kind: "visit".into(),
         title: format!("Visit \u{2014} {label}"),
         body,
@@ -323,12 +354,10 @@ pub(crate) fn device_scope(store: &hearthloom_core::store::Store) -> String {
 pub(crate) fn finalize_visits(state: &AppState) -> anyhow::Result<(usize, usize, usize)> {
     let store = &state.store;
     let tz = store.observations_latest_tz_offset()?;
-    let today_local = chrono::DateTime::from_timestamp(
-        chrono::Utc::now().timestamp() + tz as i64 * 60,
-        0,
-    )
-    .map(|d| d.format("%Y-%m-%d").to_string())
-    .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string());
+    let today_local =
+        chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp() + tz as i64 * 60, 0)
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%d").to_string());
     finalize_visits_inner(store, &state.home, &today_local)
 }
 
@@ -370,7 +399,12 @@ pub(crate) fn finalize_visits_inner(
             .iter()
             .enumerate()
             .map(|(n, c)| visit_draft(&day, &n.to_string(), revision, c, &scope))
-            .chain(declared.iter().enumerate().map(|(n, c)| visit_draft(&day, &format!("c{n}"), revision, c, &scope)))
+            .chain(
+                declared
+                    .iter()
+                    .enumerate()
+                    .map(|(n, c)| visit_draft(&day, &format!("c{n}"), revision, c, &scope)),
+            )
             .collect();
         let n_new = if drafts.is_empty() {
             0
@@ -395,7 +429,9 @@ pub(crate) fn finalize_visits_inner(
         if revision > 1 {
             let absorbed_into = match drafts.first() {
                 Some(first) => hearthloom_core::ids::episode_id("visits", &first.source_ref),
-                None => hearthloom_core::ids::episode_id("visits", &format!("visit:{day}#r{revision}")),
+                None => {
+                    hearthloom_core::ids::episode_id("visits", &format!("visit:{day}#r{revision}"))
+                }
             };
             superseded += store.supersede_stale_visits(&day, revision as i64, &absorbed_into)?;
         }
@@ -418,7 +454,8 @@ pub(crate) fn finalize_visits_inner(
 /// `visit:<day>:<slot>[#r<n>]` → (day, slot).
 fn ref_day_slot(source_ref: &str) -> Option<(&str, &str)> {
     let base = source_ref.strip_prefix("visit:")?.split('#').next()?;
-    base.split_once(':').filter(|(day, slot)| !day.is_empty() && !slot.is_empty())
+    base.split_once(':')
+        .filter(|(day, slot)| !day.is_empty() && !slot.is_empty())
 }
 
 /// Did a visit come from declarations alone, by its own body? The
@@ -429,12 +466,17 @@ fn ref_day_slot(source_ref: &str) -> Option<(&str, &str)> {
 /// old body can carry a forged `observations:` line: requiring ALL of
 /// them means a forgery can keep a visit, never withdraw a sensed one.
 pub(crate) fn declared_only_body(body: &str) -> bool {
-    let mut lines = body.lines().filter_map(|line| line.strip_prefix("observations: ")).peekable();
+    let mut lines = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("observations: "))
+        .peekable();
     lines.peek().is_some()
         && lines.all(|sources| {
             sources.split(", ").all(|entry| {
                 entry.rsplit_once('\u{00d7}').is_some_and(|(source, n)| {
-                    DECLARED_SOURCES.contains(&source) && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+                    DECLARED_SOURCES.contains(&source)
+                        && !n.is_empty()
+                        && n.bytes().all(|b| b.is_ascii_digit())
                 })
             })
         })
@@ -457,14 +499,19 @@ fn withdraw_calendar_only(store: &Store, actor: &Actor) -> anyhow::Result<usize>
     let mut withdrawn = 0usize;
     loop {
         let batch = store.visits_after(after, CLEANUP_BATCH)?;
-        let Some(&(last, ..)) = batch.last() else { break };
+        let Some(&(last, ..)) = batch.last() else {
+            break;
+        };
         let calendar_only: Vec<(String, String)> = batch
             .iter()
             .filter(|(_, _, _, body)| declared_only_body(body))
             .filter_map(|(_, id, source_ref, _)| {
                 let (day, slot) = ref_day_slot(source_ref)?;
                 slot.bytes().all(|b| b.is_ascii_digit()).then(|| {
-                    let marker = hearthloom_core::ids::episode_id("visits", &format!("visit:{day}#calendar-only"));
+                    let marker = hearthloom_core::ids::episode_id(
+                        "visits",
+                        &format!("visit:{day}#calendar-only"),
+                    );
                     (id.clone(), marker)
                 })
             })
@@ -494,7 +541,14 @@ mod tests {
         (store, home, tmp)
     }
 
-    fn obs(key: &str, t: &str, t_end: Option<&str>, lat: f64, lon: f64, place: Option<&str>) -> ObservationIn {
+    fn obs(
+        key: &str,
+        t: &str,
+        t_end: Option<&str>,
+        lat: f64,
+        lon: f64,
+        place: Option<&str>,
+    ) -> ObservationIn {
         ObservationIn {
             key: key.into(),
             lat,
@@ -514,26 +568,54 @@ mod tests {
     fn test_cross_source_observations_collapse_into_one_visit() {
         let (store, home, _tmp) = node();
         store
-            .observations_add("photos", "a", &[obs(
-                "p1", "2026-08-10T15:05:00Z", None, 42.3601, -71.0589, Some("Faneuil Hall"),
-            )])
+            .observations_add(
+                "photos",
+                "a",
+                &[obs(
+                    "p1",
+                    "2026-08-10T15:05:00Z",
+                    None,
+                    42.3601,
+                    -71.0589,
+                    Some("Faneuil Hall"),
+                )],
+            )
             .unwrap();
         store
-            .observations_add("ios-visits", "a", &[obs(
-                "v1", "2026-08-10T15:00:00Z", Some("2026-08-10T16:00:00Z"),
-                42.3604, -71.0585, None,
-            )])
+            .observations_add(
+                "ios-visits",
+                "a",
+                &[obs(
+                    "v1",
+                    "2026-08-10T15:00:00Z",
+                    Some("2026-08-10T16:00:00Z"),
+                    42.3604,
+                    -71.0585,
+                    None,
+                )],
+            )
             .unwrap();
         store
-            .observations_add("google-timeline", "a", &[obs(
-                "g1", "2026-08-10T15:10:00Z", Some("2026-08-10T15:55:00Z"),
-                42.3599, -71.0592, None,
-            )])
+            .observations_add(
+                "google-timeline",
+                "a",
+                &[obs(
+                    "g1",
+                    "2026-08-10T15:10:00Z",
+                    Some("2026-08-10T15:55:00Z"),
+                    42.3599,
+                    -71.0592,
+                    None,
+                )],
+            )
             .unwrap();
         let (days, minted, sup) = finalize_visits_inner(&store, &home, "2026-08-12").unwrap();
         assert_eq!((days, minted, sup), (1, 1, 0), "three sources, ONE visit");
         // re-run: nothing changes
-        assert_eq!(finalize_visits_inner(&store, &home, "2026-08-12").unwrap(), (0, 0, 0));
+        assert_eq!(
+            finalize_visits_inner(&store, &home, "2026-08-12").unwrap(),
+            (0, 0, 0)
+        );
         let (_, rows) = store
             .read_query(
                 "SELECT e.id, e.source_ref FROM episodes e
@@ -545,7 +627,10 @@ mod tests {
         assert_eq!(rows[0][1], serde_json::json!("visit:2026-08-10:0"));
         // provenance: the body cites all three sources + the place name won
         let (_, body_rows) = store
-            .read_query("SELECT content_ref FROM episodes WHERE source = 'visits'", 10)
+            .read_query(
+                "SELECT content_ref FROM episodes WHERE source = 'visits'",
+                10,
+            )
             .unwrap();
         let content_ref = body_rows[0][0].as_str().unwrap();
         let text = std::fs::read_to_string(home.root().join(content_ref)).unwrap();
@@ -561,15 +646,32 @@ mod tests {
         let (store, home, _tmp) = node();
         // one geotagged photo → no visit
         store
-            .observations_add("photos", "a", &[obs("p1", "2026-08-10T15:05:00Z", None, 42.0, -71.0, None)])
+            .observations_add(
+                "photos",
+                "a",
+                &[obs("p1", "2026-08-10T15:05:00Z", None, 42.0, -71.0, None)],
+            )
             .unwrap();
         let (days, minted, _) = finalize_visits_inner(&store, &home, "2026-08-12").unwrap();
-        assert_eq!((days, minted), (1, 0), "a lone photo is a photo, not a visit");
+        assert_eq!(
+            (days, minted),
+            (1, 0),
+            "a lone photo is a photo, not a visit"
+        );
         // a CLVisit dwell at another spot the next day → a visit even alone
         store
-            .observations_add("ios-visits", "a", &[obs(
-                "v1", "2026-08-11T10:00:00Z", Some("2026-08-11T11:00:00Z"), 43.0, -72.0, None,
-            )])
+            .observations_add(
+                "ios-visits",
+                "a",
+                &[obs(
+                    "v1",
+                    "2026-08-11T10:00:00Z",
+                    Some("2026-08-11T11:00:00Z"),
+                    43.0,
+                    -72.0,
+                    None,
+                )],
+            )
             .unwrap();
         let (_, minted, _) = finalize_visits_inner(&store, &home, "2026-08-13").unwrap();
         assert_eq!(minted, 1);
@@ -579,11 +681,15 @@ mod tests {
     /// superseded rows.
     fn visit_bodies(store: &Store, home: &Home) -> Vec<(String, String)> {
         let (_, rows) = store
-            .read_query("SELECT source_ref, content_ref FROM episodes WHERE source = 'visits'", 20)
+            .read_query(
+                "SELECT source_ref, content_ref FROM episodes WHERE source = 'visits'",
+                20,
+            )
             .unwrap();
         rows.iter()
             .map(|r| {
-                let body = std::fs::read_to_string(home.root().join(r[1].as_str().unwrap())).unwrap();
+                let body =
+                    std::fs::read_to_string(home.root().join(r[1].as_str().unwrap())).unwrap();
                 (r[0].as_str().unwrap().to_string(), body)
             })
             .collect()
@@ -592,7 +698,11 @@ mod tests {
     /// Any visit by ref, whatever its lifecycle: its `superseded_by`.
     fn superseded_by(store: &Store, source_ref: &str) -> Option<String> {
         let id = hearthloom_core::ids::episode_id("visits", source_ref);
-        store.episode_forensic(&id).unwrap().expect("the visit exists").1
+        store
+            .episode_forensic(&id)
+            .unwrap()
+            .expect("the visit exists")
+            .1
     }
 
     /// A calendar entry alone is a plan, not a presence: even with an end
@@ -601,17 +711,49 @@ mod tests {
     fn test_calendar_alone_is_not_a_visit() {
         let (store, home, _tmp) = node();
         store
-            .observations_add("calendar", "a", &[
-                obs("c1", "2026-08-10T15:00:00Z", Some("2026-08-10T16:00:00Z"), 42.36, -71.06, Some("Board Room")),
-                obs("c2", "2026-08-10T15:10:00Z", Some("2026-08-10T15:50:00Z"), 42.3601, -71.0601, Some("Board Room")),
-                obs("c3", "2026-08-10T15:40:00Z", None, 42.3602, -71.0602, Some("Board Room")),
-            ])
+            .observations_add(
+                "calendar",
+                "a",
+                &[
+                    obs(
+                        "c1",
+                        "2026-08-10T15:00:00Z",
+                        Some("2026-08-10T16:00:00Z"),
+                        42.36,
+                        -71.06,
+                        Some("Board Room"),
+                    ),
+                    obs(
+                        "c2",
+                        "2026-08-10T15:10:00Z",
+                        Some("2026-08-10T15:50:00Z"),
+                        42.3601,
+                        -71.0601,
+                        Some("Board Room"),
+                    ),
+                    obs(
+                        "c3",
+                        "2026-08-10T15:40:00Z",
+                        None,
+                        42.3602,
+                        -71.0602,
+                        Some("Board Room"),
+                    ),
+                ],
+            )
             .unwrap();
         let (days, minted, _) = finalize_visits_inner(&store, &home, "2026-08-12").unwrap();
-        assert_eq!((days, minted), (1, 0), "calendar entries alone are not a visit");
+        assert_eq!(
+            (days, minted),
+            (1, 0),
+            "calendar entries alone are not a visit"
+        );
         assert!(visit_bodies(&store, &home).is_empty());
         // the day is in the ledger all the same: not re-clustered every cycle
-        assert_eq!(finalize_visits_inner(&store, &home, "2026-08-12").unwrap(), (0, 0, 0));
+        assert_eq!(
+            finalize_visits_inner(&store, &home, "2026-08-12").unwrap(),
+            (0, 0, 0)
+        );
     }
 
     /// A sensed dwell at the calendar's venue IS a visit — named by the
@@ -620,14 +762,32 @@ mod tests {
     fn test_calendar_names_a_sensed_dwell() {
         let (store, home, _tmp) = node();
         store
-            .observations_add("calendar", "a", &[obs(
-                "c1", "2026-08-10T15:00:00Z", Some("2026-08-10T16:00:00Z"), 42.3601, -71.0589, Some("Board Room"),
-            )])
+            .observations_add(
+                "calendar",
+                "a",
+                &[obs(
+                    "c1",
+                    "2026-08-10T15:00:00Z",
+                    Some("2026-08-10T16:00:00Z"),
+                    42.3601,
+                    -71.0589,
+                    Some("Board Room"),
+                )],
+            )
             .unwrap();
         store
-            .observations_add("ios-visits", "a", &[obs(
-                "v1", "2026-08-10T15:05:00Z", Some("2026-08-10T15:55:00Z"), 42.3603, -71.0587, None,
-            )])
+            .observations_add(
+                "ios-visits",
+                "a",
+                &[obs(
+                    "v1",
+                    "2026-08-10T15:05:00Z",
+                    Some("2026-08-10T15:55:00Z"),
+                    42.3603,
+                    -71.0587,
+                    None,
+                )],
+            )
             .unwrap();
         let (_, minted, _) = finalize_visits_inner(&store, &home, "2026-08-12").unwrap();
         assert_eq!(minted, 1);
@@ -636,9 +796,20 @@ mod tests {
         let (source_ref, body) = &visits[0];
         assert_eq!(source_ref, "visit:2026-08-10:0");
         assert!(body.contains("place: Board Room\n"), "{body}");
-        assert!(body.contains("calendar\u{00d7}1, ios-visits\u{00d7}1"), "{body}");
-        assert!(body.lines().last().unwrap().starts_with("[11:00] Board Room ("), "{body}");
-        let (_, titles) = store.read_query("SELECT title FROM episodes WHERE source = 'visits'", 5).unwrap();
+        assert!(
+            body.contains("calendar\u{00d7}1, ios-visits\u{00d7}1"),
+            "{body}"
+        );
+        assert!(
+            body.lines()
+                .last()
+                .unwrap()
+                .starts_with("[11:00] Board Room ("),
+            "{body}"
+        );
+        let (_, titles) = store
+            .read_query("SELECT title FROM episodes WHERE source = 'visits'", 5)
+            .unwrap();
         assert_eq!(titles[0][0], serde_json::json!("Visit \u{2014} Board Room"));
     }
 
@@ -648,39 +819,92 @@ mod tests {
     #[test]
     fn test_recluster_without_visits_withdraws_the_stale_ones() {
         let (store, home, _tmp) = node();
-        let first = obs("c1", "2026-08-10T15:00:00Z", Some("2026-08-10T16:00:00Z"), 42.36, -71.06, Some("Dentist"));
-        store.observations_add("calendar", "a", std::slice::from_ref(&first)).unwrap();
+        let first = obs(
+            "c1",
+            "2026-08-10T15:00:00Z",
+            Some("2026-08-10T16:00:00Z"),
+            42.36,
+            -71.06,
+            Some("Dentist"),
+        );
+        store
+            .observations_add("calendar", "a", std::slice::from_ref(&first))
+            .unwrap();
         // what the earlier rule minted for that day, and its ledger row
         let stored = store.observations_for_day("2026-08-10").unwrap();
-        let (start, end) = (ts_unix(&stored[0].t_start).unwrap(), ts_unix(stored[0].t_end.as_deref().unwrap()).unwrap());
-        let legacy = visit_draft("2026-08-10", "0", 1, &Cluster::new(stored[0].clone(), start, end), "personal");
+        let (start, end) = (
+            ts_unix(&stored[0].t_start).unwrap(),
+            ts_unix(stored[0].t_end.as_deref().unwrap()).unwrap(),
+        );
+        let legacy = visit_draft(
+            "2026-08-10",
+            "0",
+            1,
+            &Cluster::new(stored[0].clone(), start, end),
+            "personal",
+        );
         store
-            .apply_batch(&home, &IngestBatch { actor: "agent:visit-finalize".into(), session_id: None, episodes: vec![legacy] })
+            .apply_batch(
+                &home,
+                &IngestBatch {
+                    actor: "agent:visit-finalize".into(),
+                    session_id: None,
+                    episodes: vec![legacy],
+                },
+            )
             .unwrap();
         let mut keys = vec![stored[0].id.clone()];
         let hash = hearthloom_core::store::photo_keys_hash(&mut keys);
-        store.set_visit_day_state("2026-08-10", 1, &hash, 1).unwrap();
-        store.location_backfill(&Actor::new("human:test"), 10).unwrap();
+        store
+            .set_visit_day_state("2026-08-10", 1, &hash, 1)
+            .unwrap();
+        store
+            .location_backfill(&Actor::new("human:test"), 10)
+            .unwrap();
 
         // a second calendar entry that day: the union grows, r2 keeps nothing
         store
-            .observations_add("calendar", "a", &[obs(
-                "c2", "2026-08-10T18:00:00Z", Some("2026-08-10T19:00:00Z"), 42.5, -71.5, Some("Gym"),
-            )])
+            .observations_add(
+                "calendar",
+                "a",
+                &[obs(
+                    "c2",
+                    "2026-08-10T18:00:00Z",
+                    Some("2026-08-10T19:00:00Z"),
+                    42.5,
+                    -71.5,
+                    Some("Gym"),
+                )],
+            )
             .unwrap();
-        let (days, minted, superseded) = finalize_visits_inner(&store, &home, "2026-08-12").unwrap();
+        let (days, minted, superseded) =
+            finalize_visits_inner(&store, &home, "2026-08-12").unwrap();
         assert_eq!((days, minted, superseded), (1, 0, 1));
         assert!(visit_bodies(&store, &home).is_empty());
         let marker = hearthloom_core::ids::episode_id("visits", "visit:2026-08-10#r2");
-        assert_eq!(superseded_by(&store, "visit:2026-08-10:0"), Some(marker.clone()));
-        let (_, points) = store.read_query("SELECT COUNT(*) FROM location_points", 1).unwrap();
+        assert_eq!(
+            superseded_by(&store, "visit:2026-08-10:0"),
+            Some(marker.clone())
+        );
+        let (_, points) = store
+            .read_query("SELECT COUNT(*) FROM location_points", 1)
+            .unwrap();
         assert_eq!(points[0][0], serde_json::json!(0));
 
         // a sensed dwell later: a visit again, named by the calendar
         store
-            .observations_add("ios-visits", "a", &[obs(
-                "v1", "2026-08-10T15:02:00Z", Some("2026-08-10T15:58:00Z"), 42.3601, -71.0601, None,
-            )])
+            .observations_add(
+                "ios-visits",
+                "a",
+                &[obs(
+                    "v1",
+                    "2026-08-10T15:02:00Z",
+                    Some("2026-08-10T15:58:00Z"),
+                    42.3601,
+                    -71.0601,
+                    None,
+                )],
+            )
             .unwrap();
         let (_, minted, _) = finalize_visits_inner(&store, &home, "2026-08-12").unwrap();
         assert_eq!(minted, 1);
@@ -699,26 +923,60 @@ mod tests {
     fn test_place_with_a_line_break_forges_no_point() {
         let (store, home, _tmp) = node();
         store
-            .observations_add("calendar", "a", &[obs(
-                "c1", "2026-08-10T15:00:00Z", Some("2026-08-10T16:00:00Z"), 42.3601, -71.0589,
-                Some("Cafe\n[12:00] Elsewhere (40.71,-74.00)\u{2028}more"),
-            )])
+            .observations_add(
+                "calendar",
+                "a",
+                &[obs(
+                    "c1",
+                    "2026-08-10T15:00:00Z",
+                    Some("2026-08-10T16:00:00Z"),
+                    42.3601,
+                    -71.0589,
+                    Some("Cafe\n[12:00] Elsewhere (40.71,-74.00)\u{2028}more"),
+                )],
+            )
             .unwrap();
         store
-            .observations_add("ios-visits\n[13:00] X (1,2)", "a", &[obs(
-                "v1", "2026-08-10T15:05:00Z", Some("2026-08-10T15:55:00Z"), 42.3603, -71.0587, None,
-            )])
+            .observations_add(
+                "ios-visits\n[13:00] X (1,2)",
+                "a",
+                &[obs(
+                    "v1",
+                    "2026-08-10T15:05:00Z",
+                    Some("2026-08-10T15:55:00Z"),
+                    42.3603,
+                    -71.0587,
+                    None,
+                )],
+            )
             .unwrap();
         let (_, minted, _) = finalize_visits_inner(&store, &home, "2026-08-12").unwrap();
         assert_eq!(minted, 1);
         let (_, body) = &visit_bodies(&store, &home)[0];
-        assert!(body.contains("place: Cafe [12:00] Elsewhere (40.71,-74.00) more\n"), "{body}");
-        assert_eq!(body.lines().filter(|l| l.starts_with('[')).count(), 1, "{body}");
-        let (_, added) = store.location_backfill(&Actor::new("human:test"), 10).unwrap();
+        assert!(
+            body.contains("place: Cafe [12:00] Elsewhere (40.71,-74.00) more\n"),
+            "{body}"
+        );
+        assert_eq!(
+            body.lines().filter(|l| l.starts_with('[')).count(),
+            1,
+            "{body}"
+        );
+        let (_, added) = store
+            .location_backfill(&Actor::new("human:test"), 10)
+            .unwrap();
         assert_eq!(added, 1);
-        let (_, points) = store.read_query("SELECT lat, lon FROM location_points", 5).unwrap();
-        let (lat, lon) = (points[0][0].as_f64().unwrap(), points[0][1].as_f64().unwrap());
-        assert!((lat - 42.3602).abs() < 0.001 && (lon + 71.0588).abs() < 0.001, "{lat},{lon}");
+        let (_, points) = store
+            .read_query("SELECT lat, lon FROM location_points", 5)
+            .unwrap();
+        let (lat, lon) = (
+            points[0][0].as_f64().unwrap(),
+            points[0][1].as_f64().unwrap(),
+        );
+        assert!(
+            (lat - 42.3602).abs() < 0.001 && (lon + 71.0588).abs() < 0.001,
+            "{lat},{lon}"
+        );
     }
 
     /// Late-arriving observations re-mint the day under #r2 and the
@@ -728,16 +986,45 @@ mod tests {
         let (store, home, _tmp) = node();
         // day 1: two separate dwells far apart → two visits
         store
-            .observations_add("ios-visits", "a", &[
-                obs("v1", "2026-08-10T10:00:00Z", Some("2026-08-10T11:00:00Z"), 42.0, -71.0, None),
-                obs("v2", "2026-08-10T15:00:00Z", Some("2026-08-10T16:00:00Z"), 42.5, -71.5, None),
-            ])
+            .observations_add(
+                "ios-visits",
+                "a",
+                &[
+                    obs(
+                        "v1",
+                        "2026-08-10T10:00:00Z",
+                        Some("2026-08-10T11:00:00Z"),
+                        42.0,
+                        -71.0,
+                        None,
+                    ),
+                    obs(
+                        "v2",
+                        "2026-08-10T15:00:00Z",
+                        Some("2026-08-10T16:00:00Z"),
+                        42.5,
+                        -71.5,
+                        None,
+                    ),
+                ],
+            )
             .unwrap();
         let (_, minted, _) = finalize_visits_inner(&store, &home, "2026-08-12").unwrap();
         assert_eq!(minted, 2);
         // a photo lands later inside the first dwell → union grows, r2
         store
-            .observations_add("photos", "a", &[obs("p1", "2026-08-10T10:30:00Z", None, 42.0001, -71.0001, Some("Home"))])
+            .observations_add(
+                "photos",
+                "a",
+                &[obs(
+                    "p1",
+                    "2026-08-10T10:30:00Z",
+                    None,
+                    42.0001,
+                    -71.0001,
+                    Some("Home"),
+                )],
+            )
             .unwrap();
         let (_, minted2, _) = finalize_visits_inner(&store, &home, "2026-08-12").unwrap();
         assert!(minted2 >= 2, "r2 re-mints the day's visits");
@@ -767,10 +1054,26 @@ mod tests {
             .map(|(n, c)| visit_draft(day, &n.to_string(), 1, c, "personal"))
             .collect();
         store
-            .apply_batch(home, &IngestBatch { actor: "agent:visit-finalize".into(), session_id: None, episodes: drafts })
+            .apply_batch(
+                home,
+                &IngestBatch {
+                    actor: "agent:visit-finalize".into(),
+                    session_id: None,
+                    episodes: drafts,
+                },
+            )
             .unwrap();
-        store.set_visit_day_state(day, count, &hearthloom_core::store::photo_keys_hash(&mut keys), 1).unwrap();
-        store.location_backfill(&Actor::new("human:test"), 50).unwrap();
+        store
+            .set_visit_day_state(
+                day,
+                count,
+                &hearthloom_core::store::photo_keys_hash(&mut keys),
+                1,
+            )
+            .unwrap();
+        store
+            .location_backfill(&Actor::new("human:test"), 50)
+            .unwrap();
     }
 
     fn count(store: &Store, sql: &str) -> i64 {
@@ -784,7 +1087,10 @@ mod tests {
     /// The `visit_withdrawn` mutations' payloads.
     fn withdrawals(store: &Store) -> Vec<Value> {
         let rows = store.mutations_since(0, 10_000).unwrap();
-        rows.into_iter().filter(|m| m.kind == "visit_withdrawn").map(|m| m.payload).collect()
+        rows.into_iter()
+            .filter(|m| m.kind == "visit_withdrawn")
+            .map(|m| m.payload)
+            .collect()
     }
 
     /// Setting off (the default): a calendar event alone mints nothing, and
@@ -794,24 +1100,46 @@ mod tests {
     fn test_setting_off_mints_no_calendar_visit_and_withdraws_the_old_one() {
         let (store, home, _tmp) = node();
         store
-            .observations_add("calendar", "a", &[obs(
-                "c1", "2026-08-09T13:00:00Z", Some("2026-08-09T14:00:00Z"), 42.36, -71.06, Some("Dentist"),
-            )])
+            .observations_add(
+                "calendar",
+                "a",
+                &[obs(
+                    "c1",
+                    "2026-08-09T13:00:00Z",
+                    Some("2026-08-09T14:00:00Z"),
+                    42.36,
+                    -71.06,
+                    Some("Dentist"),
+                )],
+            )
             .unwrap();
         mint_as_old_rule(&store, &home, "2026-08-09");
         assert_eq!(visit_bodies(&store, &home).len(), 1);
         assert_eq!(count(&store, "SELECT COUNT(*) FROM location_points"), 1);
         // a new day, a calendar entry and nothing else
         store
-            .observations_add("calendar", "a", &[obs(
-                "c2", "2026-08-10T15:00:00Z", Some("2026-08-10T16:00:00Z"), 42.5, -71.5, Some("Lunch"),
-            )])
+            .observations_add(
+                "calendar",
+                "a",
+                &[obs(
+                    "c2",
+                    "2026-08-10T15:00:00Z",
+                    Some("2026-08-10T16:00:00Z"),
+                    42.5,
+                    -71.5,
+                    Some("Lunch"),
+                )],
+            )
             .unwrap();
 
-        let (days, minted, superseded) = finalize_visits_inner(&store, &home, "2026-08-12").unwrap();
+        let (days, minted, superseded) =
+            finalize_visits_inner(&store, &home, "2026-08-12").unwrap();
         assert_eq!((days, minted, superseded), (1, 0, 1));
         assert!(visit_bodies(&store, &home).is_empty());
-        assert_eq!(superseded_by(&store, "visit:2026-08-09:0"), Some(calendar_only_marker("2026-08-09")));
+        assert_eq!(
+            superseded_by(&store, "visit:2026-08-09:0"),
+            Some(calendar_only_marker("2026-08-09"))
+        );
         assert_eq!(count(&store, "SELECT COUNT(*) FROM location_points"), 0);
         // nothing left the record: the episode and its words are all there
         let id = hearthloom_core::ids::episode_id("visits", "visit:2026-08-09:0");
@@ -819,7 +1147,9 @@ mod tests {
         assert!(body.unwrap().contains("observations: calendar\u{00d7}1"));
         assert_eq!(
             withdrawals(&store),
-            [json!({"episode": id, "superseded_by": calendar_only_marker("2026-08-09"), "reason": "calendar_only"})]
+            [
+                json!({"episode": id, "superseded_by": calendar_only_marker("2026-08-09"), "reason": "calendar_only"})
+            ]
         );
     }
 
@@ -830,25 +1160,59 @@ mod tests {
         let (store, home, _tmp) = node();
         set_calendar_alone(&store, true).unwrap();
         store
-            .observations_add("calendar", "a", &[obs(
-                "c1", "2026-08-10T13:00:00Z", Some("2026-08-10T14:00:00Z"), 42.36, -71.06, Some("Dentist"),
-            )])
+            .observations_add(
+                "calendar",
+                "a",
+                &[obs(
+                    "c1",
+                    "2026-08-10T13:00:00Z",
+                    Some("2026-08-10T14:00:00Z"),
+                    42.36,
+                    -71.06,
+                    Some("Dentist"),
+                )],
+            )
             .unwrap();
         store
-            .observations_add("ios-visits", "a", &[obs(
-                "v1", "2026-08-10T18:00:00Z", Some("2026-08-10T19:00:00Z"), 42.5, -71.5, None,
-            )])
+            .observations_add(
+                "ios-visits",
+                "a",
+                &[obs(
+                    "v1",
+                    "2026-08-10T18:00:00Z",
+                    Some("2026-08-10T19:00:00Z"),
+                    42.5,
+                    -71.5,
+                    None,
+                )],
+            )
             .unwrap();
-        let (days, minted, superseded) = finalize_visits_inner(&store, &home, "2026-08-12").unwrap();
+        let (days, minted, superseded) =
+            finalize_visits_inner(&store, &home, "2026-08-12").unwrap();
         assert_eq!((days, minted, superseded), (1, 2, 0));
         let mut visits = visit_bodies(&store, &home);
         visits.sort();
         assert_eq!(visits[0].0, "visit:2026-08-10:0");
-        assert!(visits[0].1.contains("observations: ios-visits\u{00d7}1\n"), "{}", visits[0].1);
+        assert!(
+            visits[0].1.contains("observations: ios-visits\u{00d7}1\n"),
+            "{}",
+            visits[0].1
+        );
         assert_eq!(visits[1].0, "visit:2026-08-10:c0");
-        assert!(visits[1].1.contains("place: Dentist\nar"), "{}", visits[1].1);
-        assert!(visits[1].1.contains("observations: calendar\u{00d7}1\n"), "{}", visits[1].1);
-        assert_eq!(finalize_visits_inner(&store, &home, "2026-08-12").unwrap(), (0, 0, 0));
+        assert!(
+            visits[1].1.contains("place: Dentist\nar"),
+            "{}",
+            visits[1].1
+        );
+        assert!(
+            visits[1].1.contains("observations: calendar\u{00d7}1\n"),
+            "{}",
+            visits[1].1
+        );
+        assert_eq!(
+            finalize_visits_inner(&store, &home, "2026-08-12").unwrap(),
+            (0, 0, 0)
+        );
     }
 
     /// A calendar entry with one geotagged photo inside it is a visit
@@ -859,32 +1223,87 @@ mod tests {
             let (store, home, _tmp) = node();
             set_calendar_alone(&store, on).unwrap();
             store
-                .observations_add("calendar", "a", &[obs(
-                    "c1", "2026-08-10T15:00:00Z", Some("2026-08-10T16:00:00Z"), 42.3601, -71.0589, Some("Board Room"),
-                )])
+                .observations_add(
+                    "calendar",
+                    "a",
+                    &[obs(
+                        "c1",
+                        "2026-08-10T15:00:00Z",
+                        Some("2026-08-10T16:00:00Z"),
+                        42.3601,
+                        -71.0589,
+                        Some("Board Room"),
+                    )],
+                )
                 .unwrap();
             store
-                .observations_add("photos", "a", &[obs("p1", "2026-08-10T15:20:00Z", None, 42.3602, -71.0588, None)])
+                .observations_add(
+                    "photos",
+                    "a",
+                    &[obs(
+                        "p1",
+                        "2026-08-10T15:20:00Z",
+                        None,
+                        42.3602,
+                        -71.0588,
+                        None,
+                    )],
+                )
                 .unwrap();
-            assert_eq!(finalize_visits_inner(&store, &home, "2026-08-12").unwrap(), (1, 1, 0), "on={on}");
+            assert_eq!(
+                finalize_visits_inner(&store, &home, "2026-08-12").unwrap(),
+                (1, 1, 0),
+                "on={on}"
+            );
             // the old rule's copy of the same day is kept too
             store
-                .observations_add("calendar", "a", &[obs(
-                    "c2", "2026-08-09T15:00:00Z", Some("2026-08-09T16:00:00Z"), 42.3601, -71.0589, Some("Board Room"),
-                )])
+                .observations_add(
+                    "calendar",
+                    "a",
+                    &[obs(
+                        "c2",
+                        "2026-08-09T15:00:00Z",
+                        Some("2026-08-09T16:00:00Z"),
+                        42.3601,
+                        -71.0589,
+                        Some("Board Room"),
+                    )],
+                )
                 .unwrap();
             store
-                .observations_add("photos", "a", &[obs("p2", "2026-08-09T15:20:00Z", None, 42.3602, -71.0588, None)])
+                .observations_add(
+                    "photos",
+                    "a",
+                    &[obs(
+                        "p2",
+                        "2026-08-09T15:20:00Z",
+                        None,
+                        42.3602,
+                        -71.0588,
+                        None,
+                    )],
+                )
                 .unwrap();
             mint_as_old_rule(&store, &home, "2026-08-09");
             set_calendar_alone(&store, false).unwrap();
-            assert_eq!(finalize_visits_inner(&store, &home, "2026-08-12").unwrap(), (0, 0, 0), "on={on}");
+            assert_eq!(
+                finalize_visits_inner(&store, &home, "2026-08-12").unwrap(),
+                (0, 0, 0),
+                "on={on}"
+            );
             let mut visits = visit_bodies(&store, &home);
             visits.sort();
             let refs: Vec<&str> = visits.iter().map(|(r, _)| r.as_str()).collect();
-            assert_eq!(refs, ["visit:2026-08-09:0", "visit:2026-08-10:0"], "on={on}");
+            assert_eq!(
+                refs,
+                ["visit:2026-08-09:0", "visit:2026-08-10:0"],
+                "on={on}"
+            );
             for (_, body) in &visits {
-                assert!(body.contains("observations: calendar\u{00d7}1, photos\u{00d7}1\n"), "{body}");
+                assert!(
+                    body.contains("observations: calendar\u{00d7}1, photos\u{00d7}1\n"),
+                    "{body}"
+                );
             }
         }
     }
@@ -896,34 +1315,93 @@ mod tests {
     fn test_cleanup_keeps_sensed_visits_and_is_idempotent() {
         let (store, home, _tmp) = node();
         store
-            .observations_add("calendar", "a", &[
-                obs("c1", "2026-08-10T13:00:00Z", Some("2026-08-10T14:00:00Z"), 42.30, -71.00, Some("Dentist")),
-                obs("c2", "2026-08-10T16:00:00Z", Some("2026-08-10T17:00:00Z"), 42.40, -71.10, Some("Board Room")),
-            ])
+            .observations_add(
+                "calendar",
+                "a",
+                &[
+                    obs(
+                        "c1",
+                        "2026-08-10T13:00:00Z",
+                        Some("2026-08-10T14:00:00Z"),
+                        42.30,
+                        -71.00,
+                        Some("Dentist"),
+                    ),
+                    obs(
+                        "c2",
+                        "2026-08-10T16:00:00Z",
+                        Some("2026-08-10T17:00:00Z"),
+                        42.40,
+                        -71.10,
+                        Some("Board Room"),
+                    ),
+                ],
+            )
             .unwrap();
         store
-            .observations_add("photos", "a", &[obs("p1", "2026-08-10T16:30:00Z", None, 42.4001, -71.1001, None)])
+            .observations_add(
+                "photos",
+                "a",
+                &[obs(
+                    "p1",
+                    "2026-08-10T16:30:00Z",
+                    None,
+                    42.4001,
+                    -71.1001,
+                    None,
+                )],
+            )
             .unwrap();
         store
-            .observations_add("ios-visits", "a", &[obs(
-                "v1", "2026-08-10T20:00:00Z", Some("2026-08-10T21:00:00Z"), 42.50, -71.20, None,
-            )])
+            .observations_add(
+                "ios-visits",
+                "a",
+                &[obs(
+                    "v1",
+                    "2026-08-10T20:00:00Z",
+                    Some("2026-08-10T21:00:00Z"),
+                    42.50,
+                    -71.20,
+                    None,
+                )],
+            )
             .unwrap();
         mint_as_old_rule(&store, &home, "2026-08-10");
         assert_eq!(visit_bodies(&store, &home).len(), 3);
 
-        assert_eq!(finalize_visits_inner(&store, &home, "2026-08-12").unwrap(), (0, 0, 1));
-        let mut live: Vec<String> = visit_bodies(&store, &home).into_iter().map(|(r, _)| r).collect();
+        assert_eq!(
+            finalize_visits_inner(&store, &home, "2026-08-12").unwrap(),
+            (0, 0, 1)
+        );
+        let mut live: Vec<String> = visit_bodies(&store, &home)
+            .into_iter()
+            .map(|(r, _)| r)
+            .collect();
         live.sort();
-        assert_eq!(live, ["visit:2026-08-10:1", "visit:2026-08-10:2"], "the dentist alone goes");
-        assert_eq!(superseded_by(&store, "visit:2026-08-10:0"), Some(calendar_only_marker("2026-08-10")));
+        assert_eq!(
+            live,
+            ["visit:2026-08-10:1", "visit:2026-08-10:2"],
+            "the dentist alone goes"
+        );
+        assert_eq!(
+            superseded_by(&store, "visit:2026-08-10:0"),
+            Some(calendar_only_marker("2026-08-10"))
+        );
         assert_eq!(count(&store, "SELECT COUNT(*) FROM location_points"), 2);
 
         // once per visit: the watermark moved past them …
-        assert_eq!(finalize_visits_inner(&store, &home, "2026-08-12").unwrap(), (0, 0, 0));
+        assert_eq!(
+            finalize_visits_inner(&store, &home, "2026-08-12").unwrap(),
+            (0, 0, 0)
+        );
         // … and reading them all again withdraws nothing more
-        store.set_consolidation_state(KEY_CLEANUP_ROWID, "0").unwrap();
-        assert_eq!(withdraw_calendar_only(&store, &Actor::new("human:test")).unwrap(), 0);
+        store
+            .set_consolidation_state(KEY_CLEANUP_ROWID, "0")
+            .unwrap();
+        assert_eq!(
+            withdraw_calendar_only(&store, &Actor::new("human:test")).unwrap(),
+            0
+        );
         assert_eq!(visit_bodies(&store, &home).len(), 2);
         assert_eq!(withdrawals(&store).len(), 1);
     }
@@ -935,29 +1413,59 @@ mod tests {
     fn test_switching_changes_only_later_days() {
         let (store, home, _tmp) = node();
         store
-            .observations_add("calendar", "a", &[obs(
-                "c1", "2026-08-09T13:00:00Z", Some("2026-08-09T14:00:00Z"), 42.36, -71.06, Some("Dentist"),
-            )])
+            .observations_add(
+                "calendar",
+                "a",
+                &[obs(
+                    "c1",
+                    "2026-08-09T13:00:00Z",
+                    Some("2026-08-09T14:00:00Z"),
+                    42.36,
+                    -71.06,
+                    Some("Dentist"),
+                )],
+            )
             .unwrap();
         mint_as_old_rule(&store, &home, "2026-08-09");
-        assert_eq!(finalize_visits_inner(&store, &home, "2026-08-12").unwrap(), (0, 0, 1));
+        assert_eq!(
+            finalize_visits_inner(&store, &home, "2026-08-12").unwrap(),
+            (0, 0, 1)
+        );
 
         set_calendar_alone(&store, true).unwrap();
         store
-            .observations_add("calendar", "a", &[obs(
-                "c2", "2026-08-10T15:00:00Z", Some("2026-08-10T16:00:00Z"), 42.5, -71.5, Some("Lunch"),
-            )])
+            .observations_add(
+                "calendar",
+                "a",
+                &[obs(
+                    "c2",
+                    "2026-08-10T15:00:00Z",
+                    Some("2026-08-10T16:00:00Z"),
+                    42.5,
+                    -71.5,
+                    Some("Lunch"),
+                )],
+            )
             .unwrap();
-        assert_eq!(finalize_visits_inner(&store, &home, "2026-08-12").unwrap(), (1, 1, 0));
+        assert_eq!(
+            finalize_visits_inner(&store, &home, "2026-08-12").unwrap(),
+            (1, 1, 0)
+        );
         let live = |store: &Store| -> Vec<String> {
-            let mut refs: Vec<String> = visit_bodies(store, &home).into_iter().map(|(r, _)| r).collect();
+            let mut refs: Vec<String> = visit_bodies(store, &home)
+                .into_iter()
+                .map(|(r, _)| r)
+                .collect();
             refs.sort();
             refs
         };
         assert_eq!(live(&store), ["visit:2026-08-10:c0"]);
 
         set_calendar_alone(&store, false).unwrap();
-        assert_eq!(finalize_visits_inner(&store, &home, "2026-08-12").unwrap(), (0, 0, 0));
+        assert_eq!(
+            finalize_visits_inner(&store, &home, "2026-08-12").unwrap(),
+            (0, 0, 0)
+        );
         assert_eq!(live(&store), ["visit:2026-08-10:c0"]);
     }
 
@@ -970,14 +1478,33 @@ mod tests {
                              observations: calendar\u{00d7}1\n\
                              [09:00] Dentist (42.36000,-71.06000)\n";
         assert!(declared_only_body(calendar_only));
-        assert!(declared_only_body(&calendar_only.replace("\u{00d7}1", "\u{00d7}2")));
-        for sensed in ["calendar\u{00d7}1, photos\u{00d7}1", "calendar\u{00d7}1, ios-visits\u{00d7}1", "ios-visits\u{00d7}1"] {
-            assert!(!declared_only_body(&calendar_only.replace("calendar\u{00d7}1", sensed)), "{sensed}");
+        assert!(declared_only_body(
+            &calendar_only.replace("\u{00d7}1", "\u{00d7}2")
+        ));
+        for sensed in [
+            "calendar\u{00d7}1, photos\u{00d7}1",
+            "calendar\u{00d7}1, ios-visits\u{00d7}1",
+            "ios-visits\u{00d7}1",
+        ] {
+            assert!(
+                !declared_only_body(&calendar_only.replace("calendar\u{00d7}1", sensed)),
+                "{sensed}"
+            );
         }
         // no line, or one not in visit_draft's shape: kept
-        assert!(!declared_only_body("place: Dentist\narrival: 2026-08-10T13:00:00Z\n"));
-        for odd in ["calendar", "calendar\u{00d7}", "calendar\u{00d7}one", "calendar\u{00d7}1,photos\u{00d7}1"] {
-            assert!(!declared_only_body(&calendar_only.replace("calendar\u{00d7}1", odd)), "{odd}");
+        assert!(!declared_only_body(
+            "place: Dentist\narrival: 2026-08-10T13:00:00Z\n"
+        ));
+        for odd in [
+            "calendar",
+            "calendar\u{00d7}",
+            "calendar\u{00d7}one",
+            "calendar\u{00d7}1,photos\u{00d7}1",
+        ] {
+            assert!(
+                !declared_only_body(&calendar_only.replace("calendar\u{00d7}1", odd)),
+                "{odd}"
+            );
         }
         // a pre-0.5.71 venue with line breaks, written twice (place line and
         // label): a forged line can keep a calendar-only visit, never
@@ -988,18 +1515,31 @@ mod tests {
              observations: calendar\u{00d7}1, ios-visits\u{00d7}1\n[09:00] {venue} (42.36000,-71.06000)\n"
         );
         assert!(!declared_only_body(&sensed));
-        let forged = calendar_only.replace("place: Dentist", "place: Dentist\nobservations: photos\u{00d7}1");
+        let forged = calendar_only.replace(
+            "place: Dentist",
+            "place: Dentist\nobservations: photos\u{00d7}1",
+        );
         assert!(!declared_only_body(&forged));
         // and what visit_draft writes today, both ways
         let o = |source: &str, key: &str| StoredObservation {
-            id: format!("{source}|{key}"), source: source.into(), lat: 42.36, lon: -71.06, accuracy_m: None,
-            t_start: "2026-08-10T13:00:00Z".into(), t_end: Some("2026-08-10T14:00:00Z".into()),
-            tz_offset_minutes: -240, place: Some("Dentist".into()),
+            id: format!("{source}|{key}"),
+            source: source.into(),
+            lat: 42.36,
+            lon: -71.06,
+            accuracy_m: None,
+            t_start: "2026-08-10T13:00:00Z".into(),
+            t_end: Some("2026-08-10T14:00:00Z".into()),
+            tz_offset_minutes: -240,
+            place: Some("Dentist".into()),
         };
         let mut c = Cluster::new(o("calendar", "c1"), 1, 2);
-        assert!(declared_only_body(&visit_draft("2026-08-10", "c0", 1, &c, "personal").body));
+        assert!(declared_only_body(
+            &visit_draft("2026-08-10", "c0", 1, &c, "personal").body
+        ));
         c.absorb(o("photos", "p1"), 1, 1);
-        assert!(!declared_only_body(&visit_draft("2026-08-10", "0", 1, &c, "personal").body));
+        assert!(!declared_only_body(
+            &visit_draft("2026-08-10", "0", 1, &c, "personal").body
+        ));
     }
 
     /// The setting syncs last-writer-wins (a tie goes to off), and a
@@ -1009,19 +1549,29 @@ mod tests {
     fn test_rule_syncs_and_the_cleanup_runs_on_both_nodes() {
         let (laptop, laptop_home, _a) = node();
         let (tenant, tenant_home, _b) = node();
-        assert!(rule_envelope(&laptop).is_none(), "nothing set, nothing sent");
+        assert!(
+            rule_envelope(&laptop).is_none(),
+            "nothing set, nothing sent"
+        );
         set_calendar_alone(&laptop, true).unwrap();
         assert!(adopt_rule(&tenant, &rule_envelope(&laptop).unwrap()).unwrap());
         assert!(calendar_alone(&tenant));
-        assert!(!adopt_rule(&tenant, &rule_envelope(&laptop).unwrap()).unwrap(), "the same word twice");
+        assert!(
+            !adopt_rule(&tenant, &rule_envelope(&laptop).unwrap()).unwrap(),
+            "the same word twice"
+        );
         let stale = json!({"calendar_alone": false, "updated_at": "2000-01-01T00:00:00Z"});
         assert!(!adopt_rule(&tenant, &stale).unwrap());
         assert!(calendar_alone(&tenant));
         // the same second, opposite words: both end off
         for store in [&laptop, &tenant] {
-            store.set_consolidation_state(KEY_CALENDAR_ALONE_STAMP, "2001-01-01T00:00:00Z").unwrap();
+            store
+                .set_consolidation_state(KEY_CALENDAR_ALONE_STAMP, "2001-01-01T00:00:00Z")
+                .unwrap();
         }
-        tenant.set_consolidation_state(KEY_CALENDAR_ALONE, "off").unwrap();
+        tenant
+            .set_consolidation_state(KEY_CALENDAR_ALONE, "off")
+            .unwrap();
         assert!(!adopt_rule(&tenant, &rule_envelope(&laptop).unwrap()).unwrap());
         assert!(adopt_rule(&laptop, &rule_envelope(&tenant).unwrap()).unwrap());
         assert!(!calendar_alone(&laptop) && !calendar_alone(&tenant));
@@ -1030,22 +1580,43 @@ mod tests {
         // with the setting off, then the owner switches it on at the laptop
         for (store, home) in [(&laptop, &laptop_home), (&tenant, &tenant_home)] {
             store
-                .observations_add("calendar", "a", &[obs(
-                    "c1", "2026-08-09T13:00:00Z", Some("2026-08-09T14:00:00Z"), 42.36, -71.06, Some("Dentist"),
-                )])
+                .observations_add(
+                    "calendar",
+                    "a",
+                    &[obs(
+                        "c1",
+                        "2026-08-09T13:00:00Z",
+                        Some("2026-08-09T14:00:00Z"),
+                        42.36,
+                        -71.06,
+                        Some("Dentist"),
+                    )],
+                )
                 .unwrap();
             mint_as_old_rule(store, home, "2026-08-09");
         }
-        assert_eq!(finalize_visits_inner(&tenant, &tenant_home, "2026-08-12").unwrap(), (0, 0, 1));
+        assert_eq!(
+            finalize_visits_inner(&tenant, &tenant_home, "2026-08-12").unwrap(),
+            (0, 0, 1)
+        );
         set_calendar_alone(&laptop, true).unwrap();
-        assert_eq!(finalize_visits_inner(&laptop, &laptop_home, "2026-08-12").unwrap(), (0, 0, 0));
+        assert_eq!(
+            finalize_visits_inner(&laptop, &laptop_home, "2026-08-12").unwrap(),
+            (0, 0, 0)
+        );
         // the next sync: the laptop's newer setting goes, the tenant's start comes back
         assert!(adopt_rule(&tenant, &rule_envelope(&laptop).unwrap()).unwrap());
         assert!(adopt_rule(&laptop, &rule_envelope(&tenant).unwrap()).unwrap());
         assert!(calendar_alone(&laptop) && calendar_alone(&tenant));
-        assert_eq!(finalize_visits_inner(&laptop, &laptop_home, "2026-08-12").unwrap(), (0, 0, 1));
+        assert_eq!(
+            finalize_visits_inner(&laptop, &laptop_home, "2026-08-12").unwrap(),
+            (0, 0, 1)
+        );
         for store in [&laptop, &tenant] {
-            assert_eq!(superseded_by(store, "visit:2026-08-09:0"), Some(calendar_only_marker("2026-08-09")));
+            assert_eq!(
+                superseded_by(store, "visit:2026-08-09:0"),
+                Some(calendar_only_marker("2026-08-09"))
+            );
         }
     }
 
@@ -1059,18 +1630,42 @@ mod tests {
         set_calendar_alone(&on, true).unwrap();
         for store in [&off, &on] {
             store
-                .observations_add("calendar", "a", &[obs(
-                    "c1", "2026-08-10T13:00:00Z", Some("2026-08-10T14:00:00Z"), 42.30, -71.00, Some("Dentist"),
-                )])
+                .observations_add(
+                    "calendar",
+                    "a",
+                    &[obs(
+                        "c1",
+                        "2026-08-10T13:00:00Z",
+                        Some("2026-08-10T14:00:00Z"),
+                        42.30,
+                        -71.00,
+                        Some("Dentist"),
+                    )],
+                )
                 .unwrap();
             store
-                .observations_add("ios-visits", "a", &[obs(
-                    "v1", "2026-08-10T18:00:00Z", Some("2026-08-10T19:00:00Z"), 42.50, -71.20, None,
-                )])
+                .observations_add(
+                    "ios-visits",
+                    "a",
+                    &[obs(
+                        "v1",
+                        "2026-08-10T18:00:00Z",
+                        Some("2026-08-10T19:00:00Z"),
+                        42.50,
+                        -71.20,
+                        None,
+                    )],
+                )
                 .unwrap();
         }
-        assert_eq!(finalize_visits_inner(&off, &off_home, "2026-08-12").unwrap(), (1, 1, 0));
-        assert_eq!(finalize_visits_inner(&on, &on_home, "2026-08-12").unwrap(), (1, 2, 0));
+        assert_eq!(
+            finalize_visits_inner(&off, &off_home, "2026-08-12").unwrap(),
+            (1, 1, 0)
+        );
+        assert_eq!(
+            finalize_visits_inner(&on, &on_home, "2026-08-12").unwrap(),
+            (1, 2, 0)
+        );
         let mut on_visits = visit_bodies(&on, &on_home);
         on_visits.sort();
         assert_eq!(visit_bodies(&off, &off_home), on_visits[..1]);

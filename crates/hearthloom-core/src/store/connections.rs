@@ -116,39 +116,53 @@ impl Store {
              LIMIT {limit}"
         ))?;
         type Row = (
-            String, String, Option<String>, Option<String>, String,
-            Option<String>, Option<String>, Option<String>,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
         );
         let base: Vec<Row> = stmt
             .query_map([&param], |row| {
                 Ok((
-                    row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
-                    row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?,
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
                 ))
             })?
             .collect::<std::result::Result<_, _>>()?;
         base.into_iter()
-            .map(|(network, name, connected_at, ended_at, status, company, position, handle)| {
-                let entity_id: Option<String> = conn
-                    .query_row(
-                        "SELECT id FROM entities
+            .map(
+                |(network, name, connected_at, ended_at, status, company, position, handle)| {
+                    let entity_id: Option<String> = conn
+                        .query_row(
+                            "SELECT id FROM entities
                          WHERE merged_into IS NULL AND lower(name) = lower(?1) LIMIT 1",
-                        [&name],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                Ok(SocialConnection {
-                    network,
-                    name,
-                    connected_at,
-                    ended_at,
-                    status,
-                    company,
-                    position,
-                    handle,
-                    entity_id,
-                })
-            })
+                            [&name],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    Ok(SocialConnection {
+                        network,
+                        name,
+                        connected_at,
+                        ended_at,
+                        status,
+                        company,
+                        position,
+                        handle,
+                        entity_id,
+                    })
+                },
+            )
             .collect()
     }
 
@@ -185,7 +199,11 @@ impl Store {
         }
         attrs.push((
             format!("{network}-friend"),
-            format!("{}:{}", name.to_lowercase(), connected_at.as_deref().unwrap_or("?")),
+            format!(
+                "{}:{}",
+                name.to_lowercase(),
+                connected_at.as_deref().unwrap_or("?")
+            ),
         ));
         let (id, _created, _queued) =
             super::graph::upsert_entity(&conn, actor, "Person", name, "personal", &attrs)?;

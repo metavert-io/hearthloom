@@ -149,11 +149,16 @@ impl Store {
         let placeholders: Vec<String> = (1..=cols.len()).map(|i| format!("?{i}")).collect();
         let sql = format!(
             "INSERT OR REPLACE INTO intents ({}) VALUES ({})",
-            cols.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", "),
+            cols.iter()
+                .map(|c| c.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
             placeholders.join(", ")
         );
-        let params: Vec<rusqlite::types::Value> =
-            cols.iter().map(|c| super::json_to_sql(&map[c.as_str()])).collect();
+        let params: Vec<rusqlite::types::Value> = cols
+            .iter()
+            .map(|c| super::json_to_sql(&map[c.as_str()]))
+            .collect();
         conn.execute(&sql, rusqlite::params_from_iter(params))?;
         super::journal_row(&conn, actor, "intent", "intents", id, "update")?;
         Ok(())
@@ -201,7 +206,8 @@ impl Store {
                     .map(|s| s.split('\u{1f}').map(String::from).collect())
                     .unwrap_or_default(),
                 primary_note: primary.and_then(|s| {
-                    s.split_once('\u{1f}').map(|(a, b)| (a.to_string(), b.to_string()))
+                    s.split_once('\u{1f}')
+                        .map(|(a, b)| (a.to_string(), b.to_string()))
                 }),
             })
         })?;
@@ -220,7 +226,9 @@ impl Store {
     ) -> Result<()> {
         let conn = self.lock();
         let goal_id: String = conn
-            .query_row("SELECT id FROM intents WHERE name = ?1", [goal_name], |r| r.get(0))
+            .query_row("SELECT id FROM intents WHERE name = ?1", [goal_name], |r| {
+                r.get(0)
+            })
             .optional()?
             .ok_or_else(|| anyhow!("no goal named {goal_name:?}"))?;
         let project = super::graph::resolve_merged(&conn, project_id)?;
@@ -303,7 +311,15 @@ impl Store {
                  query = COALESCE(?5, query),
                  name = COALESCE(?6, name)
              WHERE id = ?7",
-            rusqlite::params![description, status, sphere, target_date, query, new_name, id],
+            rusqlite::params![
+                description,
+                status,
+                sphere,
+                target_date,
+                query,
+                new_name,
+                id
+            ],
         )?;
         if restatement {
             conn.execute("DELETE FROM standing_queries WHERE intent_id = ?1", [&id])?;
@@ -323,7 +339,12 @@ impl Store {
 
     /// Drop one standing query from a goal (human-directed watches are
     /// editable; the LLM's suggestions are not sacred).
-    pub fn remove_standing_query(&self, actor: &Actor, intent_id: &str, query: &str) -> Result<bool> {
+    pub fn remove_standing_query(
+        &self,
+        actor: &Actor,
+        intent_id: &str,
+        query: &str,
+    ) -> Result<bool> {
         let conn = self.lock();
         let changed = conn.execute(
             "DELETE FROM standing_queries WHERE intent_id = ?1 AND query = ?2",
@@ -360,7 +381,12 @@ impl Store {
     /// embedding at substrate scale. Backlog matches arrive marked
     /// cascaded=1 — cascade LLM spend is reserved for fresh news.
     /// Returns new match count.
-    pub fn run_intent_backlog(&self, actor: &Actor, intent_id: &str, per_leg_cap: usize) -> Result<usize> {
+    pub fn run_intent_backlog(
+        &self,
+        actor: &Actor,
+        intent_id: &str,
+        per_leg_cap: usize,
+    ) -> Result<usize> {
         let conn = self.lock();
         let (name, query): (String, String) = conn.query_row(
             "SELECT name, query FROM intents WHERE id = ?1",
@@ -408,11 +434,13 @@ impl Store {
     }
 
     /// Intents the idle decomposition pass hasn't split yet.
-    pub fn intents_needing_decomposition(&self, limit: usize) -> Result<Vec<(String, String, String)>> {
+    pub fn intents_needing_decomposition(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(String, String, String)>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT id, name, query FROM intents WHERE decomposed = 0 LIMIT ?1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT id, name, query FROM intents WHERE decomposed = 0 LIMIT ?1")?;
         let rows = stmt.query_map([limit as i64], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })?;
@@ -473,8 +501,7 @@ impl Store {
                     row.get(0)
                 })?;
             let intents: Vec<(String, String, String, i64)> = {
-                let mut stmt =
-                    conn.prepare("SELECT id, name, query, last_seq FROM intents")?;
+                let mut stmt = conn.prepare("SELECT id, name, query, last_seq FROM intents")?;
                 let rows = stmt.query_map([], |row| {
                     Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
                 })?;
@@ -509,9 +536,7 @@ impl Store {
                         "SELECT query, embedding FROM standing_queries
                          WHERE intent_id = ?1",
                     )?;
-                    let rows = stmt.query_map([&id], |row| {
-                        Ok((row.get(0)?, row.get(1)?))
-                    })?;
+                    let rows = stmt.query_map([&id], |row| Ok((row.get(0)?, row.get(1)?)))?;
                     rows.collect::<std::result::Result<_, _>>()?
                 };
                 fts_queries.extend(standing.iter().filter_map(|(q, _)| fts_safe(q)));
@@ -566,10 +591,9 @@ impl Store {
                         budget = budget.saturating_sub(chunk_rows.len());
                         for (episode_id, blob) in chunk_rows {
                             let chunk_vec = bytes_to_floats(&blob);
-                            if sq_vectors
-                                .iter()
-                                .any(|sq| cosine_similarity(sq, &chunk_vec) >= SEMANTIC_MATCH_THRESHOLD)
-                            {
+                            if sq_vectors.iter().any(|sq| {
+                                cosine_similarity(sq, &chunk_vec) >= SEMANTIC_MATCH_THRESHOLD
+                            }) {
                                 hits.push(episode_id);
                             }
                         }
@@ -777,10 +801,7 @@ mod tests {
             .add_intent(&actor, "job-watch", "\"ai infrastructure\"")
             .unwrap();
         let intent_id = store.list_intents().unwrap()[0].id.clone();
-        assert_eq!(
-            store.intents_needing_decomposition(10).unwrap().len(),
-            1
-        );
+        assert_eq!(store.intents_needing_decomposition(10).unwrap().len(), 1);
         // Decompose: one FTS-shaped query, one embedded-only query.
         let sq_vec = vec![1.0_f32, 0.0, 0.0];
         store
@@ -806,8 +827,16 @@ mod tests {
                     actor: "adapter:test".into(),
                     session_id: None,
                     episodes: vec![
-                        note("a", "funding news", "a wave of inference-hosting startups raised"),
-                        note("b", "hardware note", "big pile of accelerators in the basement"),
+                        note(
+                            "a",
+                            "funding news",
+                            "a wave of inference-hosting startups raised",
+                        ),
+                        note(
+                            "b",
+                            "hardware note",
+                            "big pile of accelerators in the basement",
+                        ),
                     ],
                 },
             )

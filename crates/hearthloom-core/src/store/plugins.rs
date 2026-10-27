@@ -229,9 +229,7 @@ impl Store {
         let mut stmt = stmt_ok(conn.prepare(
             "SELECT key, value, updated_at FROM plugin_kv WHERE plugin = ?1 ORDER BY key",
         ))?;
-        let rows = stmt.query_map([plugin], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?;
+        let rows = stmt.query_map([plugin], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
@@ -321,16 +319,33 @@ mod tests {
         let (store, _tmp) = test_store();
         let actor = Actor::new("human:test");
         let row = store
-            .install_plugin(&actor, "demo", "0.1.0", &manifest(),
-                &["read".into()], "ak_1", "local-only")
+            .install_plugin(
+                &actor,
+                "demo",
+                "0.1.0",
+                &manifest(),
+                &["read".into()],
+                "ak_1",
+                "local-only",
+            )
             .unwrap();
         assert!(row.enabled);
-        assert_eq!(store.plugin_for_key("ak_1").unwrap().as_deref(), Some("demo"));
+        assert_eq!(
+            store.plugin_for_key("ak_1").unwrap().as_deref(),
+            Some("demo")
+        );
 
         // reinstall upserts (upgrade path), keeps one row
         store
-            .install_plugin(&actor, "demo", "0.2.0", &manifest(),
-                &["read".into()], "ak_1", "mirror")
+            .install_plugin(
+                &actor,
+                "demo",
+                "0.2.0",
+                &manifest(),
+                &["read".into()],
+                "ak_1",
+                "mirror",
+            )
             .unwrap();
         assert_eq!(store.list_plugins().unwrap().len(), 1);
         assert_eq!(store.plugin("demo").unwrap().unwrap().version, "0.2.0");
@@ -356,7 +371,9 @@ mod tests {
             .install_plugin(&actor, "l", "1", &manifest(), &[], "ak_l", "local-only")
             .unwrap();
         store.plugin_kv_set("m", "watermark", "2026-01-01").unwrap();
-        store.plugin_kv_set("l", "secret-ish", "stays-home").unwrap();
+        store
+            .plugin_kv_set("l", "secret-ish", "stays-home")
+            .unwrap();
 
         // only the mirror plugin's rows leave via the sync read
         let out = store.plugin_kv_since("", 100).unwrap();
@@ -366,19 +383,42 @@ mod tests {
         // apply: mirror rows land, unknown/local-only plugins are refused
         let applied = store
             .apply_plugin_kv(&[
-                ("m".into(), "peer-key".into(), "v".into(), "2027-01-01T00:00:00Z".into()),
-                ("l".into(), "nope".into(), "v".into(), "2027-01-01T00:00:00Z".into()),
-                ("ghost".into(), "nope".into(), "v".into(), "2027-01-01T00:00:00Z".into()),
+                (
+                    "m".into(),
+                    "peer-key".into(),
+                    "v".into(),
+                    "2027-01-01T00:00:00Z".into(),
+                ),
+                (
+                    "l".into(),
+                    "nope".into(),
+                    "v".into(),
+                    "2027-01-01T00:00:00Z".into(),
+                ),
+                (
+                    "ghost".into(),
+                    "nope".into(),
+                    "v".into(),
+                    "2027-01-01T00:00:00Z".into(),
+                ),
             ])
             .unwrap();
         assert_eq!(applied, 1);
-        assert_eq!(store.plugin_kv_get("m", "peer-key").unwrap().as_deref(), Some("v"));
+        assert_eq!(
+            store.plugin_kv_get("m", "peer-key").unwrap().as_deref(),
+            Some("v")
+        );
         assert!(store.plugin_kv_get("l", "nope").unwrap().is_none());
 
         // last-writer-wins: an older peer write never clobbers newer
         store.plugin_kv_set("m", "peer-key", "newer-local").unwrap();
         store
-            .apply_plugin_kv(&[("m".into(), "peer-key".into(), "old".into(), "2020-01-01T00:00:00Z".into())])
+            .apply_plugin_kv(&[(
+                "m".into(),
+                "peer-key".into(),
+                "old".into(),
+                "2020-01-01T00:00:00Z".into(),
+            )])
             .unwrap();
         assert_eq!(
             store.plugin_kv_get("m", "peer-key").unwrap().as_deref(),

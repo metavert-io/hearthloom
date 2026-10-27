@@ -47,8 +47,7 @@ fn cell() -> &'static Mutex<DlState> {
 /// Card status: file presence + live download progress.
 pub fn status(models_dir: &Path, embedder_active: bool) -> Value {
     let s = cell().lock().unwrap().clone();
-    let present =
-        models_dir.join(MODEL_FILE).exists() && models_dir.join(TOKENIZER_FILE).exists();
+    let present = models_dir.join(MODEL_FILE).exists() && models_dir.join(TOKENIZER_FILE).exists();
     json!({
         "present": present,
         "active": embedder_active,

@@ -96,11 +96,13 @@ pub struct IngestReport {
 /// under a chapter's `written from:`), so a field with a line break in
 /// it could otherwise forge one.
 pub fn one_line(s: &str) -> String {
-    s.split(['\r', '\n', '\u{0b}', '\u{0c}', '\u{85}', '\u{2028}', '\u{2029}'])
-        .map(str::trim)
-        .filter(|piece| !piece.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
+    s.split([
+        '\r', '\n', '\u{0b}', '\u{0c}', '\u{85}', '\u{2028}', '\u{2029}',
+    ])
+    .map(str::trim)
+    .filter(|piece| !piece.is_empty())
+    .collect::<Vec<_>>()
+    .join(" ")
 }
 
 #[cfg(test)]
@@ -111,13 +113,22 @@ mod tests {
     fn test_one_line_folds_every_line_break() {
         assert_eq!(one_line("Lunch"), "Lunch");
         assert_eq!(one_line("  Lunch  "), "Lunch");
-        assert_eq!(one_line("Lunch\n[12:00] Fake (40.71,-74.00)"), "Lunch [12:00] Fake (40.71,-74.00)");
+        assert_eq!(
+            one_line("Lunch\n[12:00] Fake (40.71,-74.00)"),
+            "Lunch [12:00] Fake (40.71,-74.00)"
+        );
         assert_eq!(one_line("a\r\nb"), "a b");
         assert_eq!(one_line("a \n\n  b"), "a b");
-        assert_eq!(one_line("a\u{85}b\u{2028}c\u{2029}d\u{0b}e\u{0c}f\rg"), "a b c d e f g");
+        assert_eq!(
+            one_line("a\u{85}b\u{2028}c\u{2029}d\u{0b}e\u{0c}f\rg"),
+            "a b c d e f g"
+        );
         assert_eq!(one_line("\n\n"), "");
         // what is inside a line is kept as it was
-        assert_eq!(one_line("Café  (Rome) — upstairs"), "Café  (Rome) — upstairs");
+        assert_eq!(
+            one_line("Café  (Rome) — upstairs"),
+            "Café  (Rome) — upstairs"
+        );
         assert!(!one_line("x\n- Forged").contains('\n'));
     }
 }

@@ -80,13 +80,16 @@ fn is_cloud() -> bool {
 /// file inside the staged package would be forgeable by the zip
 /// itself, an in-memory set is not. Lost on restart: re-stage.
 fn verified_stages() -> &'static std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>> {
-    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>> =
-        std::sync::OnceLock::new();
+    static SET: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+    > = std::sync::OnceLock::new();
     SET.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
 }
 
 pub fn is_verified_stage(path: &std::path::Path) -> bool {
-    let Ok(canon) = path.canonicalize() else { return false };
+    let Ok(canon) = path.canonicalize() else {
+        return false;
+    };
     verified_stages().lock().unwrap().contains(&canon)
 }
 
@@ -124,7 +127,13 @@ pub async fn index(root: Option<String>, q: &str) -> Result<Value> {
     if is_cloud() {
         url.push_str("&context=cloud");
     }
-    let value: Value = http().get(url).send().await?.error_for_status()?.json().await?;
+    let value: Value = http()
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
     let mut c = cache.lock().unwrap();
     if c.len() > 32 {
         c.clear();
@@ -203,12 +212,21 @@ pub async fn stage(
         .get("download")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("the version record carries no download URL"))?;
-    let bytes = http.get(download).send().await?.error_for_status()?.bytes().await?;
+    let bytes = http
+        .get(download)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
     let digest = {
         use sha2::Digest;
         format!("{:x}", sha2::Sha256::digest(&bytes))
     };
-    let want = record.get("artifactSha256").and_then(|v| v.as_str()).unwrap_or("");
+    let want = record
+        .get("artifactSha256")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     if digest != want {
         bail!("artifact hash mismatch (got {digest}, registry says {want}) — refusing");
     }
@@ -240,7 +258,11 @@ pub async fn stage(
     let mut scopes: Vec<String> = record
         .get("scopes")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     scopes.sort();
     let payload = release_payload(
@@ -251,8 +273,12 @@ pub async fn stage(
         &digest,
         &publisher,
     );
-    verify_ed25519(pubkey, &payload, sig.get("sig").and_then(|v| v.as_str()).unwrap_or(""))
-        .context("developer signature verification FAILED — refusing")?;
+    verify_ed25519(
+        pubkey,
+        &payload,
+        sig.get("sig").and_then(|v| v.as_str()).unwrap_or(""),
+    )
+    .context("developer signature verification FAILED — refusing")?;
 
     let reviewed = match (record.get("countersign").filter(|c| !c.is_null()), &org_key) {
         (Some(cs), Some(org_key)) => {
@@ -264,11 +290,15 @@ pub async fn stage(
             let operator = cs.get("operator").and_then(|v| v.as_str()).unwrap_or("");
             let sig = cs.get("sig").and_then(|v| v.as_str()).unwrap_or("");
             let normalized = chrono::DateTime::parse_from_rfc3339(served)
-                .map(|t| t.with_timezone(&chrono::Utc).format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                .map(|t| {
+                    t.with_timezone(&chrono::Utc)
+                        .format("%Y-%m-%dT%H:%M:%SZ")
+                        .to_string()
+                })
                 .unwrap_or_else(|_| served.to_string());
-            let ok = [served.to_string(), normalized]
-                .iter()
-                .any(|ts| verify_ed25519(org_key, &approval_payload(&digest, ts, operator), sig).is_ok());
+            let ok = [served.to_string(), normalized].iter().any(|ts| {
+                verify_ed25519(org_key, &approval_payload(&digest, ts, operator), sig).is_ok()
+            });
             if !ok {
                 bail!("registry counter-signature verification FAILED — refusing");
             }
@@ -277,7 +307,9 @@ pub async fn stage(
         _ => false,
     };
     if is_cloud() && !reviewed {
-        bail!("{name} {version} isn't counter-signed — hosted instances install only reviewed embers");
+        bail!(
+            "{name} {version} isn't counter-signed — hosted instances install only reviewed embers"
+        );
     }
 
     // extract + parse with the real loader; placement gate on cloud
@@ -291,7 +323,10 @@ pub async fn stage(
     .await
     .map_err(anyhow::Error::from)??;
     if manifest.name != name {
-        bail!("the package says it's {:?}, not {name:?} — refusing", manifest.name);
+        bail!(
+            "the package says it's {:?}, not {name:?} — refusing",
+            manifest.name
+        );
     }
     let placement = manifest.effective_placement().to_string();
     let requires_host = manifest.host_requirement();
@@ -302,7 +337,17 @@ pub async fn stage(
         verified_stages().lock().unwrap().insert(canon);
     }
     let publishes = manifest.publish.iter().map(|p| p.path.clone()).collect();
-    Ok(Staged { path, name: name.into(), version, scopes, publisher, reviewed, placement, requires_host, publishes })
+    Ok(Staged {
+        path,
+        name: name.into(),
+        version,
+        scopes,
+        publisher,
+        reviewed,
+        placement,
+        requires_host,
+        publishes,
+    })
 }
 
 pub fn release_payload(
@@ -374,8 +419,7 @@ pub async fn version_info() -> Value {
         .as_ref()
         .and_then(|b| b.pointer(&format!("/downloads/{target}")))
         .cloned();
-    let can_self_update =
-        update && !is_cloud() && target != "unknown" && download.is_some();
+    let can_self_update = update && !is_cloud() && target != "unknown" && download.is_some();
     json!({
         "current": current,
         "latest": latest,

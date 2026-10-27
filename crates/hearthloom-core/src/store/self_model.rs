@@ -344,22 +344,48 @@ mod tests {
     fn test_remove_and_make_private() {
         let store = Store::open_in_memory().unwrap();
         let add = |text: &str| {
-            store.add_proposition(&actor(), "work", "strength", text, "declared", &[], None).unwrap()
+            store
+                .add_proposition(&actor(), "work", "strength", text, "declared", &[], None)
+                .unwrap()
         };
         let wrong = add("a strong background in marine biology");
         let quiet = add("a habit of working very late nights");
         // Remove: gone from every list, but remembered so it is never
         // proposed again; a second remove has nothing to act on.
-        store.resolve_proposition(&actor(), &wrong, "remove", None).unwrap();
-        assert!(store.list_propositions(Some("confirmed")).unwrap().iter().all(|p| p.id != wrong));
+        store
+            .resolve_proposition(&actor(), &wrong, "remove", None)
+            .unwrap();
+        assert!(store
+            .list_propositions(Some("confirmed"))
+            .unwrap()
+            .iter()
+            .all(|p| p.id != wrong));
         assert!(store.list_propositions(Some("retired")).unwrap().is_empty());
-        assert!(store.known_proposition_texts().unwrap().iter().any(|t| t.contains("marine biology")));
-        assert!(store.resolve_proposition(&actor(), &wrong, "remove", None).is_err());
+        assert!(store
+            .known_proposition_texts()
+            .unwrap()
+            .iter()
+            .any(|t| t.contains("marine biology")));
+        assert!(store
+            .resolve_proposition(&actor(), &wrong, "remove", None)
+            .is_err());
         // Make private: hidden while the vault is locked (the default).
-        store.resolve_proposition(&actor(), &quiet, "make_private", None).unwrap();
-        assert!(store.list_propositions(None).unwrap().iter().all(|p| p.id != quiet));
-        assert!(store.brain_propositions().unwrap().iter().all(|p| p.id != quiet));
-        assert!(store.resolve_proposition(&actor(), &quiet, "make_private", None).is_err());
+        store
+            .resolve_proposition(&actor(), &quiet, "make_private", None)
+            .unwrap();
+        assert!(store
+            .list_propositions(None)
+            .unwrap()
+            .iter()
+            .all(|p| p.id != quiet));
+        assert!(store
+            .brain_propositions()
+            .unwrap()
+            .iter()
+            .all(|p| p.id != quiet));
+        assert!(store
+            .resolve_proposition(&actor(), &quiet, "make_private", None)
+            .is_err());
     }
 
     #[test]

@@ -5,10 +5,9 @@
 //! Surface: a plain HTTP API under /v1 plus a stateless streamable-HTTP
 //! MCP endpoint at /mcp with exactly four tools.
 
-pub mod apm;
 mod agents;
+pub mod apm;
 mod budget;
-mod retire;
 mod bus;
 mod consolidate;
 mod dashboard;
@@ -22,9 +21,8 @@ mod inbox;
 mod integrations;
 mod live_health;
 mod live_ingest;
-pub mod llm;
 mod live_photos;
-mod visits;
+pub mod llm;
 mod mbox_index;
 mod mcp;
 mod mdvault;
@@ -34,15 +32,17 @@ mod network_out;
 mod notion;
 mod peerkey;
 pub mod plugins;
-pub mod registry_client;
 mod provisioner;
+pub mod registry_client;
+mod retire;
 mod rlm;
 mod scoped;
 mod sidecar;
-mod trips;
 mod sync;
+mod trips;
 mod views;
 mod virtual_source;
+mod visits;
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -97,9 +97,8 @@ pub fn resolve_llm_with(store: &Store, fallback_provider: &str) -> Result<Box<dy
         medium: state_of("llm.model.medium").unwrap_or(defaults.medium),
         high: state_of("llm.model.high").unwrap_or(defaults.high),
     };
-    let key_for = |name: &str| {
-        std::env::var(crate::integrations::provider_key_env(name)).unwrap_or_default()
-    };
+    let key_for =
+        |name: &str| std::env::var(crate::integrations::provider_key_env(name)).unwrap_or_default();
     let base_url = custom_base_url(store);
     // `llm.effort.<tier>`: run a tier's model at another effort level
     // (always-thinking models only). Node-local, like the routes.
@@ -109,11 +108,19 @@ pub fn resolve_llm_with(store: &Store, fallback_provider: &str) -> Result<Box<dy
         state_of("llm.effort.high"),
     ]);
     let base = provider::build_provider_full(
-        &provider, &key_for(&provider), models, base_url.as_deref(), efforts.clone(),
+        &provider,
+        &key_for(&provider),
+        models,
+        base_url.as_deref(),
+        efforts.clone(),
     )?;
 
     let mut routed = provider::RoutedProvider::new(base);
-    for tier in [provider::Tier::Low, provider::Tier::Medium, provider::Tier::High] {
+    for tier in [
+        provider::Tier::Low,
+        provider::Tier::Medium,
+        provider::Tier::High,
+    ] {
         let t = tier.as_str();
         let Some(name) = state_of(&format!("llm.route.{t}.provider")) else {
             continue;
@@ -127,20 +134,36 @@ pub fn resolve_llm_with(store: &Store, fallback_provider: &str) -> Result<Box<dy
         if name == provider && routed_model.is_none() {
             continue;
         }
-        let model = routed_model
-            .unwrap_or_else(|| TierModels::defaults_for(&name).get(tier).to_string());
-        let one = TierModels { low: model.clone(), medium: model.clone(), high: model };
+        let model =
+            routed_model.unwrap_or_else(|| TierModels::defaults_for(&name).get(tier).to_string());
+        let one = TierModels {
+            low: model.clone(),
+            medium: model.clone(),
+            high: model,
+        };
         // A route that can't serve (no key, no address, unknown name)
         // falls back to the active provider — a typo must not silence a tier.
-        match provider::build_provider_full(&name, &key_for(&name), one, base_url.as_deref(), efforts.clone()) {
+        match provider::build_provider_full(
+            &name,
+            &key_for(&name),
+            one,
+            base_url.as_deref(),
+            efforts.clone(),
+        ) {
             // (A same-provider override is as usable as the base itself —
             // falling back would only swap the model back, not rescue it.)
             Ok(p) if p.available() || name == provider => routed = routed.route(tier, p),
-            Ok(_) => tracing::warn!("llm route {t} → {name} is not usable (no key/address); using {provider}"),
+            Ok(_) => tracing::warn!(
+                "llm route {t} → {name} is not usable (no key/address); using {provider}"
+            ),
             Err(err) => tracing::warn!("llm route {t} → {name} ignored: {err:#}"),
         }
     }
-    Ok(if routed.has_routes() { Box::new(routed) } else { routed.into_base() })
+    Ok(if routed.has_routes() {
+        Box::new(routed)
+    } else {
+        routed.into_base()
+    })
 }
 
 #[derive(Clone)]
@@ -263,7 +286,10 @@ pub async fn run(home: Home) -> Result<()> {
     let llm: Option<Arc<dyn LlmProvider>> = {
         let provider = resolve_llm(&store, &config)?;
         if provider.available() {
-            tracing::info!("LLM provider {} available for consolidation", provider.name());
+            tracing::info!(
+                "LLM provider {} available for consolidation",
+                provider.name()
+            );
             Some(Arc::from(provider))
         } else {
             None
@@ -312,8 +338,9 @@ pub async fn run(home: Home) -> Result<()> {
         tokio::spawn(async move {
             #[cfg(unix)]
             {
-                let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("SIGTERM handler");
+                let mut term =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                        .expect("SIGTERM handler");
                 tokio::select! {
                     _ = tokio::signal::ctrl_c() => {}
                     _ = term.recv() => {}
@@ -355,9 +382,15 @@ mod tests {
         assert_eq!(llm.provider_for(Tier::Low), "anthropic");
 
         // Low → a local endpoint; its model id lives apart from llm.model.low.
-        store.set_consolidation_state("llm.custom.base_url", "http://localhost:11434/v1").unwrap();
-        store.set_consolidation_state("llm.route.low.provider", "custom").unwrap();
-        store.set_consolidation_state("llm.route.low.model", "qwen3:8b").unwrap();
+        store
+            .set_consolidation_state("llm.custom.base_url", "http://localhost:11434/v1")
+            .unwrap();
+        store
+            .set_consolidation_state("llm.route.low.provider", "custom")
+            .unwrap();
+        store
+            .set_consolidation_state("llm.route.low.model", "qwen3:8b")
+            .unwrap();
         let llm = resolve_llm_with(&store, "anthropic").unwrap();
         assert_eq!(llm.provider_for(Tier::Low), "custom");
         assert_eq!(llm.model_for(Tier::Low), "qwen3:8b");
@@ -366,17 +399,30 @@ mod tests {
         assert!(llm.available(), "a keyless local route is still usable");
 
         // Same provider, different model: a node-local model override.
-        store.set_consolidation_state("llm.route.high.provider", "anthropic").unwrap();
-        store.set_consolidation_state("llm.route.high.model", "claude-opus-5-5").unwrap();
+        store
+            .set_consolidation_state("llm.route.high.provider", "anthropic")
+            .unwrap();
+        store
+            .set_consolidation_state("llm.route.high.model", "claude-opus-5-5")
+            .unwrap();
         let llm = resolve_llm_with(&store, "anthropic").unwrap();
         assert_eq!(llm.model_for(Tier::High), "claude-opus-5-5");
         assert_eq!(llm.provider_for(Tier::High), "anthropic");
         assert_eq!(llm.model_for(Tier::Medium), "claude-sonnet-4-6");
-        store.set_consolidation_state("llm.route.high.model", "").unwrap();
-        assert_eq!(resolve_llm_with(&store, "anthropic").unwrap().model_for(Tier::High), "claude-opus-4-8");
+        store
+            .set_consolidation_state("llm.route.high.model", "")
+            .unwrap();
+        assert_eq!(
+            resolve_llm_with(&store, "anthropic")
+                .unwrap()
+                .model_for(Tier::High),
+            "claude-opus-4-8"
+        );
 
         // A route that can't serve (no address) falls back to the base.
-        store.set_consolidation_state("llm.custom.base_url", "").unwrap();
+        store
+            .set_consolidation_state("llm.custom.base_url", "")
+            .unwrap();
         if std::env::var("HEARTHLOOM_LLM_BASE_URL").is_err() {
             let llm = resolve_llm_with(&store, "anthropic").unwrap();
             assert_eq!(llm.provider_for(Tier::Low), "anthropic");

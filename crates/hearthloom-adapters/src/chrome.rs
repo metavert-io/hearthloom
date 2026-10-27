@@ -38,15 +38,17 @@ pub fn ingest(data_dir: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>>
         {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
-            if (name == "Default" || name.starts_with("Profile "))
-                && path.join("History").exists()
+            if (name == "Default" || name.starts_with("Profile ")) && path.join("History").exists()
             {
                 profiles.push(path);
             }
         }
     }
     if profiles.is_empty() {
-        return Err(anyhow!("no Chrome profiles with History under {}", data_dir.display()));
+        return Err(anyhow!(
+            "no Chrome profiles with History under {}",
+            data_dir.display()
+        ));
     }
 
     let mut drafts = Vec::new();
@@ -140,7 +142,11 @@ fn ingest_profile(profile: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraf
         }
         let mut top: Vec<(String, usize)> = domains.into_iter().collect();
         top.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-        let top_list: Vec<String> = top.iter().take(8).map(|(d, n)| format!("{d} ({n})")).collect();
+        let top_list: Vec<String> = top
+            .iter()
+            .take(8)
+            .map(|(d, n)| format!("{d} ({n})"))
+            .collect();
         body.push_str(&format!("top sites: {}\n\n", top_list.join(", ")));
         body.push_str(&lines);
 
@@ -149,7 +155,15 @@ fn ingest_profile(profile: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraf
             source: "chrome".into(),
             source_ref: format!("{name}#{date}"),
             kind: "browsing".into(),
-            title: format!("Browsing ({name}): {}", top_list.iter().take(3).cloned().collect::<Vec<_>>().join(", ")),
+            title: format!(
+                "Browsing ({name}): {}",
+                top_list
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             body,
             event_time: EventTime {
                 utc: DateTime::from_timestamp(first_unix, 0)

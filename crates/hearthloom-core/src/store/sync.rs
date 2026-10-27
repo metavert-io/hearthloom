@@ -29,12 +29,24 @@ fn b64(bytes: &[u8]) -> String {
     const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in bytes.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(A[(n >> 18) as usize & 63] as char);
         out.push(A[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { A[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { A[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            A[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            A[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -58,8 +70,12 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
             n |= val(c)? << (18 - 6 * i);
         }
         out.push((n >> 16) as u8);
-        if chunk.len() > 2 { out.push((n >> 8) as u8); }
-        if chunk.len() > 3 { out.push(n as u8); }
+        if chunk.len() > 2 {
+            out.push((n >> 8) as u8);
+        }
+        if chunk.len() > 3 {
+            out.push(n as u8);
+        }
     }
     Some(out)
 }
@@ -101,10 +117,18 @@ const OPERATIONAL_TABLES: &[&str] = &[
 const JOURNALED_KINDS: &[(&str, &str, &str)] = &[
     ("task", "tasks", "COALESCE(updated_at, created_at, '')"),
     ("shared_item", "shared_items", "COALESCE(created_at, '')"),
-    ("note", "notes_index", "COALESCE(updated_at, created_at, '')"),
+    (
+        "note",
+        "notes_index",
+        "COALESCE(updated_at, created_at, '')",
+    ),
     ("intent", "intents", "COALESCE(created_at, '')"),
     ("privacy_rule", "privacy_rules", "COALESCE(created_at, '')"),
-    ("self_model", "self_model", "COALESCE(updated_at, created_at, '')"),
+    (
+        "self_model",
+        "self_model",
+        "COALESCE(updated_at, created_at, '')",
+    ),
 ];
 
 fn journaled_kind(kind: &str) -> Option<(&'static str, &'static str)> {
@@ -256,9 +280,7 @@ impl Store {
              WHERE scope_changed_at IS NOT NULL AND scope_synced_at > ?1
              ORDER BY scope_synced_at LIMIT 5000",
         )?;
-        let rows = stmt.query_map([since], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?;
+        let rows = stmt.query_map([since], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
@@ -306,11 +328,7 @@ impl Store {
         let mut out = serde_json::Map::new();
         for table in OPERATIONAL_TABLES {
             let mut stmt = conn.prepare(&format!("SELECT * FROM {table}"))?;
-            let cols: Vec<String> = stmt
-                .column_names()
-                .into_iter()
-                .map(String::from)
-                .collect();
+            let cols: Vec<String> = stmt.column_names().into_iter().map(String::from).collect();
             let rows = stmt.query_map([], |row| {
                 let mut obj = serde_json::Map::new();
                 for (i, col) in cols.iter().enumerate() {
@@ -356,7 +374,10 @@ impl Store {
             })?;
             rows.collect::<std::result::Result<_, _>>()?
         };
-        out.insert("relationships_by_name".into(), serde_json::Value::Array(rels));
+        out.insert(
+            "relationships_by_name".into(),
+            serde_json::Value::Array(rels),
+        );
         drop(conn);
         // note FILE bodies ride along, keyed by notes_index slug/path
         let notes_dir = home.root().join("notes");
@@ -413,7 +434,9 @@ impl Store {
             if !known {
                 continue;
             }
-            let Some(rows) = rows.as_array() else { continue };
+            let Some(rows) = rows.as_array() else {
+                continue;
+            };
             // Multi-master MERGE (never replace-all): both nodes are
             // authoritative, so upsert each sender row by its `id` primary
             // key under last-writer-wins, and NEVER delete — rows that exist
@@ -440,9 +463,10 @@ impl Store {
                 // journal tombstone leg just removed. A sender copy NEWER
                 // than the tombstone (edited after the purge elsewhere)
                 // still applies — multi-master, both directions.
-                if let (Some(id), Some(kind)) =
-                    (obj.get("id").and_then(|v| v.as_str()), journaled_table(table))
-                {
+                if let (Some(id), Some(kind)) = (
+                    obj.get("id").and_then(|v| v.as_str()),
+                    journaled_table(table),
+                ) {
                     let sender_ts = ts_col
                         .and_then(|c| obj.get(c).and_then(|v| v.as_str()))
                         .unwrap_or("");
@@ -459,9 +483,7 @@ impl Store {
                         continue;
                     }
                 }
-                if let (Some(id), Some(ts_col)) =
-                    (obj.get("id").and_then(|v| v.as_str()), ts_col)
-                {
+                if let (Some(id), Some(ts_col)) = (obj.get("id").and_then(|v| v.as_str()), ts_col) {
                     let sender_ts = obj.get(ts_col).and_then(|v| v.as_str()).unwrap_or("");
                     // get as Option<String> so a NULL timestamp value (not just
                     // a missing row) resolves to None rather than erroring —
@@ -481,8 +503,7 @@ impl Store {
                     }
                 }
                 let cols: Vec<&String> = obj.keys().collect();
-                let placeholders: Vec<String> =
-                    (1..=cols.len()).map(|i| format!("?{i}")).collect();
+                let placeholders: Vec<String> = (1..=cols.len()).map(|i| format!("?{i}")).collect();
                 let sql = format!(
                     "INSERT OR REPLACE INTO {table} ({}) VALUES ({})",
                     cols.iter()
@@ -501,16 +522,17 @@ impl Store {
                         serde_json::Value::Number(n) => {
                             rusqlite::types::Value::Real(n.as_f64().unwrap_or(0.0))
                         }
-                        serde_json::Value::Bool(b) => {
-                            rusqlite::types::Value::Integer(*b as i64)
-                        }
+                        serde_json::Value::Bool(b) => rusqlite::types::Value::Integer(*b as i64),
                         serde_json::Value::String(t) if t.starts_with("__b64__") => {
                             rusqlite::types::Value::Blob(
                                 b64_decode(&t["__b64__".len()..]).unwrap_or_default(),
                             )
                         }
                         other => rusqlite::types::Value::Text(
-                            other.as_str().map(String::from).unwrap_or_else(|| other.to_string()),
+                            other
+                                .as_str()
+                                .map(String::from)
+                                .unwrap_or_else(|| other.to_string()),
                         ),
                     })
                     .collect();
@@ -531,7 +553,9 @@ impl Store {
                         .join(" AND ")
                 );
                 if tx
-                    .query_row(&same_sql, rusqlite::params_from_iter(params.iter()), |_| Ok(()))
+                    .query_row(&same_sql, rusqlite::params_from_iter(params.iter()), |_| {
+                        Ok(())
+                    })
                     .optional()?
                     .is_some()
                 {
@@ -543,7 +567,10 @@ impl Store {
         }
         // relationships: resolve entity by (name, type), create Person/Org
         // shells when missing (episodes usually carried them already)
-        if let Some(rels) = state.get("relationships_by_name").and_then(|v| v.as_array()) {
+        if let Some(rels) = state
+            .get("relationships_by_name")
+            .and_then(|v| v.as_array())
+        {
             // Multi-master merge (NOT replace-all — the 2026-07-27 fix): the
             // old `DELETE FROM relationships` here wiped any relationship the
             // receiver had that the sender lacked. We now merge per logical
@@ -558,7 +585,9 @@ impl Store {
                     r.get("kind").and_then(|v| v.as_str()),
                     r.get("origin").and_then(|v| v.as_str()),
                     r.get("status").and_then(|v| v.as_str()),
-                ) else { continue };
+                ) else {
+                    continue;
+                };
                 let entity_id: Option<String> = tx
                     .query_row(
                         "SELECT id FROM entities WHERE name = ?1 AND type = ?2
@@ -613,7 +642,11 @@ impl Store {
                            AND origin IS ?4 AND status IS ?5 AND note IS ?6
                            AND t_invalid IS ?7 AND updated_at IS ?8 LIMIT 1",
                         rusqlite::params![
-                            entity_id, kind, tvalid, origin, status,
+                            entity_id,
+                            kind,
+                            tvalid,
+                            origin,
+                            status,
                             r.get("note").and_then(|v| v.as_str()),
                             r.get("t_invalid").and_then(|v| v.as_str()),
                             sender_ts
@@ -636,7 +669,11 @@ impl Store {
                       created_at, updated_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     rusqlite::params![
-                        id, entity_id, kind, origin, status,
+                        id,
+                        entity_id,
+                        kind,
+                        origin,
+                        status,
                         r.get("note").and_then(|v| v.as_str()),
                         r.get("t_valid").and_then(|v| v.as_str()),
                         r.get("t_invalid").and_then(|v| v.as_str()),
@@ -657,9 +694,7 @@ impl Store {
                 let mut stmt = tx.prepare(
                     "SELECT entity_type, from_name, to_name FROM entity_renames ORDER BY at, id",
                 )?;
-                let rows = stmt.query_map([], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                })?;
+                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
                 rows.collect::<std::result::Result<_, _>>()?
             };
             for (etype, from, to) in renames {
@@ -705,7 +740,12 @@ impl Store {
         self.journal_export_for(after, limit, None)
     }
 
-    pub fn journal_export_for(&self, after: i64, limit: usize, requester: Option<&str>) -> Result<serde_json::Value> {
+    pub fn journal_export_for(
+        &self,
+        after: i64,
+        limit: usize,
+        requester: Option<&str>,
+    ) -> Result<serde_json::Value> {
         let conn = self.lock();
         let echo_guard = match requester {
             Some(_) => "actor != ?3",
@@ -732,9 +772,14 @@ impl Store {
             ))
         };
         let rows: Vec<rusqlite::Result<(i64, serde_json::Value)>> = if requester.is_some() {
-            stmt.query_map(rusqlite::params![after, limit as i64, requester_actor], map_row)?.collect()
+            stmt.query_map(
+                rusqlite::params![after, limit as i64, requester_actor],
+                map_row,
+            )?
+            .collect()
         } else {
-            stmt.query_map(rusqlite::params![after, limit as i64], map_row)?.collect()
+            stmt.query_map(rusqlite::params![after, limit as i64], map_row)?
+                .collect()
         };
         let mut next = after;
         let mut entries = Vec::new();
@@ -811,7 +856,10 @@ impl Store {
                                 tx.execute("DELETE FROM task_mentions WHERE task_id = ?1", [id])?;
                             }
                             "intents" => {
-                                tx.execute("DELETE FROM intent_matches WHERE intent_id = ?1", [id])?;
+                                tx.execute(
+                                    "DELETE FROM intent_matches WHERE intent_id = ?1",
+                                    [id],
+                                )?;
                             }
                             _ => {}
                         }
@@ -872,11 +920,9 @@ impl Store {
         {
             let conn = self.lock();
             for table in OPERATIONAL_TABLES {
-                total += conn.query_row(
-                    &format!("SELECT COUNT(*) FROM {table}"),
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )?;
+                total += conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get::<_, i64>(0)
+                })?;
             }
             total += conn.query_row("SELECT COUNT(*) FROM relationships", [], |row| {
                 row.get::<_, i64>(0)
@@ -953,13 +999,7 @@ impl Store {
                  'peer_bus_cursor','peer_first_sync_notified','peer_fail_streak')",
             [],
         )?;
-        super::record_mutation(
-            &conn,
-            actor,
-            "peer_unpaired",
-            "peer_unpaired",
-            &json!({}),
-        )?;
+        super::record_mutation(&conn, actor, "peer_unpaired", "peer_unpaired", &json!({}))?;
         Ok(())
     }
 }
@@ -1047,7 +1087,7 @@ mod tests {
         };
         let first = peer_store.apply_batch(&peer_home, &batch).unwrap();
         assert_eq!(first.episodes_new, 3); // full replica: private included
-        // peer-received rows never re-export — echo traffic is zero
+                                           // peer-received rows never re-export — echo traffic is zero
         let echo = peer_store.sync_export(&peer_home, 0, 10).unwrap();
         assert!(echo.drained);
         // and even a forced re-apply of the same batch is a pure no-op
@@ -1066,27 +1106,47 @@ mod tests {
             (Store::open(&h.db_path()).unwrap(), h, t)
         };
         let page = store.sync_export(&home, 0, 10).unwrap();
-        peer.apply_batch(&peer_home, &crate::ingest::IngestBatch {
-            actor: "peer:t".into(), session_id: None, episodes: page.episodes,
-        }).unwrap();
+        peer.apply_batch(
+            &peer_home,
+            &crate::ingest::IngestBatch {
+                actor: "peer:t".into(),
+                session_id: None,
+                episodes: page.episodes,
+            },
+        )
+        .unwrap();
         // relabel on origin → change flows to peer
         let ep = {
             let conn = store.lock();
-            conn.query_row("SELECT id FROM episodes WHERE scope='work'", [], |r| r.get::<_, String>(0)).unwrap()
+            conn.query_row("SELECT id FROM episodes WHERE scope='work'", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap()
         };
-        store.apply_scope_classification(&Actor::new("human:t"), &ep, Some("family")).unwrap();
+        store
+            .apply_scope_classification(&Actor::new("human:t"), &ep, Some("family"))
+            .unwrap();
         let changes = store.scope_changes_since("").unwrap();
         assert_eq!(changes.len(), 1);
-        let applied = peer.apply_scope_changes(&Actor::new("peer:t"), &changes).unwrap();
+        let applied = peer
+            .apply_scope_changes(&Actor::new("peer:t"), &changes)
+            .unwrap();
         assert_eq!(applied, 1);
         // replaying is a no-op (LWW strictness)
-        assert_eq!(peer.apply_scope_changes(&Actor::new("peer:t"), &changes).unwrap(), 0);
+        assert_eq!(
+            peer.apply_scope_changes(&Actor::new("peer:t"), &changes)
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
     fn test_sync_export_head_excludes_peer_rows() {
         let (store, home, _tmp) = seeded();
-        assert_eq!(store.sync_export_head().unwrap(), store.sync_head().unwrap());
+        assert_eq!(
+            store.sync_export_head().unwrap(),
+            store.sync_head().unwrap()
+        );
         // a row received FROM a peer raises sync_head but not the
         // export head — it will never be pushed back out.
         store
@@ -1099,7 +1159,10 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(store.sync_head().unwrap(), store.sync_export_head().unwrap() + 1);
+        assert_eq!(
+            store.sync_head().unwrap(),
+            store.sync_export_head().unwrap() + 1
+        );
         // and the export cursor drains exactly at the export head
         let page = store.sync_export(&home, 0, 10).unwrap();
         assert_eq!(page.next_cursor, store.sync_export_head().unwrap());
@@ -1163,10 +1226,29 @@ mod tests {
                 .unwrap()
         };
         store
-            .add_relationship(&actor, &ada, "friend", "declared", &[], Some("met at work"), None)
+            .add_relationship(
+                &actor,
+                &ada,
+                "friend",
+                "declared",
+                &[],
+                Some("met at work"),
+                None,
+            )
             .unwrap();
         store
-            .add_task(&actor, "plain", "call Ada", None, None, "one-time", "personal", None, None, &[])
+            .add_task(
+                &actor,
+                "plain",
+                "call Ada",
+                None,
+                None,
+                "one-time",
+                "personal",
+                None,
+                None,
+                &[],
+            )
             .unwrap();
         let exported = store.export_operational(&home).unwrap();
         let (peer, peer_home, _tmp2) = {
@@ -1176,13 +1258,21 @@ mod tests {
             (Store::open(&h.db_path()).unwrap(), h, t)
         };
         let applied = peer.apply_operational(&peer_home, &exported).unwrap();
-        assert!(applied >= 2, "task + relationship should apply, got {applied}");
+        assert!(
+            applied >= 2,
+            "task + relationship should apply, got {applied}"
+        );
         // The same payload again changes nothing — and must SAY nothing
         // changed: a non-zero count touches the bus and schedules another
         // sync (0.5.68 looped every ~10s on 2,953 "applied" rows).
         assert_eq!(peer.apply_operational(&peer_home, &exported).unwrap(), 0);
         // …and the sender re-applying its own state back is also a no-op.
-        assert_eq!(store.apply_operational(&home, &peer.export_operational(&peer_home).unwrap()).unwrap(), 0);
+        assert_eq!(
+            store
+                .apply_operational(&home, &peer.export_operational(&peer_home).unwrap())
+                .unwrap(),
+            0
+        );
         let (kind, created): (String, String) = {
             let conn = peer.lock();
             conn.query_row(
@@ -1207,12 +1297,24 @@ mod tests {
         let (b, b_home, _tb) = seeded();
         let actor = Actor::new("human:t");
         let mk = |s: &Store, d: &str| {
-            s.add_task(&actor, "plain", d, None, None, "one-time", "personal", None, None, &[])
-                .unwrap()
+            s.add_task(
+                &actor,
+                "plain",
+                d,
+                None,
+                None,
+                "one-time",
+                "personal",
+                None,
+                None,
+                &[],
+            )
+            .unwrap()
         };
         // a shared row (same id on both, seeded by a first merge)
         let s = mk(&a, "shared");
-        b.apply_operational(&b_home, &a.export_operational(&a_home).unwrap()).unwrap();
+        b.apply_operational(&b_home, &a.export_operational(&a_home).unwrap())
+            .unwrap();
         // divergent local-only rows
         let za = mk(&a, "only-A");
         let zb = mk(&b, "only-B");
@@ -1229,19 +1331,39 @@ mod tests {
         raw(&b, &s, "from-B", "2026-12-01T00:00:00Z");
         let desc = |s: &Store, id: &str| -> String {
             let c = s.lock();
-            c.query_row("SELECT description FROM tasks WHERE id=?1", [id], |r| r.get(0))
-                .unwrap()
+            c.query_row("SELECT description FROM tasks WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
         };
         // merge A -> B
-        b.apply_operational(&b_home, &a.export_operational(&a_home).unwrap()).unwrap();
-        assert_eq!(desc(&b, &zb), "only-B", "receiver-only task must survive the merge (union, no DELETE)");
+        b.apply_operational(&b_home, &a.export_operational(&a_home).unwrap())
+            .unwrap();
+        assert_eq!(
+            desc(&b, &zb),
+            "only-B",
+            "receiver-only task must survive the merge (union, no DELETE)"
+        );
         assert_eq!(desc(&b, &za), "only-A", "sender-only task must arrive");
-        assert_eq!(desc(&b, &s), "from-B", "newer local row must win LWW over an older sender row");
+        assert_eq!(
+            desc(&b, &s),
+            "from-B",
+            "newer local row must win LWW over an older sender row"
+        );
         // reverse merge B -> A: A's older shared copy is superseded, A gains only-B
-        a.apply_operational(&a_home, &b.export_operational(&b_home).unwrap()).unwrap();
+        a.apply_operational(&a_home, &b.export_operational(&b_home).unwrap())
+            .unwrap();
         assert_eq!(desc(&a, &s), "from-B", "newer sender row must win LWW");
-        assert_eq!(desc(&a, &zb), "only-B", "reverse merge brings the peer's task");
-        assert_eq!(desc(&a, &za), "only-A", "own task survives the reverse merge");
+        assert_eq!(
+            desc(&a, &zb),
+            "only-B",
+            "reverse merge brings the peer's task"
+        );
+        assert_eq!(
+            desc(&a, &za),
+            "only-A",
+            "own task survives the reverse merge"
+        );
     }
 
     #[test]
@@ -1253,9 +1375,21 @@ mod tests {
         let (b, b_home, _tb) = seeded();
         let actor = Actor::new("human:t");
         let id = a
-            .add_task(&actor, "plain", "x", None, None, "one-time", "personal", None, None, &[])
+            .add_task(
+                &actor,
+                "plain",
+                "x",
+                None,
+                None,
+                "one-time",
+                "personal",
+                None,
+                None,
+                &[],
+            )
             .unwrap();
-        b.apply_operational(&b_home, &a.export_operational(&a_home).unwrap()).unwrap();
+        b.apply_operational(&b_home, &a.export_operational(&a_home).unwrap())
+            .unwrap();
         {
             let c = b.lock();
             c.execute("DELETE FROM tasks WHERE id=?1", [&id]).unwrap();
@@ -1268,12 +1402,19 @@ mod tests {
             )
             .unwrap();
         }
-        b.apply_operational(&b_home, &a.export_operational(&a_home).unwrap()).unwrap();
+        b.apply_operational(&b_home, &a.export_operational(&a_home).unwrap())
+            .unwrap();
         let d: String = {
             let c = b.lock();
-            c.query_row("SELECT description FROM tasks WHERE id=?1", [&id], |r| r.get(0)).unwrap()
+            c.query_row("SELECT description FROM tasks WHERE id=?1", [&id], |r| {
+                r.get(0)
+            })
+            .unwrap()
         };
-        assert_eq!(d, "newer", "sender row must apply when the local row is absent");
+        assert_eq!(
+            d, "newer",
+            "sender row must apply when the local row is absent"
+        );
     }
 
     #[test]
@@ -1284,16 +1425,34 @@ mod tests {
         let actor = Actor::new("human:t");
         let payload = serde_json::json!({"items":[{"text":"socks","done":false},{"text":"tent","done":false}]});
         let id = s
-            .add_task(&actor, "checklist", "packing list", Some(&payload), None, "one-time", "personal", None, None, &[])
+            .add_task(
+                &actor,
+                "checklist",
+                "packing list",
+                Some(&payload),
+                None,
+                "one-time",
+                "personal",
+                None,
+                None,
+                &[],
+            )
             .unwrap();
-        s.update_task(&actor, &id, None, None, Some("archived"), None, None).unwrap();
+        s.update_task(&actor, &id, None, None, Some("archived"), None, None)
+            .unwrap();
         s.purge_task(&actor, &id).unwrap();
         assert!(s.task(&id).unwrap().is_none(), "task should be purged");
         s.restore_task(&actor, &id).unwrap();
         let t = s.task(&id).unwrap().expect("task restored from journal");
         assert_eq!(t.description, "packing list");
-        let items = t.payload.and_then(|p| p.get("items").and_then(|i| i.as_array()).map(|a| a.len()));
-        assert_eq!(items, Some(2), "checklist items restored from the journal post-image");
+        let items = t
+            .payload
+            .and_then(|p| p.get("items").and_then(|i| i.as_array()).map(|a| a.len()));
+        assert_eq!(
+            items,
+            Some(2),
+            "checklist items restored from the journal post-image"
+        );
     }
 
     #[test]
@@ -1306,27 +1465,49 @@ mod tests {
         let (b, b_home, _tb) = seeded();
         let actor = Actor::new("human:t");
         let id = a
-            .add_task(&actor, "plain", "doomed", None, None, "one-time", "personal", None, None, &[])
+            .add_task(
+                &actor,
+                "plain",
+                "doomed",
+                None,
+                None,
+                "one-time",
+                "personal",
+                None,
+                None,
+                &[],
+            )
             .unwrap();
-        b.apply_operational(&b_home, &a.export_operational(&a_home).unwrap()).unwrap();
+        b.apply_operational(&b_home, &a.export_operational(&a_home).unwrap())
+            .unwrap();
         assert!(b.task(&id).unwrap().is_some(), "task mirrored to B");
-        a.update_task(&actor, &id, None, None, Some("archived"), None, None).unwrap();
+        a.update_task(&actor, &id, None, None, Some("archived"), None, None)
+            .unwrap();
         a.purge_task(&actor, &id).unwrap();
         let feed = a.journal_export(0, 500).unwrap();
         assert!(!feed["drained"].as_bool().unwrap());
         let peer = Actor::new("peer:a");
         let applied = b.apply_journal(&peer, &feed).unwrap();
         assert!(applied >= 1);
-        assert!(b.task(&id).unwrap().is_none(), "purge on A must propagate to B");
+        assert!(
+            b.task(&id).unwrap().is_none(),
+            "purge on A must propagate to B"
+        );
         // idempotent: replaying the same page changes nothing
         assert_eq!(b.apply_journal(&peer, &feed).unwrap(), 0);
         // echo guard: everything B holds journal-wise came from the peer,
         // so B's own export is empty — no ping-pong.
-        assert!(b.journal_export(0, 500).unwrap()["drained"].as_bool().unwrap());
+        assert!(b.journal_export(0, 500).unwrap()["drained"]
+            .as_bool()
+            .unwrap());
         // and the mirror can't resurrect it: B's copy predates the
         // tombstone, so applying B's snapshot on A leaves the row gone.
-        a.apply_operational(&a_home, &b.export_operational(&b_home).unwrap()).unwrap();
-        assert!(a.task(&id).unwrap().is_none(), "mirror must not resurrect a tombstoned row");
+        a.apply_operational(&a_home, &b.export_operational(&b_home).unwrap())
+            .unwrap();
+        assert!(
+            a.task(&id).unwrap().is_none(),
+            "mirror must not resurrect a tombstoned row"
+        );
     }
 
     #[test]
@@ -1338,10 +1519,23 @@ mod tests {
         let (b, b_home, _tb) = seeded();
         let actor = Actor::new("human:t");
         let id = a
-            .add_task(&actor, "plain", "contested", None, None, "one-time", "personal", None, None, &[])
+            .add_task(
+                &actor,
+                "plain",
+                "contested",
+                None,
+                None,
+                "one-time",
+                "personal",
+                None,
+                None,
+                &[],
+            )
             .unwrap();
-        b.apply_operational(&b_home, &a.export_operational(&a_home).unwrap()).unwrap();
-        a.update_task(&actor, &id, None, None, Some("archived"), None, None).unwrap();
+        b.apply_operational(&b_home, &a.export_operational(&a_home).unwrap())
+            .unwrap();
+        a.update_task(&actor, &id, None, None, Some("archived"), None, None)
+            .unwrap();
         a.purge_task(&actor, &id).unwrap();
         {
             let c = b.lock();
@@ -1352,7 +1546,8 @@ mod tests {
             )
             .unwrap();
         }
-        b.apply_journal(&Actor::new("peer:a"), &a.journal_export(0, 500).unwrap()).unwrap();
+        b.apply_journal(&Actor::new("peer:a"), &a.journal_export(0, 500).unwrap())
+            .unwrap();
         let survivor = b.task(&id).unwrap();
         assert_eq!(
             survivor.map(|t| t.description).as_deref(),
@@ -1361,8 +1556,12 @@ mod tests {
         );
         // B's snapshot re-seeds A: the sender copy is newer than A's
         // tombstone, so the resurrection gate lets it through.
-        a.apply_operational(&a_home, &b.export_operational(&b_home).unwrap()).unwrap();
-        assert!(a.task(&id).unwrap().is_some(), "newer surviving row must return to A");
+        a.apply_operational(&a_home, &b.export_operational(&b_home).unwrap())
+            .unwrap();
+        assert!(
+            a.task(&id).unwrap().is_some(),
+            "newer surviving row must return to A"
+        );
     }
 
     #[test]
@@ -1387,7 +1586,9 @@ mod tests {
         let (sender, sender_home, _t1) = seeded();
         sender.declare_project(&actor, "Orrery").unwrap();
         let proj = sender.entity_by_name("Orrery").unwrap().unwrap();
-        sender.rename_entity(&actor, &proj.id, "Hearthloom").unwrap();
+        sender
+            .rename_entity(&actor, &proj.id, "Hearthloom")
+            .unwrap();
         // Receiver: knows the entity under its OLD name, with a
         // DIFFERENT id (peers mint ids independently).
         let (receiver, receiver_home, _t2) = seeded();

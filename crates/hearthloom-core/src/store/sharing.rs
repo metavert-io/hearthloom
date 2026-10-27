@@ -75,7 +75,11 @@ pub(crate) fn resolve_group(key: &str, sharing: &Value) -> EffectiveGrant {
 fn resolve_with(friend: &str, template: &Value, over: &Value, floor: bool) -> EffectiveGrant {
     let pick_class = |class: &str| -> bool {
         for source in [over, template] {
-            if let Some(v) = source.get("classes").and_then(|c| c.get(class)).and_then(|v| v.as_str()) {
+            if let Some(v) = source
+                .get("classes")
+                .and_then(|c| c.get(class))
+                .and_then(|v| v.as_str())
+            {
                 return v == "on";
             }
         }
@@ -234,7 +238,12 @@ impl Store {
     }
 
     /// Per-friend sharing override (tri-state; absent keys inherit).
-    pub fn set_friend_sharing(&self, actor: &Actor, friend: &str, sharing: &Value) -> Result<Value> {
+    pub fn set_friend_sharing(
+        &self,
+        actor: &Actor,
+        friend: &str,
+        sharing: &Value,
+    ) -> Result<Value> {
         if friend == DEFAULT_FRIEND {
             return Err(anyhow!("use the default-sharing surface for the template"));
         }
@@ -320,7 +329,9 @@ impl Store {
         }
         let scope = self.item_scope(kind, item_id)?;
         if scope.as_deref() == Some("private") {
-            return Err(anyhow!("private items can never be shared — change its scope first"));
+            return Err(anyhow!(
+                "private items can never be shared — change its scope first"
+            ));
         }
         if scope.is_none() {
             return Err(anyhow!("no {kind} {item_id:?}"));
@@ -336,7 +347,14 @@ impl Store {
                  expires_at = excluded.expires_at,
                  created_at = excluded.created_at",
             rusqlite::params![
-                id, kind, item_id, friend, collaborate as i64, expires_at, now_utc(), actor.actor
+                id,
+                kind,
+                item_id,
+                friend,
+                collaborate as i64,
+                expires_at,
+                now_utc(),
+                actor.actor
             ],
         )?;
         let row_id: String = conn.query_row(
@@ -344,7 +362,14 @@ impl Store {
             rusqlite::params![kind, item_id, friend],
             |row| row.get(0),
         )?;
-        super::journal_row(&conn, actor, "shared_item", "shared_items", &row_id, "update")?;
+        super::journal_row(
+            &conn,
+            actor,
+            "shared_item",
+            "shared_items",
+            &row_id,
+            "update",
+        )?;
         record_mutation(
             &conn,
             actor,
@@ -353,12 +378,20 @@ impl Store {
             &json!({"kind": kind, "item": item_id, "friend": friend,
                     "collaborate": collaborate, "expires_at": expires_at}),
         )?;
-        Ok(json!({"id": row_id, "kind": kind, "item_id": item_id, "friend": friend,
-                  "collaborate": collaborate}))
+        Ok(
+            json!({"id": row_id, "kind": kind, "item_id": item_id, "friend": friend,
+                  "collaborate": collaborate}),
+        )
     }
 
     /// Un-share: takes effect on the friend's very next request.
-    pub fn unshare_item(&self, actor: &Actor, kind: &str, item_id: &str, friend: &str) -> Result<bool> {
+    pub fn unshare_item(
+        &self,
+        actor: &Actor,
+        kind: &str,
+        item_id: &str,
+        friend: &str,
+    ) -> Result<bool> {
         let conn = self.lock();
         let row_id: Option<String> = conn
             .query_row(
@@ -367,9 +400,18 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        let Some(row_id) = row_id else { return Ok(false) };
+        let Some(row_id) = row_id else {
+            return Ok(false);
+        };
         // tombstone BEFORE the row is gone (delete propagates via journal sync)
-        super::journal_row(&conn, actor, "shared_item", "shared_items", &row_id, "delete")?;
+        super::journal_row(
+            &conn,
+            actor,
+            "shared_item",
+            "shared_items",
+            &row_id,
+            "delete",
+        )?;
         conn.execute("DELETE FROM shared_items WHERE id = ?1", [&row_id])?;
         record_mutation(
             &conn,
@@ -420,7 +462,8 @@ impl Store {
                 "shared_at": row.get::<_, String>(3)?,
             }))
         })?;
-        rows.collect::<std::result::Result<_, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
     }
 
     /// Everything explicitly shared to one friend (the owner-side panel).
@@ -439,7 +482,8 @@ impl Store {
                 "shared_at": row.get::<_, String>(4)?,
             }))
         })?;
-        rows.collect::<std::result::Result<_, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
     }
 
     /// An item's scope (None = item doesn't exist). Relationships take
@@ -474,9 +518,8 @@ impl Store {
         }
         // Grant by grant: a life area counts only where ONE grant gives
         // both the tasks class and (for done tasks) the completed flag.
-        let covers = |g: &EffectiveGrant| {
-            g.has_class("tasks") && (status != "done" || g.completed_tasks)
-        };
+        let covers =
+            |g: &EffectiveGrant| g.has_class("tasks") && (status != "done" || g.completed_tasks);
         let cat_clause = scope_clause("t.scope", &access.spheres(covers));
         let full_spheres = access.spheres(|g| covers(g) && g.detail == "full");
         let target = access.share_target("s.friend", "?1");
@@ -775,7 +818,8 @@ impl Store {
                 }),
             })
         })?;
-        rows.collect::<std::result::Result<_, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
     }
 
     /// The ONE friend write: toggle a checklist item on a task that was
@@ -929,7 +973,12 @@ impl Store {
 
     /// Public wrapper for daemon-side surfaces that assemble their own
     /// responses (the note-body fetch) but must still log the access.
-    pub fn log_network_access_pub(&self, friend: &str, surface: &str, detail: &Value) -> Result<()> {
+    pub fn log_network_access_pub(
+        &self,
+        friend: &str,
+        surface: &str,
+        detail: &Value,
+    ) -> Result<()> {
         self.log_network_access(friend, surface, detail)
     }
 
@@ -981,8 +1030,20 @@ impl Store {
         // ignores the field), whole and outside the cursor.
         let groups = Store::groups_sync_export(&conn)?;
         drop(stmt);
-        let grants_end = super::page_cursor(&conn, "synced_at", "FROM grants WHERE synced_at > ?1", since, 500)?;
-        let shares_end = super::page_cursor(&conn, "synced_at", "FROM shared_items WHERE synced_at > ?1", since, 500)?;
+        let grants_end = super::page_cursor(
+            &conn,
+            "synced_at",
+            "FROM grants WHERE synced_at > ?1",
+            since,
+            500,
+        )?;
+        let shares_end = super::page_cursor(
+            &conn,
+            "synced_at",
+            "FROM shared_items WHERE synced_at > ?1",
+            since,
+            500,
+        )?;
         let next = match (grants.len() >= 500, shares.len() >= 500) {
             (true, false) => grants_end,
             (false, true) => shares_end,
@@ -1000,8 +1061,15 @@ impl Store {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let mut applied = 0usize;
-        for g in batch.get("grants").and_then(|v| v.as_array()).into_iter().flatten() {
-            let Some(friend) = g.get("friend").and_then(|v| v.as_str()) else { continue };
+        for g in batch
+            .get("grants")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let Some(friend) = g.get("friend").and_then(|v| v.as_str()) else {
+                continue;
+            };
             let sender_ts = g.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
             let local_ts: Option<String> = tx
                 .query_row(
@@ -1027,7 +1095,9 @@ impl Store {
                 rusqlite::params![
                     friend,
                     g.get("spheres").and_then(|v| v.as_str()).unwrap_or("[]"),
-                    g.get("detail").and_then(|v| v.as_str()).unwrap_or("excerpts"),
+                    g.get("detail")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("excerpts"),
                     g.get("created_at").and_then(|v| v.as_str()).unwrap_or(""),
                     g.get("expires_at").and_then(|v| v.as_str()),
                     g.get("revoked_at").and_then(|v| v.as_str()),
@@ -1037,7 +1107,12 @@ impl Store {
             )?;
             applied += 1;
         }
-        for s in batch.get("shares").and_then(|v| v.as_array()).into_iter().flatten() {
+        for s in batch
+            .get("shares")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
             let (Some(id), Some(kind), Some(item_id), Some(friend)) = (
                 s.get("id").and_then(|v| v.as_str()),
                 s.get("kind").and_then(|v| v.as_str()),
@@ -1069,7 +1144,10 @@ impl Store {
                      created_at=excluded.created_at
                  WHERE excluded.created_at > shared_items.created_at",
                 rusqlite::params![
-                    id, kind, item_id, friend,
+                    id,
+                    kind,
+                    item_id,
+                    friend,
                     s.get("collaborate").and_then(|v| v.as_i64()).unwrap_or(0),
                     s.get("expires_at").and_then(|v| v.as_str()),
                     sender_ts,
@@ -1120,7 +1198,18 @@ mod tests {
 
     fn task(store: &Store, desc: &str, scope: &str) -> String {
         store
-            .add_task(&actor(), "plain", desc, None, None, "one-time", scope, None, None, &[])
+            .add_task(
+                &actor(),
+                "plain",
+                desc,
+                None,
+                None,
+                "one-time",
+                scope,
+                None,
+                None,
+                &[],
+            )
             .unwrap()
     }
 
@@ -1128,8 +1217,10 @@ mod tests {
     fn test_default_template_inherits_and_overrides() {
         let (store, _h, _t) = seeded();
         grant_for(&store, "ada"); // legacy-style grant: frozen episodes-only
-        // a fresh-style friend inheriting everything
-        store.set_friend_sharing(&actor(), "bea", &json!({})).unwrap();
+                                  // a fresh-style friend inheriting everything
+        store
+            .set_friend_sharing(&actor(), "bea", &json!({}))
+            .unwrap();
         // template turns tasks ON for everyone (spheres too)
         store
             .set_default_sharing(
@@ -1139,15 +1230,25 @@ mod tests {
             )
             .unwrap();
         let bea = store.effective_grant("bea").unwrap();
-        assert!(bea.has_class("tasks"), "inheriting friend follows the template");
+        assert!(
+            bea.has_class("tasks"),
+            "inheriting friend follows the template"
+        );
         assert_eq!(bea.spheres, vec!["work"]);
         // ada's invite froze episodes/spheres/detail EXPLICITLY, but the
         // classes it never mentioned still inherit — flipping the default
         // reaches every connection (the point of the template); her own
         // spheres stay her own.
         let ada = store.effective_grant("ada").unwrap();
-        assert!(ada.has_class("tasks"), "unmentioned classes inherit the template");
-        assert_eq!(ada.spheres, vec!["work"], "frozen spheres stay the row's own");
+        assert!(
+            ada.has_class("tasks"),
+            "unmentioned classes inherit the template"
+        );
+        assert_eq!(
+            ada.spheres,
+            vec!["work"],
+            "frozen spheres stay the row's own"
+        );
         assert_eq!(ada.detail, "excerpts", "frozen detail stays the row's own");
         // bea revokes tasks specifically — override beats template
         store
@@ -1168,13 +1269,17 @@ mod tests {
         let id = task(&store, "pack the car", "personal");
         // categorically invisible (class off AND sphere personal not granted)
         assert!(store.network_tasks("ada", "open", 50).unwrap().is_empty());
-        store.share_item(&actor(), "task", &id, "ada", false, None).unwrap();
+        store
+            .share_item(&actor(), "task", &id, "ada", false, None)
+            .unwrap();
         let visible = store.network_tasks("ada", "open", 50).unwrap();
         assert_eq!(visible.len(), 1, "explicit share must punch through");
         assert_eq!(visible[0]["shared"], json!(true));
         assert!(store.unshare_item(&actor(), "task", &id, "ada").unwrap());
-        assert!(store.network_tasks("ada", "open", 50).unwrap().is_empty(),
-            "unshare takes effect immediately");
+        assert!(
+            store.network_tasks("ada", "open", 50).unwrap().is_empty(),
+            "unshare takes effect immediately"
+        );
     }
 
     #[test]
@@ -1182,36 +1287,50 @@ mod tests {
         let (store, _h, _t) = seeded();
         grant_for(&store, "ada");
         let id = task(&store, "secret plans", "private");
-        assert!(store.share_item(&actor(), "task", &id, "ada", false, None).is_err(),
-            "private items must refuse sharing");
+        assert!(
+            store
+                .share_item(&actor(), "task", &id, "ada", false, None)
+                .is_err(),
+            "private items must refuse sharing"
+        );
         // share a personal task, then relabel it private — retracted at read
         let id2 = task(&store, "was personal", "personal");
-        store.share_item(&actor(), "task", &id2, "ada", false, None).unwrap();
+        store
+            .share_item(&actor(), "task", &id2, "ada", false, None)
+            .unwrap();
         assert_eq!(store.network_tasks("ada", "open", 50).unwrap().len(), 1);
         {
             let conn = store.lock();
             conn.execute("UPDATE tasks SET scope='private' WHERE id=?1", [&id2])
                 .unwrap();
         }
-        assert!(store.network_tasks("ada", "open", 50).unwrap().is_empty(),
-            "a privacy relabel must silently retract the share");
+        assert!(
+            store.network_tasks("ada", "open", 50).unwrap().is_empty(),
+            "a privacy relabel must silently retract the share"
+        );
     }
 
     #[test]
     fn test_completed_tasks_gate_and_shared_lifecycle() {
         let (store, home, _t) = seeded();
         store
-            .set_friend_sharing(&actor(), "ada",
-                &json!({"classes": {"tasks": "on"}, "spheres": ["personal"]}))
+            .set_friend_sharing(
+                &actor(),
+                "ada",
+                &json!({"classes": {"tasks": "on"}, "spheres": ["personal"]}),
+            )
             .unwrap();
         let id = task(&store, "walk", "personal");
         store.complete_task(&actor(), &home, &id, None).unwrap();
         // categorical done requires the flag
         assert!(store.network_tasks("ada", "done", 50).unwrap().is_empty());
         store
-            .set_friend_sharing(&actor(), "ada",
+            .set_friend_sharing(
+                &actor(),
+                "ada",
                 &json!({"classes": {"tasks": "on"}, "spheres": ["personal"],
-                        "completed_tasks": true}))
+                        "completed_tasks": true}),
+            )
             .unwrap();
         assert_eq!(store.network_tasks("ada", "done", 50).unwrap().len(), 1);
     }
@@ -1222,16 +1341,40 @@ mod tests {
         grant_for(&store, "ada");
         let payload = json!({"items": [{"text": "tent", "done": false}]});
         let id = store
-            .add_task(&actor(), "checklist", "camping", Some(&payload), None,
-                "one-time", "personal", None, None, &[])
+            .add_task(
+                &actor(),
+                "checklist",
+                "camping",
+                Some(&payload),
+                None,
+                "one-time",
+                "personal",
+                None,
+                None,
+                &[],
+            )
             .unwrap();
-        store.share_item(&actor(), "task", &id, "ada", false, None).unwrap();
-        assert!(store.friend_toggle_checklist("ada", &id, 0, "tent", true).is_err(),
-            "collaborate=false must refuse the toggle");
-        store.share_item(&actor(), "task", &id, "ada", true, None).unwrap();
-        assert!(store.friend_toggle_checklist("ada", &id, 0, "sleeping bag", true).is_err(),
-            "text mismatch must refuse (stale index)");
-        let out = store.friend_toggle_checklist("ada", &id, 0, "tent", true).unwrap();
+        store
+            .share_item(&actor(), "task", &id, "ada", false, None)
+            .unwrap();
+        assert!(
+            store
+                .friend_toggle_checklist("ada", &id, 0, "tent", true)
+                .is_err(),
+            "collaborate=false must refuse the toggle"
+        );
+        store
+            .share_item(&actor(), "task", &id, "ada", true, None)
+            .unwrap();
+        assert!(
+            store
+                .friend_toggle_checklist("ada", &id, 0, "sleeping bag", true)
+                .is_err(),
+            "text mismatch must refuse (stale index)"
+        );
+        let out = store
+            .friend_toggle_checklist("ada", &id, 0, "tent", true)
+            .unwrap();
         assert_eq!(out["done"], json!(1));
         let t = store.task(&id).unwrap().unwrap();
         assert_eq!(t.payload.unwrap()["items"][0]["done"], json!(true));
@@ -1242,11 +1385,23 @@ mod tests {
         let (store, home, _t) = seeded();
         grant_for(&store, "ada");
         let note = store
-            .create_note(&actor(), &home, "Trip plan", "# pack\ntent", &[], "personal", None)
+            .create_note(
+                &actor(),
+                &home,
+                "Trip plan",
+                "# pack\ntent",
+                &[],
+                "personal",
+                None,
+            )
             .unwrap();
-        assert!(!store.network_note_allowed("ada", &note).unwrap(),
-            "excerpts grant + no share = no body");
-        store.share_item(&actor(), "note", &note, "ada", false, None).unwrap();
+        assert!(
+            !store.network_note_allowed("ada", &note).unwrap(),
+            "excerpts grant + no share = no body"
+        );
+        store
+            .share_item(&actor(), "note", &note, "ada", false, None)
+            .unwrap();
         assert!(store.network_note_allowed("ada", &note).unwrap());
         let bundle = store.network_shared_bundle("ada").unwrap();
         assert_eq!(bundle["notes"].as_array().unwrap().len(), 1);
@@ -1256,14 +1411,18 @@ mod tests {
     /* ————— friend groups (v54) ————— */
 
     fn sharing(classes: &[&str], spheres: &[&str], detail: &str) -> Value {
-        let classes: serde_json::Map<String, Value> =
-            classes.iter().map(|c| (c.to_string(), json!("on"))).collect();
+        let classes: serde_json::Map<String, Value> = classes
+            .iter()
+            .map(|c| (c.to_string(), json!("on")))
+            .collect();
         json!({"classes": classes, "spheres": spheres, "detail": detail})
     }
 
     fn descriptions(tasks: &[Value]) -> Vec<String> {
-        let mut out: Vec<String> =
-            tasks.iter().map(|t| t["description"].as_str().unwrap().to_string()).collect();
+        let mut out: Vec<String> = tasks
+            .iter()
+            .map(|t| t["description"].as_str().unwrap().to_string())
+            .collect();
         out.sort();
         out
     }
@@ -1279,12 +1438,18 @@ mod tests {
         task(&store, "hidden", "private");
 
         let group = store.create_group(&actor(), "Family").unwrap();
-        store.set_group_members(&actor(), &group.id, &["ada".into()]).unwrap();
+        store
+            .set_group_members(&actor(), &group.id, &["ada".into()])
+            .unwrap();
         // An empty group grants nothing — no template, no floor.
         assert!(store.network_tasks("ada", "open", 50).unwrap().is_empty());
 
         store
-            .set_group_sharing(&actor(), &group.id, &sharing(&["tasks"], &["family", "private"], "full"))
+            .set_group_sharing(
+                &actor(),
+                &group.id,
+                &sharing(&["tasks"], &["family", "private"], "full"),
+            )
             .unwrap();
         // ada: tasks come from the group, and only in the group's area.
         // Her direct grant covers `work` but not tasks — the two must not
@@ -1295,36 +1460,56 @@ mod tests {
         assert!(store.network_tasks("bob", "open", 50).unwrap().is_empty());
 
         let access = store.access("ada").unwrap();
-        assert_eq!(access.spheres(|g| g.has_class("tasks")), ["family"], "private is never granted");
+        assert_eq!(
+            access.spheres(|g| g.has_class("tasks")),
+            ["family"],
+            "private is never granted"
+        );
         assert_eq!(access.spheres(|g| g.has_class("episodes")), ["work"]);
         assert!(access.spheres(|g| g.has_class("notes")).is_empty());
         // Full bodies of memories: the group's `full` does not upgrade
         // the direct grant's excerpts.
-        assert!(access.spheres(|g| g.has_class("episodes") && g.detail == "full").is_empty());
+        assert!(access
+            .spheres(|g| g.has_class("episodes") && g.detail == "full")
+            .is_empty());
         // The advertised ceiling is wider than what is enforced — by design.
         let ceiling = access.ceiling();
         assert!(ceiling.has_class("tasks") && ceiling.spheres.contains(&"work".to_string()));
 
         // A second group adds its own area; done tasks need THAT grant's flag.
         let other = store.create_group(&actor(), "Clinic").unwrap();
-        store.set_group_members(&actor(), &other.id, &["ada".into(), "bob".into()]).unwrap();
+        store
+            .set_group_members(&actor(), &other.id, &["ada".into(), "bob".into()])
+            .unwrap();
         let mut health = sharing(&["tasks"], &["health"], "excerpts");
         health["completed_tasks"] = json!(true);
-        store.set_group_sharing(&actor(), &other.id, &health).unwrap();
+        store
+            .set_group_sharing(&actor(), &other.id, &health)
+            .unwrap();
         assert_eq!(
             descriptions(&store.network_tasks("ada", "open", 50).unwrap()),
             ["family task", "health task"]
         );
-        assert_eq!(descriptions(&store.network_tasks("bob", "open", 50).unwrap()), ["health task"]);
+        assert_eq!(
+            descriptions(&store.network_tasks("bob", "open", 50).unwrap()),
+            ["health task"]
+        );
         let done_spheres = store
             .access("ada")
             .unwrap()
             .spheres(|g| g.has_class("tasks") && g.completed_tasks);
-        assert_eq!(done_spheres, ["health"], "the family group never offered done tasks");
+        assert_eq!(
+            done_spheres,
+            ["health"],
+            "the family group never offered done tasks"
+        );
 
         // Leaving the roster ends it on the next read.
         store.set_group_members(&actor(), &group.id, &[]).unwrap();
-        assert_eq!(descriptions(&store.network_tasks("ada", "open", 50).unwrap()), ["health task"]);
+        assert_eq!(
+            descriptions(&store.network_tasks("ada", "open", 50).unwrap()),
+            ["health task"]
+        );
     }
 
     #[test]
@@ -1333,21 +1518,34 @@ mod tests {
         grant_for(&store, "ada");
         task(&store, "work task", "work");
         // The template gives everyone tasks; ada is switched off by hand.
-        store.set_default_sharing(&actor(), &json!({"classes": {"tasks": "on"}})).unwrap();
         store
-            .set_friend_sharing(&actor(), "ada",
-                &json!({"classes": {"episodes": "on", "tasks": "off"}, "spheres": ["work"]}))
+            .set_default_sharing(&actor(), &json!({"classes": {"tasks": "on"}}))
+            .unwrap();
+        store
+            .set_friend_sharing(
+                &actor(),
+                "ada",
+                &json!({"classes": {"episodes": "on", "tasks": "off"}, "spheres": ["work"]}),
+            )
             .unwrap();
         assert!(store.network_tasks("ada", "open", 50).unwrap().is_empty());
         // Membership in a group that says nothing about tasks changes nothing.
         let group = store.create_group(&actor(), "Team").unwrap();
-        store.set_group_members(&actor(), &group.id, &["ada".into()]).unwrap();
-        store.set_group_sharing(&actor(), &group.id, &json!({"spheres": ["work"]})).unwrap();
-        assert!(store.network_tasks("ada", "open", 50).unwrap().is_empty(),
-            "a group does not inherit the template");
+        store
+            .set_group_members(&actor(), &group.id, &["ada".into()])
+            .unwrap();
+        store
+            .set_group_sharing(&actor(), &group.id, &json!({"spheres": ["work"]}))
+            .unwrap();
+        assert!(
+            store.network_tasks("ada", "open", 50).unwrap().is_empty(),
+            "a group does not inherit the template"
+        );
 
         // A revoked connection gets nothing through a group.
-        store.set_group_sharing(&actor(), &group.id, &sharing(&["tasks"], &["work"], "full")).unwrap();
+        store
+            .set_group_sharing(&actor(), &group.id, &sharing(&["tasks"], &["work"], "full"))
+            .unwrap();
         assert_eq!(store.network_tasks("ada", "open", 50).unwrap().len(), 1);
         store.revoke_grant(&actor(), "ada").unwrap();
         assert!(store.network_tasks("ada", "open", 50).is_err());
@@ -1361,27 +1559,50 @@ mod tests {
         grant_for(&store, "ada");
         grant_for(&store, "bob");
         let group = store.create_group(&actor(), "Trip").unwrap();
-        store.set_group_members(&actor(), &group.id, &["ada".into()]).unwrap();
+        store
+            .set_group_members(&actor(), &group.id, &["ada".into()])
+            .unwrap();
         let key = group.key();
 
         let list = store
-            .add_task(&actor(), "checklist", "packing",
-                Some(&json!({"items": [{"text": "tent", "done": false}]})), None,
-                "one-time", "personal", None, None, &[])
+            .add_task(
+                &actor(),
+                "checklist",
+                "packing",
+                Some(&json!({"items": [{"text": "tent", "done": false}]})),
+                None,
+                "one-time",
+                "personal",
+                None,
+                None,
+                &[],
+            )
             .unwrap();
         let note = store
             .create_note(&actor(), &home, "Route", "# day one", &[], "personal", None)
             .unwrap();
         let secret = task(&store, "secret", "private");
-        assert!(store.share_item(&actor(), "task", &secret, &key, false, None).is_err());
-        assert!(store.share_item(&actor(), "task", &list, "group:gr_00", false, None).is_err(),
-            "an unknown group is refused");
+        assert!(store
+            .share_item(&actor(), "task", &secret, &key, false, None)
+            .is_err());
+        assert!(
+            store
+                .share_item(&actor(), "task", &list, "group:gr_00", false, None)
+                .is_err(),
+            "an unknown group is refused"
+        );
 
-        store.share_item(&actor(), "task", &list, &key, true, None).unwrap();
-        store.share_item(&actor(), "note", &note, &key, false, None).unwrap();
+        store
+            .share_item(&actor(), "task", &list, &key, true, None)
+            .unwrap();
+        store
+            .share_item(&actor(), "note", &note, &key, false, None)
+            .unwrap();
         // Also shared directly, without collaboration: still ONE row, and
         // the group's collaborate flag carries.
-        store.share_item(&actor(), "task", &list, "ada", false, None).unwrap();
+        store
+            .share_item(&actor(), "task", &list, "ada", false, None)
+            .unwrap();
         let bundle = store.network_shared_bundle("ada").unwrap();
         assert_eq!(bundle["tasks"].as_array().unwrap().len(), 1);
         assert_eq!(bundle["tasks"][0]["collaborate"], true);
@@ -1390,13 +1611,17 @@ mod tests {
         assert!(store.network_note_allowed("ada", &note).unwrap());
         assert_eq!(store.network_tasks("ada", "open", 50).unwrap().len(), 1);
         assert_eq!(store.network_notes("ada", 50).unwrap().len(), 1);
-        store.friend_toggle_checklist("ada", &list, 0, "tent", true).unwrap();
+        store
+            .friend_toggle_checklist("ada", &list, 0, "tent", true)
+            .unwrap();
 
         // bob is connected but not in the group.
         let bobs = store.network_shared_bundle("bob").unwrap();
         assert!(bobs["tasks"].as_array().unwrap().is_empty());
         assert!(!store.network_note_allowed("bob", &note).unwrap());
-        assert!(store.friend_toggle_checklist("bob", &list, 0, "tent", false).is_err());
+        assert!(store
+            .friend_toggle_checklist("bob", &list, 0, "tent", false)
+            .is_err());
 
         // Deleting the group un-shares what was shared to it; the direct
         // share to ada stands, without collaboration.
@@ -1408,8 +1633,14 @@ mod tests {
         assert_eq!(after["tasks"][0]["collaborate"], false);
         assert!(after["notes"].as_array().unwrap().is_empty());
         assert!(!store.network_note_allowed("ada", &note).unwrap());
-        assert!(store.friend_toggle_checklist("ada", &list, 0, "tent", false).is_err());
-        assert!(store.all_shares().unwrap().iter().all(|s| s["friend"] != json!(key)));
+        assert!(store
+            .friend_toggle_checklist("ada", &list, 0, "tent", false)
+            .is_err());
+        assert!(store
+            .all_shares()
+            .unwrap()
+            .iter()
+            .all(|s| s["friend"] != json!(key)));
     }
 
     #[test]
@@ -1419,19 +1650,40 @@ mod tests {
         grant_for(&store, "bob");
         let group = store.create_group(&actor(), "  Book   club ").unwrap();
         assert_eq!(group.name, "Book club");
-        assert!(store.create_group(&actor(), "book CLUB").is_err(), "names are unique");
+        assert!(
+            store.create_group(&actor(), "book CLUB").is_err(),
+            "names are unique"
+        );
         assert!(store.create_group(&actor(), "   ").is_err());
-        assert!(store.set_group_members(&actor(), &group.id, &["nobody".into()]).is_err(),
-            "only connections can be members");
-        assert!(store.set_group_members(&actor(), &group.id, &["__default__".into()]).is_err());
+        assert!(
+            store
+                .set_group_members(&actor(), &group.id, &["nobody".into()])
+                .is_err(),
+            "only connections can be members"
+        );
         assert!(store
-            .set_grant(&actor(), "group:gr_abc", &["work".into()], "excerpts", None)
-            .is_err(), "no connection may be named like a group");
-        assert!(store.set_friend_sharing(&actor(), &group.key(), &json!({})).is_err());
-        assert!(store.effective_grant(&group.key()).is_err(), "a group is not a caller");
+            .set_group_members(&actor(), &group.id, &["__default__".into()])
+            .is_err());
+        assert!(
+            store
+                .set_grant(&actor(), "group:gr_abc", &["work".into()], "excerpts", None)
+                .is_err(),
+            "no connection may be named like a group"
+        );
+        assert!(store
+            .set_friend_sharing(&actor(), &group.key(), &json!({}))
+            .is_err());
+        assert!(
+            store.effective_grant(&group.key()).is_err(),
+            "a group is not a caller"
+        );
 
         let roster = store
-            .set_group_members(&actor(), &group.id, &["ada".into(), "bob".into(), "ada".into()])
+            .set_group_members(
+                &actor(),
+                &group.id,
+                &["ada".into(), "bob".into(), "ada".into()],
+            )
             .unwrap();
         assert_eq!(roster.members, ["ada", "bob"]);
         let renamed = store.rename_group(&actor(), &group.id, "Readers").unwrap();
@@ -1442,18 +1694,28 @@ mod tests {
         assert_eq!(told.len(), 1);
         assert_eq!(told[0]["name"], "Readers");
         assert_eq!(told[0]["members"], json!(["ada", "bob"]));
-        store.set_group_members(&actor(), &group.id, &["bob".into()]).unwrap();
+        store
+            .set_group_members(&actor(), &group.id, &["bob".into()])
+            .unwrap();
         assert!(store.network_groups("ada").unwrap().is_empty());
 
         // The member side keeps the answer whole, replacing the last one.
         let member = seeded().0;
         member.set_peer_groups("jon", &told).unwrap();
-        member.set_peer_groups("mia", &[json!({"id": "gr_1", "name": "Choir", "members": ["me"]})]).unwrap();
+        member
+            .set_peer_groups(
+                "mia",
+                &[json!({"id": "gr_1", "name": "Choir", "members": ["me"]})],
+            )
+            .unwrap();
         assert_eq!(member.peer_groups().unwrap().len(), 2);
         member.set_peer_groups("jon", &[]).unwrap();
         let left = member.peer_groups().unwrap();
         assert_eq!(left.len(), 1);
-        assert_eq!((left[0]["owner"].as_str(), left[0]["name"].as_str()), (Some("mia"), Some("Choir")));
+        assert_eq!(
+            (left[0]["owner"].as_str(), left[0]["name"].as_str()),
+            (Some("mia"), Some("Choir"))
+        );
     }
 
     #[test]
@@ -1464,16 +1726,29 @@ mod tests {
             grant_for(store, "ada");
         }
         let group = a.create_group(&actor(), "Family").unwrap();
-        a.set_group_members(&actor(), &group.id, &["ada".into()]).unwrap();
-        a.set_group_sharing(&actor(), &group.id, &sharing(&["tasks"], &["family"], "full")).unwrap();
+        a.set_group_members(&actor(), &group.id, &["ada".into()])
+            .unwrap();
+        a.set_group_sharing(
+            &actor(),
+            &group.id,
+            &sharing(&["tasks"], &["family"], "full"),
+        )
+        .unwrap();
         let page = a.sharing_sync_export("").unwrap();
         assert_eq!(page["groups"].as_array().unwrap().len(), 1);
         b.sharing_sync_apply(&page).unwrap();
         b.sharing_sync_apply(&page).unwrap(); // replay is a no-op
         let got = b.group(&group.id).unwrap().unwrap();
-        assert_eq!((got.name.as_str(), got.members.clone()), ("Family", vec!["ada".to_string()]));
+        assert_eq!(
+            (got.name.as_str(), got.members.clone()),
+            ("Family", vec!["ada".to_string()])
+        );
         task(&b, "family task", "family");
-        assert_eq!(b.network_tasks("ada", "open", 50).unwrap().len(), 1, "enforced on the other node");
+        assert_eq!(
+            b.network_tasks("ada", "open", 50).unwrap().len(),
+            1,
+            "enforced on the other node"
+        );
 
         // An older row never overwrites a newer one.
         let mut stale = page.clone();
@@ -1487,8 +1762,10 @@ mod tests {
         a.delete_group(&actor(), &group.id).unwrap();
         let next = a.sharing_sync_export(&cursor).unwrap();
         assert!(next["groups"][0]["deleted_at"].as_str().is_some());
-        assert!(next["next"].as_str().unwrap() <= crate::time::now_utc().as_str(),
-            "group stamps never push the shared cursor into the future");
+        assert!(
+            next["next"].as_str().unwrap() <= crate::time::now_utc().as_str(),
+            "group stamps never push the shared cursor into the future"
+        );
         b.sharing_sync_apply(&next).unwrap();
         assert!(b.group(&group.id).unwrap().is_none());
         assert!(b.network_tasks("ada", "open", 50).unwrap().is_empty());

@@ -120,7 +120,13 @@ impl Bus {
 
     /// Append to the ring (pruning cap + TTL) and fan out to live
     /// subscribers. Returns the event as enveloped.
-    fn insert(&self, origin: &str, topic: &str, scope: Option<String>, refs: Vec<String>) -> BusEvent {
+    fn insert(
+        &self,
+        origin: &str,
+        topic: &str,
+        scope: Option<String>,
+        refs: Vec<String>,
+    ) -> BusEvent {
         let event = BusEvent {
             id: self.next_id(),
             ts: hearthloom_core::time::now_utc(),
@@ -135,7 +141,10 @@ impl Bus {
                 .format("%Y-%m-%dT%H:%M:%SZ")
                 .to_string();
             while ring.len() >= RING_CAP
-                || ring.front().map(|e| e.ts.as_str() < cutoff.as_str()).unwrap_or(false)
+                || ring
+                    .front()
+                    .map(|e| e.ts.as_str() < cutoff.as_str())
+                    .unwrap_or(false)
             {
                 if ring.pop_front().is_none() {
                     break;
@@ -171,7 +180,10 @@ impl Bus {
                 Replay::Resync
             }
             Some(_) => Replay::Events(
-                ring.iter().filter(|e| e.id.as_str() > cursor).cloned().collect(),
+                ring.iter()
+                    .filter(|e| e.id.as_str() > cursor)
+                    .cloned()
+                    .collect(),
             ),
         }
     }
@@ -244,8 +256,15 @@ pub fn touch(state: &AppState, topic: &str) {
 /// outbound POST to the paired peer (feature-detected), and — on the
 /// dialing node — an early sync cycle so the change actually moves now
 /// instead of at the tick.
-pub async fn publish_local(state: &AppState, topic: &str, scope: Option<String>, refs: Vec<String>) {
-    let event = state.bus.insert(&crate::sync::hostname(), topic, scope, refs);
+pub async fn publish_local(
+    state: &AppState,
+    topic: &str,
+    scope: Option<String>,
+    refs: Vec<String>,
+) {
+    let event = state
+        .bus
+        .insert(&crate::sync::hostname(), topic, scope, refs);
     if let (Ok(Some((_, url))), Some(key)) = (state.store.peer(), crate::sync::peer_key()) {
         if state.bus.outbound_supported() {
             let bus = state.bus.clone();
@@ -259,8 +278,9 @@ pub async fn publish_local(state: &AppState, topic: &str, scope: Option<String>,
                     .send()
                     .await;
                 match res {
-                    Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND
-                        || r.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED =>
+                    Ok(r)
+                        if r.status() == reqwest::StatusCode::NOT_FOUND
+                            || r.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED =>
                     {
                         // Old peer: degrade to poll-only, probe again later.
                         bus.mark_unsupported();
@@ -279,9 +299,18 @@ pub async fn publish_local(state: &AppState, topic: &str, scope: Option<String>,
 /// through the existing sync cycle (a no-op on a node that doesn't
 /// dial, i.e. the always-on peer).
 pub fn receive(state: &AppState, event: &Value) -> Value {
-    let topic = event.get("topic").and_then(|t| t.as_str()).unwrap_or("unknown");
-    let origin = event.get("origin").and_then(|o| o.as_str()).unwrap_or("peer");
-    let scope = event.get("scope").and_then(|s| s.as_str()).map(String::from);
+    let topic = event
+        .get("topic")
+        .and_then(|t| t.as_str())
+        .unwrap_or("unknown");
+    let origin = event
+        .get("origin")
+        .and_then(|o| o.as_str())
+        .unwrap_or("peer");
+    let scope = event
+        .get("scope")
+        .and_then(|s| s.as_str())
+        .map(String::from);
     let refs: Vec<String> =
         serde_json::from_value(event.get("refs").cloned().unwrap_or(json!([]))).unwrap_or_default();
     let stored = state.bus.insert(origin, topic, scope, refs);
@@ -391,7 +420,10 @@ pub async fn run_subscriber(state: AppState) {
             }
             SubscribeOutcome::Dropped => {}
         }
-        state.bus.subscriber_connected.store(false, Ordering::Relaxed);
+        state
+            .bus
+            .subscriber_connected
+            .store(false, Ordering::Relaxed);
         tokio::time::sleep(std::time::Duration::from_secs(RECONNECT_SECS)).await;
     }
 }
@@ -438,7 +470,10 @@ async fn subscribe_once(state: &AppState, url: &str, key: &str) -> SubscribeOutc
         tracing::warn!("bus subscribe refused: {}", res.status());
         return SubscribeOutcome::Dropped;
     }
-    state.bus.subscriber_connected.store(true, Ordering::Relaxed);
+    state
+        .bus
+        .subscriber_connected
+        .store(true, Ordering::Relaxed);
     tracing::info!("push bus subscribed to peer (cursor {:?})", cursor);
     let mut parser = SseParser::default();
     loop {
@@ -456,8 +491,7 @@ async fn subscribe_once(state: &AppState, url: &str, key: &str) -> SubscribeOutc
             if let Some(id) = &msg.id {
                 let _ = state.store.set_consolidation_state(KEY_BUS_CURSOR, id);
             }
-            *state.bus.last_event_ts.lock().unwrap() =
-                Some(hearthloom_core::time::now_utc());
+            *state.bus.last_event_ts.lock().unwrap() = Some(hearthloom_core::time::now_utc());
             // resync and topic hints trigger the SAME pull: one full
             // cycle reconciles everything the hint (or the gap) implies.
             request_early_sync(state);
@@ -489,8 +523,14 @@ mod tests {
         let ember = claims("plugin:htesla", &["ingest"]);
         let page = claims("plugin-ui:htesla", &["ingest"]);
         assert!(offered(&ember, &oauth) && offered(&page, &oauth));
-        assert!(!offered(&ember, &privacy), "no privacy/rename topics for embers");
-        assert!(!offered(&claims("my-script", &["ingest"]), &oauth), "ordinary keys hear nothing");
+        assert!(
+            !offered(&ember, &privacy),
+            "no privacy/rename topics for embers"
+        );
+        assert!(
+            !offered(&claims("my-script", &["ingest"]), &oauth),
+            "ordinary keys hear nothing"
+        );
         assert!(offered(&claims("peer", &["peer"]), &privacy));
     }
 
@@ -544,7 +584,10 @@ mod tests {
         assert!(matches!(bus.replay_since(Some(&ids[0])), Replay::Resync));
         // an empty ring with a cursor (post-restart) is also a resync
         let fresh = Bus::default();
-        assert!(matches!(fresh.replay_since(Some("anything")), Replay::Resync));
+        assert!(matches!(
+            fresh.replay_since(Some("anything")),
+            Replay::Resync
+        ));
     }
 
     #[test]
@@ -573,7 +616,9 @@ mod tests {
         let mut parser = SseParser::default();
         // one event split mid-line across three chunks + a keep-alive
         assert!(parser.feed("id: 0001\nev").is_empty());
-        assert!(parser.feed("ent: bus\ndata: {\"topic\":\"operational.").is_empty());
+        assert!(parser
+            .feed("ent: bus\ndata: {\"topic\":\"operational.")
+            .is_empty());
         let msgs = parser.feed("changed\"}\n\n: hb\n\n");
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].id.as_deref(), Some("0001"));

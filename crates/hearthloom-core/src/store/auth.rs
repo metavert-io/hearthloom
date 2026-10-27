@@ -48,8 +48,9 @@ impl Store {
     /// natural key a provisioner's trusted-issuer logins also use.
     pub fn create_admin(&self, actor: &Actor, email: &str, password: &str) -> Result<()> {
         let email = email.trim().to_lowercase();
-        let looks_like_email =
-            email.split_once('@').is_some_and(|(l, r)| !l.is_empty() && r.contains('.'));
+        let looks_like_email = email
+            .split_once('@')
+            .is_some_and(|(l, r)| !l.is_empty() && r.contains('.'));
         if !looks_like_email {
             return Err(anyhow!("that doesn't look like an email address"));
         }
@@ -240,7 +241,11 @@ mod tests {
         let (store, _tmp) = test_store();
         assert!(!store.auth_required().unwrap());
         store
-            .create_admin(&Actor::new("human:test"), "jon@example.com", "hunter2hunter2")
+            .create_admin(
+                &Actor::new("human:test"),
+                "jon@example.com",
+                "hunter2hunter2",
+            )
             .unwrap();
         assert!(store.auth_required().unwrap());
         // bootstrap runs once
@@ -253,13 +258,29 @@ mod tests {
     fn test_login_session_logout() {
         let (store, _tmp) = test_store();
         store
-            .create_admin(&Actor::new("human:test"), "jon@example.com", "hunter2hunter2")
+            .create_admin(
+                &Actor::new("human:test"),
+                "jon@example.com",
+                "hunter2hunter2",
+            )
             .unwrap();
-        assert!(store.login("jon@example.com", "wrong-password").unwrap().is_none());
-        assert!(store.login("nobody@example.com", "hunter2hunter2").unwrap().is_none());
-        let token = store.login("jon@example.com", "hunter2hunter2").unwrap().unwrap();
+        assert!(store
+            .login("jon@example.com", "wrong-password")
+            .unwrap()
+            .is_none());
+        assert!(store
+            .login("nobody@example.com", "hunter2hunter2")
+            .unwrap()
+            .is_none());
+        let token = store
+            .login("jon@example.com", "hunter2hunter2")
+            .unwrap()
+            .unwrap();
         assert!(token.starts_with("hs_"));
-        assert_eq!(store.session_user(&token).unwrap().unwrap(), "jon@example.com");
+        assert_eq!(
+            store.session_user(&token).unwrap().unwrap(),
+            "jon@example.com"
+        );
         store.logout(&token).unwrap();
         assert!(store.session_user(&token).unwrap().is_none());
         assert!(store.session_user("hs_forged").unwrap().is_none());
@@ -273,11 +294,18 @@ mod tests {
         let (store, _tmp) = test_store();
         assert!(store.create_session_for_admin().unwrap().is_none());
         store
-            .create_admin(&Actor::new("human:test"), "jon@example.com", "hunter2hunter2")
+            .create_admin(
+                &Actor::new("human:test"),
+                "jon@example.com",
+                "hunter2hunter2",
+            )
             .unwrap();
         let token = store.create_session_for_admin().unwrap().unwrap();
         assert!(token.starts_with("hs_"));
-        assert_eq!(store.session_user(&token).unwrap().unwrap(), "jon@example.com");
+        assert_eq!(
+            store.session_user(&token).unwrap().unwrap(),
+            "jon@example.com"
+        );
     }
 
     #[test]

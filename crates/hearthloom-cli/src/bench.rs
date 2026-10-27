@@ -77,7 +77,9 @@ pub async fn run(client: &Client, iterations: Option<usize>) -> Result<()> {
         })
         .unwrap_or_default();
     if episodes == 0 {
-        return Err(anyhow!("the record is empty — bench needs a real substrate"));
+        return Err(anyhow!(
+            "the record is empty — bench needs a real substrate"
+        ));
     }
     let mut terms: Vec<String> = entities
         .iter()
@@ -93,13 +95,23 @@ pub async fn run(client: &Client, iterations: Option<usize>) -> Result<()> {
     // Recent recall dates, spread across a quarter.
     let today = chrono::Utc::now().date_naive();
     let dates: Vec<String> = (0..iterations)
-        .map(|i| (today - chrono::Duration::days(3 + (i as i64) * 7)).format("%Y-%m-%d").to_string())
+        .map(|i| {
+            (today - chrono::Duration::days(3 + (i as i64) * 7))
+                .format("%Y-%m-%d")
+                .to_string()
+        })
         .collect();
-    let year_ago = (today - chrono::Duration::days(365)).format("%Y-%m-%d").to_string();
+    let year_ago = (today - chrono::Duration::days(365))
+        .format("%Y-%m-%d")
+        .to_string();
     let today_s = today.format("%Y-%m-%d").to_string();
 
     // (label, per-iteration request builder)
-    type Case = (String, String, Box<dyn Fn(usize) -> (String, Vec<(String, String)>)>);
+    type Case = (
+        String,
+        String,
+        Box<dyn Fn(usize) -> (String, Vec<(String, String)>)>,
+    );
     let terms2 = terms.clone();
     let entities2 = entities.clone();
     let dates2 = dates.clone();
@@ -107,25 +119,42 @@ pub async fn run(client: &Client, iterations: Option<usize>) -> Result<()> {
     let mut cases: Vec<Case> = vec![
         (
             "search (hybrid FTS+vec)".into(),
-            format!("/v1/search?q={}", terms.first().cloned().unwrap_or_default()),
+            format!(
+                "/v1/search?q={}",
+                terms.first().cloned().unwrap_or_default()
+            ),
             Box::new(move |i| {
-                ("/v1/search".into(),
-                 vec![("q".into(), terms2[i % terms2.len()].clone()), ("limit".into(), "10".into())])
+                (
+                    "/v1/search".into(),
+                    vec![
+                        ("q".into(), terms2[i % terms2.len()].clone()),
+                        ("limit".into(), "10".into()),
+                    ],
+                )
             }),
         ),
         (
             "recall (day reconstruction)".into(),
             format!("/v1/recall?on={}", dates[0]),
             Box::new(move |i| {
-                ("/v1/recall".into(), vec![("on".into(), dates2[i % dates2.len()].clone())])
+                (
+                    "/v1/recall".into(),
+                    vec![("on".into(), dates2[i % dates2.len()].clone())],
+                )
             }),
         ),
         (
             "timeline notable (year window)".into(),
             format!("/v1/timeline/notable?from={year_ago}&to={today_s}"),
             Box::new(move |_| {
-                ("/v1/timeline/notable".into(),
-                 vec![("from".into(), ya.clone()), ("to".into(), ts.clone()), ("k".into(), "24".into())])
+                (
+                    "/v1/timeline/notable".into(),
+                    vec![
+                        ("from".into(), ya.clone()),
+                        ("to".into(), ts.clone()),
+                        ("k".into(), "24".into()),
+                    ],
+                )
             }),
         ),
     ];
@@ -134,12 +163,14 @@ pub async fn run(client: &Client, iterations: Option<usize>) -> Result<()> {
             "traverse (depth 2, top 12)".into(),
             format!("/v1/traverse?start={}", entities[0]),
             Box::new(move |i| {
-                ("/v1/traverse".into(),
-                 vec![
-                     ("start".into(), entities2[i % entities2.len()].clone()),
-                     ("depth".into(), "2".into()),
-                     ("top".into(), "12".into()),
-                 ])
+                (
+                    "/v1/traverse".into(),
+                    vec![
+                        ("start".into(), entities2[i % entities2.len()].clone()),
+                        ("depth".into(), "2".into()),
+                        ("top".into(), "12".into()),
+                    ],
+                )
             }),
         ));
     }
@@ -157,12 +188,21 @@ pub async fn run(client: &Client, iterations: Option<usize>) -> Result<()> {
         let mut millis = Vec::with_capacity(iterations);
         for i in 0..(iterations + WARMUP) {
             let (path, params) = build(i);
-            let query: Vec<(&str, &str)> =
-                params.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+            let query: Vec<(&str, &str)> = params
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
             let started = std::time::Instant::now();
-            let resp = http.get(format!("{base}{path}")).query(&query).send().await?;
+            let resp = http
+                .get(format!("{base}{path}"))
+                .query(&query)
+                .send()
+                .await?;
             if !resp.status().is_success() {
-                return Err(anyhow!("{path} answered {} — is the API key valid?", resp.status()));
+                return Err(anyhow!(
+                    "{path} answered {} — is the API key valid?",
+                    resp.status()
+                ));
             }
             let _body: Value = resp.json().await?;
             if i >= WARMUP {
@@ -170,10 +210,17 @@ pub async fn run(client: &Client, iterations: Option<usize>) -> Result<()> {
             }
         }
         millis.sort_by(|a, b| a.total_cmp(b));
-        results.push(Timing { label: label.clone(), example: example.clone(), millis });
+        results.push(Timing {
+            label: label.clone(),
+            example: example.clone(),
+            millis,
+        });
     }
 
-    println!("{:<34} {:>7} {:>8} {:>8} {:>8}", "endpoint", "p50", "p95", "max", "mean");
+    println!(
+        "{:<34} {:>7} {:>8} {:>8} {:>8}",
+        "endpoint", "p50", "p95", "max", "mean"
+    );
     for t in &results {
         let mean = t.millis.iter().sum::<f64>() / t.millis.len() as f64;
         println!(

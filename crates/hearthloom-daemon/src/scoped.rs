@@ -46,7 +46,10 @@ pub struct Scoped<F> {
 
 impl<F> Scoped<F> {
     pub fn new(scope: ReadScope, inner: F) -> Self {
-        Scoped { scope, inner: Box::pin(inner) }
+        Scoped {
+            scope,
+            inner: Box::pin(inner),
+        }
     }
 }
 
@@ -77,7 +80,10 @@ mod tests {
                 spawn(async move { s2.vault_status().0 }),
             )
         };
-        assert!(!unlocked.0.await.unwrap(), "spawn_blocking carries the viewer");
+        assert!(
+            !unlocked.0.await.unwrap(),
+            "spawn_blocking carries the viewer"
+        );
         assert!(!unlocked.1.await.unwrap(), "spawn carries the viewer");
         let s3 = store.clone();
         let plain = tokio::task::spawn_blocking(move || s3.vault_status().0);

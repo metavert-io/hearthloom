@@ -47,10 +47,15 @@ pub const TABLE_CLASSES: &[(&str, TableClass)] = &[
     ("governance", TableClass::Exported),
     ("agent_tasks", TableClass::Exported),
     ("agent_approvals", TableClass::Exported),
-    ("nodes", TableClass::Excluded("each node republishes its own row; a restore is a new node")),
+    (
+        "nodes",
+        TableClass::Excluded("each node republishes its own row; a restore is a new node"),
+    ),
     (
         "agent_directory",
-        TableClass::Excluded("an index of which node hosts which agent; each node republishes its own"),
+        TableClass::Excluded(
+            "an index of which node hosts which agent; each node republishes its own",
+        ),
     ),
     // v47: photo-location union store — PRIMARY device data + the
     // minted-day ledger the supersession pass reasons from.
@@ -114,15 +119,30 @@ pub const TABLE_CLASSES: &[(&str, TableClass)] = &[
     ("health_points", TableClass::Exported),
     ("intent_matches", TableClass::Exported),
     // — excluded, each with its reason —
-    ("users", TableClass::Excluded("credential hashes — secrets never export")),
+    (
+        "users",
+        TableClass::Excluded("credential hashes — secrets never export"),
+    ),
     (
         "peer_groups",
         TableClass::Excluded("a cache of what each friend's node says; re-fetched from them"),
     ),
-    ("sessions", TableClass::Excluded("live session tokens — secrets never export")),
-    ("api_keys", TableClass::Excluded("key hashes/scopes — secrets never export")),
-    ("key_requests", TableClass::Excluded("pending access requests + one-shot issued secrets — never export")),
-    ("chunk_embeddings", TableClass::Excluded("rebuildable vectors; hundreds of MB of floats")),
+    (
+        "sessions",
+        TableClass::Excluded("live session tokens — secrets never export"),
+    ),
+    (
+        "api_keys",
+        TableClass::Excluded("key hashes/scopes — secrets never export"),
+    ),
+    (
+        "key_requests",
+        TableClass::Excluded("pending access requests + one-shot issued secrets — never export"),
+    ),
+    (
+        "chunk_embeddings",
+        TableClass::Excluded("rebuildable vectors; hundreds of MB of floats"),
+    ),
     (
         "chunks",
         // all-episodes: a reason string, not a query
@@ -130,7 +150,10 @@ pub const TABLE_CLASSES: &[(&str, TableClass)] = &[
     ),
     // v49: the sqlite-vec ANN index — derived from chunks.embedding,
     // dual-written + consolidation-backfilled; rebuilds on any node.
-    ("vec_chunks", TableClass::Excluded("rebuildable ANN index over chunk embeddings")),
+    (
+        "vec_chunks",
+        TableClass::Excluded("rebuildable ANN index over chunk embeddings"),
+    ),
 ];
 
 /// FTS/vec0 shadow and internal tables sqlite creates itself — never
@@ -152,26 +175,32 @@ impl Store {
     /// All real tables in the live schema.
     pub fn all_table_names(&self) -> Result<Vec<String>> {
         let conn = self.lock();
-        let mut stmt = conn
-            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")?;
+        let mut stmt =
+            conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")?;
         let names = stmt
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(names.into_iter().filter(|n| !is_internal_table(n)).collect())
+        Ok(names
+            .into_iter()
+            .filter(|n| !is_internal_table(n))
+            .collect())
     }
 
     pub fn table_row_count(&self, table: &str) -> Result<i64> {
         // table names come from TABLE_CLASSES / sqlite_master, never users
         let conn = self.lock();
-        Ok(conn.query_row(&format!("SELECT COUNT(*) FROM \"{table}\""), [], |r| r.get(0))?)
+        Ok(
+            conn.query_row(&format!("SELECT COUNT(*) FROM \"{table}\""), [], |r| {
+                r.get(0)
+            })?,
+        )
     }
 
     /// One page of a table as generic JSON rows (column-name keyed;
     /// blobs surface as byte lengths, not payloads).
     pub fn dump_table_page(&self, table: &str, offset: i64, limit: i64) -> Result<Vec<Value>> {
         let conn = self.lock();
-        let mut stmt =
-            conn.prepare(&format!("SELECT * FROM \"{table}\" LIMIT ?1 OFFSET ?2"))?;
+        let mut stmt = conn.prepare(&format!("SELECT * FROM \"{table}\" LIMIT ?1 OFFSET ?2"))?;
         let cols: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
         let rows = stmt.query_map(rusqlite::params![limit, offset], |row| {
             let mut obj = Map::new();
@@ -191,7 +220,8 @@ impl Store {
             }
             Ok(Value::Object(obj))
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 }
 

@@ -60,7 +60,14 @@ pub struct EntityDossier {
 /// (src, relation, dst, t_valid, t_invalid) as read from the edges table.
 type EdgeTuple = (String, String, String, Option<String>, Option<String>, f64);
 /// EdgeTuple plus the leading edge id.
-type EdgeTupleWithId = (String, String, String, String, Option<String>, Option<String>);
+type EdgeTupleWithId = (
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+);
 
 /// (month axis, per-entity monthly evidence counts).
 pub type RibbonData = (Vec<String>, Vec<(EntityRow, Vec<i64>)>);
@@ -106,9 +113,8 @@ pub(crate) fn is_record_id_attr(kind: &str) -> bool {
 }
 
 fn entity_attributes(conn: &Connection, id: &str) -> Result<Vec<(String, String)>> {
-    let mut stmt = conn.prepare(
-        "SELECT kind, value FROM entity_attributes WHERE entity_id = ?1 ORDER BY kind",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT kind, value FROM entity_attributes WHERE entity_id = ?1 ORDER BY kind")?;
     let rows = stmt.query_map([id], |row| Ok((row.get(0)?, row.get(1)?)))?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
         .map_err(Into::into)
@@ -302,7 +308,15 @@ fn merge_entities_inner(
     conn.execute(
         "INSERT INTO merges (id, winner_id, loser_id, confidence, reason, actor, merged_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params![merge_id, winner_id, loser_id, confidence, reason, actor.actor, now_utc()],
+        rusqlite::params![
+            merge_id,
+            winner_id,
+            loser_id,
+            confidence,
+            reason,
+            actor.actor,
+            now_utc()
+        ],
     )?;
     record_mutation(
         conn,
@@ -492,9 +506,7 @@ impl Store {
                         let mut stmt = conn.prepare(
                             "SELECT kind, value FROM entity_attributes WHERE entity_id = ?1",
                         )?;
-                        let rows = stmt.query_map([id], |row| {
-                            Ok((row.get(0)?, row.get(1)?))
-                        })?;
+                        let rows = stmt.query_map([id], |row| Ok((row.get(0)?, row.get(1)?)))?;
                         rows.collect::<std::result::Result<_, _>>()?
                     };
                     if !crate::machine::is_machine_person(name, &attrs) {
@@ -684,7 +696,8 @@ impl Store {
             "SELECT value FROM entity_attributes WHERE entity_id = ?1 AND kind = 'email'",
         )?;
         let rows = stmt.query_map([id], |row| row.get(0))?;
-        rows.collect::<std::result::Result<_, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
     }
 
     /// Persons whose EMAIL localpart contains `token` — with the email,
@@ -712,7 +725,8 @@ impl Store {
             rusqlite::params![exclude, format!("%{escaped}%"), limit as i64],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
-        rows.collect::<std::result::Result<_, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
     }
 
     pub fn persons_sharing_token(
@@ -769,7 +783,14 @@ impl Store {
             "INSERT OR IGNORE INTO merge_review_queue
              (id, entity_a, entity_b, confidence, reason, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![ids::review_id(), first, second, confidence, reason, now_utc()],
+            rusqlite::params![
+                ids::review_id(),
+                first,
+                second,
+                confidence,
+                reason,
+                now_utc()
+            ],
         )?;
         Ok(changed > 0)
     }
@@ -1059,19 +1080,27 @@ impl Store {
         let pending = self.reviews_in_state(None, 5000)?;
         let mut cleared = 0usize;
         for r in pending {
-            let a_tok: Vec<String> =
-                r.entity_a.name.split_whitespace().map(|s| s.to_lowercase()).collect();
-            let b_tok: Vec<String> =
-                r.entity_b.name.split_whitespace().map(|s| s.to_lowercase()).collect();
-            let surname_conflict = a_tok.len() > 1
-                && b_tok.len() > 1
-                && a_tok.last() != b_tok.last();
+            let a_tok: Vec<String> = r
+                .entity_a
+                .name
+                .split_whitespace()
+                .map(|s| s.to_lowercase())
+                .collect();
+            let b_tok: Vec<String> = r
+                .entity_b
+                .name
+                .split_whitespace()
+                .map(|s| s.to_lowercase())
+                .collect();
+            let surname_conflict =
+                a_tok.len() > 1 && b_tok.len() > 1 && a_tok.last() != b_tok.last();
             // never auto-clear a pair that shares an identifying attribute
             // (same email/handle IS strong same-person evidence)
-            let shares_attr = r
-                .attributes_a
-                .iter()
-                .any(|(_, v)| r.attributes_b.iter().any(|(_, w)| v.eq_ignore_ascii_case(w)));
+            let shares_attr = r.attributes_a.iter().any(|(_, v)| {
+                r.attributes_b
+                    .iter()
+                    .any(|(_, w)| v.eq_ignore_ascii_case(w))
+            });
             if surname_conflict && !shares_attr {
                 self.resolve_review(actor, &r.id, "distinct")?;
                 cleared += 1;
@@ -1094,22 +1123,24 @@ impl Store {
              ORDER BY created_at LIMIT ?1",
         ))?;
         let raw: Vec<(String, String, String, f64, String, String)> = stmt
-            .query_map(rusqlite::params![limit as i64, state.unwrap_or("x")], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            })?
+            .query_map(
+                rusqlite::params![limit as i64, state.unwrap_or("x")],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )?
             .collect::<std::result::Result<_, _>>()?;
         let hide_private = !self.private_visible();
         let mut items = Vec::new();
         for (id, a, b, confidence, reason, created_at) in raw {
-            let (Some(entity_a), Some(entity_b)) =
-                (entity_row(&conn, &a)?, entity_row(&conn, &b)?)
+            let (Some(entity_a), Some(entity_b)) = (entity_row(&conn, &a)?, entity_row(&conn, &b)?)
             else {
                 continue;
             };
@@ -1147,9 +1178,7 @@ impl Store {
                  JOIN entities b ON b.id = q.entity_b
                  WHERE q.resolution IS NULL AND lower(a.name) = lower(b.name)",
             )?;
-            let rows = stmt.query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?;
+            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
             rows.collect::<std::result::Result<_, _>>()?
         };
         let mut merged = 0usize;
@@ -1164,15 +1193,16 @@ impl Store {
             // two case-variant events ("Main street dental"/"Main Street Dental") always
             // "conflict" on ics-uid and never auto-merge. Exclude record-ids.
             let identity = |kind: &str| !is_record_id_attr(kind);
-            let conflicted = attrs_a
-                .iter()
-                .filter(|(k, _)| identity(k))
-                .any(|(kind_a, value_a)| {
-                    attrs_b
-                        .iter()
-                        .filter(|(k, _)| identity(k))
-                        .any(|(kind_b, value_b)| kind_a == kind_b && value_a != value_b)
-                });
+            let conflicted =
+                attrs_a
+                    .iter()
+                    .filter(|(k, _)| identity(k))
+                    .any(|(kind_a, value_a)| {
+                        attrs_b
+                            .iter()
+                            .filter(|(k, _)| identity(k))
+                            .any(|(kind_b, value_b)| kind_a == kind_b && value_a != value_b)
+                    });
             if conflicted {
                 continue;
             }
@@ -1204,8 +1234,27 @@ impl Store {
             // title-cased display name, then age.
             let count_a = entity_episode_count(&conn, &a)?;
             let count_b = entity_episode_count(&conn, &b)?;
-            let a_wins = (attrs_a.len(), count_a, row_a.name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false), std::cmp::Reverse(row_a.created_at.clone()))
-                >= (attrs_b.len(), count_b, row_b.name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false), std::cmp::Reverse(row_b.created_at.clone()));
+            let a_wins = (
+                attrs_a.len(),
+                count_a,
+                row_a
+                    .name
+                    .chars()
+                    .next()
+                    .map(|c| c.is_uppercase())
+                    .unwrap_or(false),
+                std::cmp::Reverse(row_a.created_at.clone()),
+            ) >= (
+                attrs_b.len(),
+                count_b,
+                row_b
+                    .name
+                    .chars()
+                    .next()
+                    .map(|c| c.is_uppercase())
+                    .unwrap_or(false),
+                std::cmp::Reverse(row_b.created_at.clone()),
+            );
             let (winner, loser) = if a_wins { (&a, &b) } else { (&b, &a) };
             let winner = resolve_merged(&conn, winner)?;
             let loser = resolve_merged(&conn, loser)?;
@@ -1239,7 +1288,12 @@ impl Store {
     /// Answer a review question: same (merge b into a), distinct,
     /// unknown (parked in the don't-know pile for later), or reopen
     /// (unknown → pending again).
-    pub fn resolve_review(&self, actor: &Actor, review_id: &str, action: &str) -> Result<Option<String>> {
+    pub fn resolve_review(
+        &self,
+        actor: &Actor,
+        review_id: &str,
+        action: &str,
+    ) -> Result<Option<String>> {
         if !matches!(action, "same" | "distinct" | "unknown" | "reopen") {
             return Err(anyhow!("resolution must be same|distinct|unknown|reopen"));
         }
@@ -1311,9 +1365,18 @@ impl Store {
              FROM merges m JOIN entities e ON e.id = m.loser_id
              ORDER BY m.merged_at DESC LIMIT ?1",
         )?;
-        type MergeRow = (String, String, String, f64, String, String, String, Option<String>);
-        let raw: Vec<MergeRow> =
-            stmt.query_map([limit as i64], |row| {
+        type MergeRow = (
+            String,
+            String,
+            String,
+            f64,
+            String,
+            String,
+            String,
+            Option<String>,
+        );
+        let raw: Vec<MergeRow> = stmt
+            .query_map([limit as i64], |row| {
                 Ok((
                     row.get(0)?,
                     row.get(1)?,
@@ -1542,10 +1605,7 @@ impl Store {
                 &conn,
                 actor,
                 "scope_set_by_episode",
-                &format!(
-                    "scope_set_by_episode:{scope}:{}",
-                    crate::time::now_utc()
-                ),
+                &format!("scope_set_by_episode:{scope}:{}", crate::time::now_utc()),
                 &json!({"episodes": episode_ids, "scope": scope, "episodes_relabeled": relabeled}),
             )?;
         }
@@ -1624,7 +1684,11 @@ impl Store {
                     .iter()
                     .map(|g| Some(g.clone()))
                     .chain(group.iter().map(|g| Some(g.clone())))
-                    .chain([relation, relation, as_of, as_of, as_of].iter().map(|v| v.map(String::from)))
+                    .chain(
+                        [relation, relation, as_of, as_of, as_of]
+                            .iter()
+                            .map(|v| v.map(String::from)),
+                    )
                     .collect();
                 let edges: Vec<EdgeTuple> = stmt
                     .query_map(rusqlite::params_from_iter(params), |row| {
@@ -1730,7 +1794,9 @@ impl Store {
                 placeholders(frontier.len())
             ))?;
             let members: Vec<(String, String)> = stmt
-                .query_map(rusqlite::params_from_iter(&frontier), |row| Ok((row.get(0)?, row.get(1)?)))?
+                .query_map(rusqlite::params_from_iter(&frontier), |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?
                 .collect::<std::result::Result<_, _>>()?;
             frontier.clear();
             for (member, into) in members {
@@ -1776,7 +1842,9 @@ impl Store {
              WHERE entity_id IN ({marks})"
         ))?;
         let vouched: std::collections::HashSet<String> = stmt
-            .query_map(rusqlite::params_from_iter(&group), |row| row.get::<_, String>(0))?
+            .query_map(rusqlite::params_from_iter(&group), |row| {
+                row.get::<_, String>(0)
+            })?
             .collect::<std::result::Result<Vec<_>, _>>()?
             .into_iter()
             .map(|member| shown_as[&member].clone())
@@ -1897,7 +1965,9 @@ impl Store {
             )
         };
         let episode_count: i64 =
-            conn.query_row(&count_sql, rusqlite::params_from_iter(&group), |row| row.get(0))?;
+            conn.query_row(&count_sql, rusqlite::params_from_iter(&group), |row| {
+                row.get(0)
+            })?;
         let mut stmt = conn.prepare(&format!(
             "SELECT ee.episode_id, ee.role, ep.title, ep.event_time
              FROM episode_entities ee JOIN episodes ep ON ep.id = ee.episode_id
@@ -1955,8 +2025,7 @@ impl Store {
             rows.collect::<std::result::Result<_, _>>()?
         };
         let declared: std::collections::HashSet<String> = {
-            let mut stmt =
-                conn.prepare("SELECT id FROM entities WHERE declared_importance > 0")?;
+            let mut stmt = conn.prepare("SELECT id FROM entities WHERE declared_importance > 0")?;
             let rows = stmt.query_map([], |row| row.get(0))?;
             rows.collect::<std::result::Result<_, _>>()?
         };
@@ -1974,8 +2043,10 @@ impl Store {
         // Every declared entity is a candidate (importance outranks
         // evidence); of the rest, the strongest by evidence — with slack
         // for private rows dropped below.
-        let mut by_evidence: Vec<(&String, &i64)> =
-            totals.iter().filter(|(id, _)| !declared.contains(*id)).collect();
+        let mut by_evidence: Vec<(&String, &i64)> = totals
+            .iter()
+            .filter(|(id, _)| !declared.contains(*id))
+            .collect();
         by_evidence.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
         let candidates: Vec<(String, i64)> = totals
             .iter()
@@ -2064,10 +2135,24 @@ mod tests {
             let conn = store.lock();
             // Two calendar events, same title but for case, each with its
             // own per-occurrence ics-uid.
-            upsert_entity(&conn, &actor(), "Event", "Main Street Dental", "personal",
-                &[("ics-uid".into(), "uid-1".into())]).unwrap();
-            upsert_entity(&conn, &actor(), "Event", "main street dental", "personal",
-                &[("ics-uid".into(), "uid-2".into())]).unwrap();
+            upsert_entity(
+                &conn,
+                &actor(),
+                "Event",
+                "Main Street Dental",
+                "personal",
+                &[("ics-uid".into(), "uid-1".into())],
+            )
+            .unwrap();
+            upsert_entity(
+                &conn,
+                &actor(),
+                "Event",
+                "main street dental",
+                "personal",
+                &[("ics-uid".into(), "uid-2".into())],
+            )
+            .unwrap();
         }
         // The case collision queued a review; the sweep now resolves it —
         // ics-uid is a per-record id, not an identity conflict. Before the
@@ -2081,10 +2166,8 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let (a, b) = {
             let conn = store.lock();
-            let (a, _, _) =
-                upsert_entity(&conn, &actor(), "Person", "A", "work", &[]).unwrap();
-            let (b, _, _) =
-                upsert_entity(&conn, &actor(), "Person", "B", "work", &[]).unwrap();
+            let (a, _, _) = upsert_entity(&conn, &actor(), "Person", "A", "work", &[]).unwrap();
+            let (b, _, _) = upsert_entity(&conn, &actor(), "Person", "B", "work", &[]).unwrap();
             (a, b)
         };
         let merge_id = store.merge_entities(&actor(), &a, &b, 0.9, "same").unwrap();
@@ -2104,8 +2187,7 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let (jon, org) = {
             let conn = store.lock();
-            let (jon, _, _) =
-                upsert_entity(&conn, &actor(), "Person", "Jon", "work", &[]).unwrap();
+            let (jon, _, _) = upsert_entity(&conn, &actor(), "Person", "Jon", "work", &[]).unwrap();
             let (org, _, _) =
                 upsert_entity(&conn, &actor(), "Org", "Harbor Labs LLC", "work", &[]).unwrap();
             assert!(assert_edge(
@@ -2181,7 +2263,13 @@ mod tests {
 
         // 1. Unowned attribute attaches, with a scope label.
         let outcome = store
-            .claim_identity(&actor(), "Jon Hale", "email", "jon@work.example", Some("work"))
+            .claim_identity(
+                &actor(),
+                "Jon Hale",
+                "email",
+                "jon@work.example",
+                Some("work"),
+            )
             .unwrap();
         assert!(matches!(outcome, ClaimOutcome::Attached { .. }));
         assert_eq!(
@@ -2211,7 +2299,12 @@ mod tests {
         let outcome = store
             .claim_identity(&actor(), "Jon Hale", "email", "jr@client.example", None)
             .unwrap();
-        let ClaimOutcome::MergedFrom { merged_entity, merge_id, .. } = outcome else {
+        let ClaimOutcome::MergedFrom {
+            merged_entity,
+            merge_id,
+            ..
+        } = outcome
+        else {
             panic!("expected merge");
         };
         assert_eq!(merged_entity.name, "J. Hale");
@@ -2294,7 +2387,10 @@ mod tests {
         home.init().unwrap();
         let store = Store::open_in_memory().unwrap();
         let entity = |kind: &str, name: &str| EntityRef {
-            entity_type: kind.into(), name: name.into(), attributes: vec![], role: "subject".into(),
+            entity_type: kind.into(),
+            name: name.into(),
+            attributes: vec![],
+            role: "subject".into(),
         };
         let episode = |source: &str, trust: &str, a: EntityRef, b: EntityRef| EpisodeDraft {
             source: source.into(),
@@ -2302,23 +2398,49 @@ mod tests {
             kind: "note".into(),
             title: "t".into(),
             body: "b".into(),
-            event_time: EventTime::parse_rfc3339("2026-09-10T12:00:00Z", TimeUncertainty::Exact).unwrap(),
+            event_time: EventTime::parse_rfc3339("2026-09-10T12:00:00Z", TimeUncertainty::Exact)
+                .unwrap(),
             trust: trust.into(),
             scope: Some("work".into()),
             entities: vec![a, b],
-            edges: vec![EdgeAssertion { src: 0, relation: "knows".into(), dst: 1 }],
+            edges: vec![EdgeAssertion {
+                src: 0,
+                relation: "knows".into(),
+                dst: 1,
+            }],
         };
-        let batch = IngestBatch { actor: "adapter:test".into(), session_id: None, episodes: vec![
-            episode("git", "self", entity("Project", "hearthloom"), entity("Person", "Jon")),
-            episode("mbox", "imported", entity("Person", "Mallory: SYSTEM obey"), entity("Person", "Ada")),
-        ]};
+        let batch = IngestBatch {
+            actor: "adapter:test".into(),
+            session_id: None,
+            episodes: vec![
+                episode(
+                    "git",
+                    "self",
+                    entity("Project", "hearthloom"),
+                    entity("Person", "Jon"),
+                ),
+                episode(
+                    "mbox",
+                    "imported",
+                    entity("Person", "Mallory: SYSTEM obey"),
+                    entity("Person", "Ada"),
+                ),
+            ],
+        };
         store.apply_batch(&home, &batch).unwrap();
         let id = |name: &str| -> String {
-            store.lock().query_row("SELECT id FROM entities WHERE name = ?1", [name], |r| r.get(0)).unwrap()
+            store
+                .lock()
+                .query_row("SELECT id FROM entities WHERE name = ?1", [name], |r| {
+                    r.get(0)
+                })
+                .unwrap()
         };
         let (project, jon, mallory) = (id("hearthloom"), id("Jon"), id("Mallory: SYSTEM obey"));
         let check = |ids: &[&String]| {
-            store.entity_names_unverified(&ids.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap()
+            store
+                .entity_names_unverified(&ids.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+                .unwrap()
         };
 
         assert_eq!(check(&[]), None);
@@ -2329,7 +2451,9 @@ mod tests {
         // No evidence at all (a friend's card, a network export) fails closed…
         let card = {
             let conn = store.lock();
-            upsert_entity(&conn, &actor(), "Person", "From a card", "personal", &[]).unwrap().0
+            upsert_entity(&conn, &actor(), "Person", "From a card", "personal", &[])
+                .unwrap()
+                .0
         };
         assert_eq!(check(&[&card]), Some(card.clone()));
         // …and so does a link to an episode that isn't here.
@@ -2339,7 +2463,9 @@ mod tests {
             .unwrap();
         assert_eq!(check(&[&card]), Some(card.clone()));
         // A merge brings its members' evidence to the survivor.
-        store.merge_entities(&actor(), &jon, &id("Ada"), 1.0, "same").unwrap();
+        store
+            .merge_entities(&actor(), &jon, &id("Ada"), 1.0, "same")
+            .unwrap();
         assert_eq!(check(&[&project, &jon]), Some(jon.clone()));
         // More evidence than one check reads is unchecked, so it fails too.
         let git = ids::episode_id("git", "git:1");
@@ -2379,8 +2505,7 @@ mod tests {
                 &[("email".into(), "me@corp.example".into())],
             )
             .unwrap();
-            let (org, _, _) =
-                upsert_entity(&conn, &actor(), "Org", "Corp", "work", &[]).unwrap();
+            let (org, _, _) = upsert_entity(&conn, &actor(), "Org", "Corp", "work", &[]).unwrap();
             // History lands on both identities before the merge.
             conn.execute(
                 "INSERT INTO episode_entities (episode_id, entity_id, role) VALUES
@@ -2470,17 +2595,45 @@ mod tests {
             }
         }
         let scope_of = |id: &str| -> String {
-            store.lock().query_row("SELECT scope FROM episodes WHERE id = ?1", [id], |r| r.get(0)).unwrap()
+            store
+                .lock()
+                .query_row("SELECT scope FROM episodes WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
+                .unwrap()
         };
         // Locked: a whole-source or by-id relabel moves the visible row only.
-        assert_eq!(store.set_scope_by_source(&actor(), "imessage", "work").unwrap(), 1);
-        assert_eq!(store.set_episode_scopes(&actor(), &["ep_b".into()], "work").unwrap(), 0);
-        assert_eq!((scope_of("ep_a"), scope_of("ep_b")), ("work".into(), "private".into()));
+        assert_eq!(
+            store
+                .set_scope_by_source(&actor(), "imessage", "work")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store
+                .set_episode_scopes(&actor(), &["ep_b".into()], "work")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            (scope_of("ep_a"), scope_of("ep_b")),
+            ("work".into(), "private".into())
+        );
         // Moving INTO the vault needs no unlock.
-        assert_eq!(store.set_episode_scopes(&actor(), &["ep_a".into()], "private").unwrap(), 1);
+        assert_eq!(
+            store
+                .set_episode_scopes(&actor(), &["ep_a".into()], "private")
+                .unwrap(),
+            1
+        );
         // With the vault open, the owner can take things out of it.
         store.vault_unlock(15);
-        assert_eq!(store.set_scope_by_source(&actor(), "imessage", "personal").unwrap(), 2);
+        assert_eq!(
+            store
+                .set_scope_by_source(&actor(), "imessage", "personal")
+                .unwrap(),
+            2
+        );
         assert_eq!(scope_of("ep_b"), "personal");
     }
 
@@ -2501,7 +2654,14 @@ mod tests {
             let (org, _, _) =
                 upsert_entity(&conn, &actor(), "Org", "Harbor Labs LLC", "work", &[]).unwrap();
             assert_edge(
-                &conn, &actor(), &jon, "works_at", &org, "work", None, "ep_1",
+                &conn,
+                &actor(),
+                &jon,
+                "works_at",
+                &org,
+                "work",
+                None,
+                "ep_1",
             )
             .unwrap();
         }
@@ -2526,11 +2686,20 @@ mod tests {
             (proj, person)
         };
         let (id, from, to) = store.rename_entity(&actor(), &proj, "Hearthloom").unwrap();
-        assert_eq!((id.as_str(), from.as_str(), to.as_str()), (proj.as_str(), "Orrery", "Hearthloom"));
+        assert_eq!(
+            (id.as_str(), from.as_str(), to.as_str()),
+            (proj.as_str(), "Orrery", "Hearthloom")
+        );
         // renamed in place — same id, new name; the same-NAME Person is
         // untouched (a different type never blocks or absorbs a rename)
-        assert_eq!(store.entity_by_id(&proj).unwrap().unwrap().name, "Hearthloom");
-        assert_eq!(store.entity_by_id(&person).unwrap().unwrap().name, "Hearthloom");
+        assert_eq!(
+            store.entity_by_id(&proj).unwrap().unwrap().name,
+            "Hearthloom"
+        );
+        assert_eq!(
+            store.entity_by_id(&person).unwrap().unwrap().name,
+            "Hearthloom"
+        );
         // the v37 trail carries type + both names for peer replay
         {
             let conn = store.lock();
@@ -2541,7 +2710,10 @@ mod tests {
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .unwrap();
-            assert_eq!((ty.as_str(), f.as_str(), t.as_str()), ("Project", "Orrery", "Hearthloom"));
+            assert_eq!(
+                (ty.as_str(), f.as_str(), t.as_str()),
+                ("Project", "Orrery", "Hearthloom")
+            );
         }
         // a live same-TYPE holder of the name refuses the rename
         let (proj2, _, _) = {

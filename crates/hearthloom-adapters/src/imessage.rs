@@ -120,7 +120,11 @@ pub fn ingest(db_path: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> 
             .keys()
             .filter(|handle| !handle.is_empty())
             .map(|handle| {
-                let kind = if handle.contains('@') { "email" } else { "phone" };
+                let kind = if handle.contains('@') {
+                    "email"
+                } else {
+                    "phone"
+                };
                 EntityRef {
                     entity_type: "Person".into(),
                     name: handle.clone(),

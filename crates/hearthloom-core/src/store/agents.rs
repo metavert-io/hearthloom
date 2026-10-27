@@ -49,7 +49,14 @@ pub const ACTION_CLASSES: &[&str] = &[
 /// didn't write, these are the path an injected instruction takes; the
 /// taint rule in `decide` asks about them, and about reads as well.
 pub const TAINT_SENSITIVE: &[&str] = &[
-    "communicate", "spend", "files", "web", "friends", "schedule", "write_record", "other",
+    "communicate",
+    "spend",
+    "files",
+    "web",
+    "friends",
+    "schedule",
+    "write_record",
+    "other",
 ];
 
 pub const HARNESSES: &[&str] = &["claude_code", "hermes", "openclaw", "internal"];
@@ -90,7 +97,10 @@ pub struct Policy {
 impl Default for Policy {
     fn default() -> Self {
         Policy {
-            modes: ACTION_CLASSES.iter().map(|c| (c.to_string(), "ask".to_string())).collect(),
+            modes: ACTION_CLASSES
+                .iter()
+                .map(|c| (c.to_string(), "ask".to_string()))
+                .collect(),
             taint_guard: true,
             tasks_per_day: 25,
             actions_per_task: 60,
@@ -129,10 +139,16 @@ pub enum Decision {
 /// next instruction or carry what it found into the step after it. Only
 /// the owner's own switch (`taint_guard`, decision C) turns this off.
 pub fn decide(policy: &Policy, class: &str, tainted: Option<&str>) -> Decision {
-    let class = if ACTION_CLASSES.contains(&class) { class } else { "other" };
+    let class = if ACTION_CLASSES.contains(&class) {
+        class
+    } else {
+        "other"
+    };
     let mode = policy.mode(class);
     if mode == "never" {
-        return Decision::Never(format!("your agent settings don't allow \"{class}\" actions"));
+        return Decision::Never(format!(
+            "your agent settings don't allow \"{class}\" actions"
+        ));
     }
     if let Some(why) = tainted.filter(|_| policy.taint_guard) {
         return Decision::Ask(if TAINT_SENSITIVE.contains(&class) {
@@ -238,7 +254,13 @@ pub struct AgentTaskRow {
 /// Task lifecycle. `proposed` waits for the user's go (ask-first);
 /// `queued` is cleared to run and waits for the node that hosts its agent.
 pub const TASK_STATUSES: &[&str] = &[
-    "proposed", "queued", "running", "done", "failed", "cancelled", "refused",
+    "proposed",
+    "queued",
+    "running",
+    "done",
+    "failed",
+    "cancelled",
+    "refused",
 ];
 
 fn row_to_agent(row: &rusqlite::Row) -> rusqlite::Result<AgentRow> {
@@ -255,7 +277,8 @@ fn row_to_agent(row: &rusqlite::Row) -> rusqlite::Result<AgentRow> {
     })
 }
 
-const AGENT_COLS: &str = "id, name, harness, config, secret_name, key_id, enabled, created_at, updated_at";
+const AGENT_COLS: &str =
+    "id, name, harness, config, secret_name, key_id, enabled, created_at, updated_at";
 const TASK_COLS: &str = "id, ask_id, agent_id, request, brief, classes, tainted, sensitive, status,
      result, error, node, actions, created_at, updated_at";
 
@@ -285,7 +308,14 @@ fn new_id(prefix: &str) -> String {
 
 /// Config keys an agent may carry (non-secret). Anything else is dropped.
 const CONFIG_KEYS: &[&str] = &[
-    "url", "workdir", "model", "agent_id", "allowed_tools", "notes", "claude_path", "timeout_secs",
+    "url",
+    "workdir",
+    "model",
+    "agent_id",
+    "allowed_tools",
+    "notes",
+    "claude_path",
+    "timeout_secs",
     "areas",
 ];
 
@@ -293,7 +323,8 @@ fn clean_config(config: &Value) -> Value {
     let mut out = serde_json::Map::new();
     if let Some(obj) = config.as_object() {
         for (k, v) in obj {
-            if CONFIG_KEYS.contains(&k.as_str()) && (v.is_string() || v.is_array() || v.is_number()) {
+            if CONFIG_KEYS.contains(&k.as_str()) && (v.is_string() || v.is_array() || v.is_number())
+            {
                 out.insert(k.clone(), v.clone());
             }
         }
@@ -306,16 +337,23 @@ impl Store {
 
     pub fn agents(&self) -> Result<Vec<AgentRow>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(&format!("SELECT {AGENT_COLS} FROM agents ORDER BY created_at"))?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {AGENT_COLS} FROM agents ORDER BY created_at"
+        ))?;
         let rows = stmt.query_map([], row_to_agent)?;
-        rows.collect::<std::result::Result<_, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
     }
 
     pub fn agent(&self, id: &str) -> Result<Option<AgentRow>> {
         let conn = self.lock();
-        conn.query_row(&format!("SELECT {AGENT_COLS} FROM agents WHERE id = ?1"), [id], row_to_agent)
-            .optional()
-            .map_err(Into::into)
+        conn.query_row(
+            &format!("SELECT {AGENT_COLS} FROM agents WHERE id = ?1"),
+            [id],
+            row_to_agent,
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     /// Create (id None) or update an agent's non-secret configuration.
@@ -335,7 +373,14 @@ impl Store {
                 let changed = conn.execute(
                     "UPDATE agents SET name = ?2, harness = ?3, config = ?4,
                          enabled = COALESCE(?5, enabled), updated_at = ?6 WHERE id = ?1",
-                    rusqlite::params![id, name, input.harness, config, input.enabled.map(i64::from), now],
+                    rusqlite::params![
+                        id,
+                        name,
+                        input.harness,
+                        config,
+                        input.enabled.map(i64::from),
+                        now
+                    ],
                 )?;
                 if changed == 0 {
                     return Err(anyhow!("no such agent"));
@@ -355,15 +400,26 @@ impl Store {
         };
         let conn = self.lock();
         super::journal_row(&conn, actor, "agent", "agents", &id, "update")?;
-        record_mutation(&conn, actor, "agent_saved", &format!("agent_saved:{id}:{now}"),
-            &json!({"id": id, "name": name, "harness": input.harness}))?;
+        record_mutation(
+            &conn,
+            actor,
+            "agent_saved",
+            &format!("agent_saved:{id}:{now}"),
+            &json!({"id": id, "name": name, "harness": input.harness}),
+        )?;
         drop(conn);
-        self.agent(&id)?.ok_or_else(|| anyhow!("agent vanished after write"))
+        self.agent(&id)?
+            .ok_or_else(|| anyhow!("agent vanished after write"))
     }
 
     /// Record which Hearthloom key the agent reads with, and the NAME of
     /// the sealed secret holding its harness token (never the value).
-    pub fn set_agent_credentials(&self, id: &str, key_id: Option<&str>, secret_name: Option<&str>) -> Result<()> {
+    pub fn set_agent_credentials(
+        &self,
+        id: &str,
+        key_id: Option<&str>,
+        secret_name: Option<&str>,
+    ) -> Result<()> {
         let conn = self.lock();
         conn.execute(
             "UPDATE agents SET key_id = COALESCE(?2, key_id), secret_name = COALESCE(?3, secret_name),
@@ -374,13 +430,20 @@ impl Store {
     }
 
     pub fn delete_agent(&self, actor: &Actor, id: &str) -> Result<Option<AgentRow>> {
-        let Some(agent) = self.agent(id)? else { return Ok(None) };
+        let Some(agent) = self.agent(id)? else {
+            return Ok(None);
+        };
         let conn = self.lock();
         super::journal_row(&conn, actor, "agent", "agents", id, "delete")?;
         conn.execute("DELETE FROM agents WHERE id = ?1", [id])?;
         conn.execute("DELETE FROM governance WHERE id = ?1", [id])?;
-        record_mutation(&conn, actor, "agent_deleted", &format!("agent_deleted:{id}:{}", now_utc()),
-            &json!({"id": id, "name": agent.name}))?;
+        record_mutation(
+            &conn,
+            actor,
+            "agent_deleted",
+            &format!("agent_deleted:{id}:{}", now_utc()),
+            &json!({"id": id, "name": agent.name}),
+        )?;
         Ok(Some(agent))
     }
 
@@ -389,7 +452,9 @@ impl Store {
     fn policy_raw(&self, id: &str) -> Result<Option<Value>> {
         let conn = self.lock();
         let raw: Option<String> = conn
-            .query_row("SELECT policy FROM governance WHERE id = ?1", [id], |row| row.get(0))
+            .query_row("SELECT policy FROM governance WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
             .optional()?;
         Ok(raw.and_then(|r| serde_json::from_str(&r).ok()))
     }
@@ -433,7 +498,10 @@ impl Store {
             if let Some(modes) = raw.get("modes").and_then(|m| m.as_object()) {
                 let clean: serde_json::Map<String, Value> = modes
                     .iter()
-                    .filter(|(c, m)| ACTION_CLASSES.contains(&c.as_str()) && m.as_str().is_some_and(|m| MODES.contains(&m)))
+                    .filter(|(c, m)| {
+                        ACTION_CLASSES.contains(&c.as_str())
+                            && m.as_str().is_some_and(|m| MODES.contains(&m))
+                    })
                     .map(|(c, m)| (c.clone(), m.clone()))
                     .collect();
                 out.insert("modes".into(), Value::Object(clean));
@@ -451,8 +519,13 @@ impl Store {
             rusqlite::params![id, stored.to_string(), now],
         )?;
         super::journal_row(&conn, actor, "governance", "governance", id, "update")?;
-        record_mutation(&conn, actor, "governance_set", &format!("governance_set:{id}:{now}"),
-            &json!({"id": id, "policy": stored}))?;
+        record_mutation(
+            &conn,
+            actor,
+            "governance_set",
+            &format!("governance_set:{id}:{now}"),
+            &json!({"id": id, "policy": stored}),
+        )?;
         Ok(stored)
     }
 
@@ -472,7 +545,13 @@ impl Store {
     ) -> Result<AgentTaskRow> {
         let classes: Vec<String> = classes
             .iter()
-            .map(|c| if ACTION_CLASSES.contains(&c.as_str()) { c.clone() } else { "other".into() })
+            .map(|c| {
+                if ACTION_CLASSES.contains(&c.as_str()) {
+                    c.clone()
+                } else {
+                    "other".into()
+                }
+            })
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
@@ -484,22 +563,32 @@ impl Store {
                  sensitive, status, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'proposed', ?9, ?9)",
             rusqlite::params![
-                id, ask_id, agent_id,
+                id,
+                ask_id,
+                agent_id,
                 request.chars().take(4000).collect::<String>(),
                 brief.chars().take(8000).collect::<String>(),
-                json!(classes).to_string(), tainted, sensitive as i64, now,
+                json!(classes).to_string(),
+                tainted,
+                sensitive as i64,
+                now,
             ],
         )?;
         super::journal_row(&conn, actor, "agent_task", "agent_tasks", &id, "create")?;
         drop(conn);
-        self.agent_task(&id)?.ok_or_else(|| anyhow!("task vanished after write"))
+        self.agent_task(&id)?
+            .ok_or_else(|| anyhow!("task vanished after write"))
     }
 
     pub fn agent_task(&self, id: &str) -> Result<Option<AgentTaskRow>> {
         let conn = self.lock();
-        conn.query_row(&format!("SELECT {TASK_COLS} FROM agent_tasks WHERE id = ?1"), [id], row_to_task)
-            .optional()
-            .map_err(Into::into)
+        conn.query_row(
+            &format!("SELECT {TASK_COLS} FROM agent_tasks WHERE id = ?1"),
+            [id],
+            row_to_task,
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     /// Newest first. `include_sensitive` false hides tasks born of a
@@ -510,8 +599,12 @@ impl Store {
             "SELECT {TASK_COLS} FROM agent_tasks WHERE (?2 OR sensitive = 0)
              ORDER BY created_at DESC LIMIT ?1"
         ))?;
-        let rows = stmt.query_map(rusqlite::params![limit as i64, include_sensitive], row_to_task)?;
-        rows.collect::<std::result::Result<_, _>>().map_err(Into::into)
+        let rows = stmt.query_map(
+            rusqlite::params![limit as i64, include_sensitive],
+            row_to_task,
+        )?;
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
     }
 
     /// Tasks cleared to run on an agent hosted by this node.
@@ -519,7 +612,9 @@ impl Store {
         Ok(self
             .agent_tasks(200, true)?
             .into_iter()
-            .filter(|t| t.status == "queued" && t.agent_id.as_ref().is_some_and(|a| agent_ids.contains(a)))
+            .filter(|t| {
+                t.status == "queued" && t.agent_id.as_ref().is_some_and(|a| agent_ids.contains(a))
+            })
             .collect())
     }
 
@@ -537,8 +632,12 @@ impl Store {
         if !TASK_STATUSES.contains(&status) {
             return Err(anyhow!("unknown task status {status:?}"));
         }
-        let task = self.agent_task(id)?.ok_or_else(|| anyhow!("no such task"))?;
-        if ["done", "failed", "cancelled", "refused"].contains(&task.status.as_str()) && task.status != status {
+        let task = self
+            .agent_task(id)?
+            .ok_or_else(|| anyhow!("no such task"))?;
+        if ["done", "failed", "cancelled", "refused"].contains(&task.status.as_str())
+            && task.status != status
+        {
             return Err(anyhow!("that task already ended ({})", task.status));
         }
         let now = now_utc();
@@ -554,7 +653,8 @@ impl Store {
         )?;
         super::journal_row(&conn, actor, "agent_task", "agent_tasks", id, "update")?;
         drop(conn);
-        self.agent_task(id)?.ok_or_else(|| anyhow!("task vanished after write"))
+        self.agent_task(id)?
+            .ok_or_else(|| anyhow!("task vanished after write"))
     }
 
     /// Count one more action against the task's limit; returns the count.
@@ -564,7 +664,11 @@ impl Store {
             "UPDATE agent_tasks SET actions = actions + 1, updated_at = ?2 WHERE id = ?1",
             rusqlite::params![id, now_utc()],
         )?;
-        Ok(conn.query_row("SELECT actions FROM agent_tasks WHERE id = ?1", [id], |r| r.get(0))?)
+        Ok(
+            conn.query_row("SELECT actions FROM agent_tasks WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })?,
+        )
     }
 
     /// Tasks that started running in the last 24 hours (the daily limit).
@@ -604,25 +708,43 @@ impl Store {
                  decided_by, decided_at, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
             rusqlite::params![
-                id, task_id, kind, class,
+                id,
+                task_id,
+                kind,
+                class,
                 summary.chars().take(500).collect::<String>(),
                 detail.to_string().chars().take(8000).collect::<String>(),
-                status, decided_by, decided_at, now,
+                status,
+                decided_by,
+                decided_at,
+                now,
             ],
         )?;
-        super::journal_row(&conn, &Actor::new(decided_by.unwrap_or("system:governance")), "agent_approval",
-            "agent_approvals", &id, "create")?;
+        super::journal_row(
+            &conn,
+            &Actor::new(decided_by.unwrap_or("system:governance")),
+            "agent_approval",
+            "agent_approvals",
+            &id,
+            "create",
+        )?;
         Ok(id)
     }
 
     pub fn approval(&self, id: &str) -> Result<Option<Value>> {
-        Ok(self.approvals_where("a.id = ?1", &[id], 1)?.into_iter().next())
+        Ok(self
+            .approvals_where("a.id = ?1", &[id], 1)?
+            .into_iter()
+            .next())
     }
 
     /// Pending approvals, newest first, each with its task's request.
     pub fn pending_approvals(&self, include_sensitive: bool) -> Result<Vec<Value>> {
         let rows = self.approvals_where("a.status = 'pending'", &[], 100)?;
-        Ok(rows.into_iter().filter(|r| include_sensitive || r["sensitive"] == json!(false)).collect())
+        Ok(rows
+            .into_iter()
+            .filter(|r| include_sensitive || r["sensitive"] == json!(false))
+            .collect())
     }
 
     pub fn task_approvals(&self, task_id: &str) -> Result<Vec<Value>> {
@@ -655,7 +777,8 @@ impl Store {
                 "agent_id": row.get::<_, Option<String>>(12)?,
             }))
         })?;
-        rows.collect::<std::result::Result<_, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
     }
 
     /// Decide a pending approval. A decided one is never re-decided.
@@ -668,18 +791,34 @@ impl Store {
             rusqlite::params![id, if approve { "approved" } else { "denied" }, by, now],
         )?;
         if changed == 0 {
-            return Err(anyhow!("that approval was already decided or doesn't exist"));
+            return Err(anyhow!(
+                "that approval was already decided or doesn't exist"
+            ));
         }
-        super::journal_row(&conn, &Actor::new(by), "agent_approval", "agent_approvals", id, "update")?;
+        super::journal_row(
+            &conn,
+            &Actor::new(by),
+            "agent_approval",
+            "agent_approvals",
+            id,
+            "update",
+        )?;
         drop(conn);
-        self.approval(id)?.ok_or_else(|| anyhow!("approval vanished"))
+        self.approval(id)?
+            .ok_or_else(|| anyhow!("approval vanished"))
     }
 
     /* ————— the agent directory (v56): which node hosts which agent ————— */
 
     /// Publish (or tombstone, `removed`) this node's entry for an agent.
     /// Only the hosting node writes an agent's entry.
-    pub fn publish_agent(&self, agent: &AgentRow, node_id: &str, node_name: &str, removed: bool) -> Result<()> {
+    pub fn publish_agent(
+        &self,
+        agent: &AgentRow,
+        node_id: &str,
+        node_name: &str,
+        removed: bool,
+    ) -> Result<()> {
         let conn = self.lock();
         conn.execute(
             "INSERT INTO agent_directory (agent_id, node_id, node_name, name, harness, enabled, removed, updated_at)
@@ -718,7 +857,8 @@ impl Store {
                 row.get::<_, String>(5)?,
             ))
         })?;
-        rows.collect::<std::result::Result<_, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
     }
 
     /// Install an agent arriving from another node under its SAME id (so
@@ -739,16 +879,29 @@ impl Store {
                 clean_config(&agent.config).to_string(), agent.enabled as i64, now],
         )?;
         super::journal_row(&conn, actor, "agent", "agents", &agent.id, "update")?;
-        record_mutation(&conn, actor, "agent_adopted", &format!("agent_adopted:{}:{now}", agent.id),
-            &json!({"id": agent.id, "name": agent.name}))?;
+        record_mutation(
+            &conn,
+            actor,
+            "agent_adopted",
+            &format!("agent_adopted:{}:{now}", agent.id),
+            &json!({"id": agent.id, "name": agent.name}),
+        )?;
         drop(conn);
-        self.agent(&agent.id)?.ok_or_else(|| anyhow!("agent vanished after adopt"))
+        self.agent(&agent.id)?
+            .ok_or_else(|| anyhow!("agent vanished after adopt"))
     }
 
     /* ————— nodes (v58) ————— */
 
     /// Publish this node's own row (called every sync cycle).
-    pub fn publish_node(&self, node_id: &str, name: &str, kind: &str, roles: &Value, version: &str) -> Result<()> {
+    pub fn publish_node(
+        &self,
+        node_id: &str,
+        name: &str,
+        kind: &str,
+        roles: &Value,
+        version: &str,
+    ) -> Result<()> {
         let now = now_utc();
         let conn = self.lock();
         conn.execute(
@@ -778,7 +931,8 @@ impl Store {
                 "last_seen": row.get::<_, String>(5)?,
             }))
         })?;
-        rows.collect::<std::result::Result<_, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
     }
 
     /* ————— peer sync: policy, tasks, approvals, directory (not agents) ————— */
@@ -794,17 +948,21 @@ impl Store {
                 let mut obj = serde_json::Map::new();
                 for (i, c) in cols.iter().enumerate() {
                     let v: rusqlite::types::Value = row.get(i)?;
-                    obj.insert(c.clone(), match v {
-                        rusqlite::types::Value::Null => Value::Null,
-                        rusqlite::types::Value::Integer(n) => json!(n),
-                        rusqlite::types::Value::Real(f) => json!(f),
-                        rusqlite::types::Value::Text(t) => json!(t),
-                        rusqlite::types::Value::Blob(_) => Value::Null,
-                    });
+                    obj.insert(
+                        c.clone(),
+                        match v {
+                            rusqlite::types::Value::Null => Value::Null,
+                            rusqlite::types::Value::Integer(n) => json!(n),
+                            rusqlite::types::Value::Real(f) => json!(f),
+                            rusqlite::types::Value::Text(t) => json!(t),
+                            rusqlite::types::Value::Blob(_) => Value::Null,
+                        },
+                    );
                 }
                 Ok(Value::Object(obj))
             })?;
-            rows.collect::<std::result::Result<_, _>>().map_err(Into::into)
+            rows.collect::<std::result::Result<_, _>>()
+                .map_err(Into::into)
         };
         let governance = dump("governance")?;
         let tasks = dump("agent_tasks")?;
@@ -814,16 +972,34 @@ impl Store {
         // the smallest end among full pages (more to come there), else the largest
         let mut full_ends = Vec::new();
         let mut ends = Vec::new();
-        for (table, rows) in [("governance", &governance), ("agent_tasks", &tasks),
-                              ("agent_approvals", &approvals), ("agent_directory", &directory),
-                              ("nodes", &nodes)] {
-            let end = super::page_cursor(&conn, "synced_at", &format!("FROM {table} WHERE synced_at > ?1"), since, 500)?;
-            if rows.len() >= 500 { full_ends.push(end.clone()); }
+        for (table, rows) in [
+            ("governance", &governance),
+            ("agent_tasks", &tasks),
+            ("agent_approvals", &approvals),
+            ("agent_directory", &directory),
+            ("nodes", &nodes),
+        ] {
+            let end = super::page_cursor(
+                &conn,
+                "synced_at",
+                &format!("FROM {table} WHERE synced_at > ?1"),
+                since,
+                500,
+            )?;
+            if rows.len() >= 500 {
+                full_ends.push(end.clone());
+            }
             ends.push(end);
         }
-        let next = full_ends.into_iter().min().or_else(|| ends.into_iter().max()).unwrap_or_else(|| since.to_string());
-        Ok(json!({"governance": governance, "tasks": tasks, "approvals": approvals,
-                  "directory": directory, "nodes": nodes, "next": next}))
+        let next = full_ends
+            .into_iter()
+            .min()
+            .or_else(|| ends.into_iter().max())
+            .unwrap_or_else(|| since.to_string());
+        Ok(
+            json!({"governance": governance, "tasks": tasks, "approvals": approvals,
+                  "directory": directory, "nodes": nodes, "next": next}),
+        )
     }
 
     /// Last-writer-wins by `updated_at`, per row. A decided approval is
@@ -831,25 +1007,84 @@ impl Store {
     pub fn agents_sync_apply(&self, batch: &Value) -> Result<usize> {
         const TABLES: &[(&str, &str, &[&str])] = &[
             ("governance", "governance", &["id", "policy", "updated_at"]),
-            ("nodes", "nodes", &["node_id", "name", "kind", "roles", "version", "last_seen", "updated_at"]),
-            ("directory", "agent_directory", &[
-                "agent_id", "node_id", "node_name", "name", "harness", "enabled", "removed", "updated_at",
-            ]),
-            ("tasks", "agent_tasks", &[
-                "id", "ask_id", "agent_id", "request", "brief", "classes", "tainted", "sensitive",
-                "status", "result", "error", "node", "actions", "created_at", "updated_at",
-                "started_at", "finished_at",
-            ]),
-            ("approvals", "agent_approvals", &[
-                "id", "task_id", "kind", "class", "summary", "detail", "status", "decided_by",
-                "decided_at", "created_at", "updated_at",
-            ]),
+            (
+                "nodes",
+                "nodes",
+                &[
+                    "node_id",
+                    "name",
+                    "kind",
+                    "roles",
+                    "version",
+                    "last_seen",
+                    "updated_at",
+                ],
+            ),
+            (
+                "directory",
+                "agent_directory",
+                &[
+                    "agent_id",
+                    "node_id",
+                    "node_name",
+                    "name",
+                    "harness",
+                    "enabled",
+                    "removed",
+                    "updated_at",
+                ],
+            ),
+            (
+                "tasks",
+                "agent_tasks",
+                &[
+                    "id",
+                    "ask_id",
+                    "agent_id",
+                    "request",
+                    "brief",
+                    "classes",
+                    "tainted",
+                    "sensitive",
+                    "status",
+                    "result",
+                    "error",
+                    "node",
+                    "actions",
+                    "created_at",
+                    "updated_at",
+                    "started_at",
+                    "finished_at",
+                ],
+            ),
+            (
+                "approvals",
+                "agent_approvals",
+                &[
+                    "id",
+                    "task_id",
+                    "kind",
+                    "class",
+                    "summary",
+                    "detail",
+                    "status",
+                    "decided_by",
+                    "decided_at",
+                    "created_at",
+                    "updated_at",
+                ],
+            ),
         ];
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let mut applied = 0usize;
         for (key, table, cols) in TABLES {
-            for row in batch.get(*key).and_then(|v| v.as_array()).into_iter().flatten() {
+            for row in batch
+                .get(*key)
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+            {
                 let key_col = cols[0]; // `id`, or `agent_id` for the directory
                 if row.get(key_col).and_then(|v| v.as_str()).is_none()
                     || row.get("updated_at").and_then(|v| v.as_str()).is_none()
@@ -860,12 +1095,17 @@ impl Store {
                     .iter()
                     .map(|c| match row.get(*c) {
                         Some(Value::String(s)) => rusqlite::types::Value::Text(s.clone()),
-                        Some(Value::Number(n)) => rusqlite::types::Value::Integer(n.as_i64().unwrap_or(0)),
+                        Some(Value::Number(n)) => {
+                            rusqlite::types::Value::Integer(n.as_i64().unwrap_or(0))
+                        }
                         Some(Value::Bool(b)) => rusqlite::types::Value::Integer(*b as i64),
                         _ => rusqlite::types::Value::Null,
                     })
                     .collect();
-                let placeholders = (1..=cols.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",");
+                let placeholders = (1..=cols.len())
+                    .map(|i| format!("?{i}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
                 let updates = cols
                     .iter()
                     .filter(|c| **c != key_col)
@@ -903,19 +1143,34 @@ mod tests {
     fn test_default_is_ask_first_and_presets_widen_only_what_they_name() {
         let p = Policy::default();
         for class in ACTION_CLASSES {
-            assert!(matches!(decide(&p, class, None), Decision::Ask(_)), "{class}");
+            assert!(
+                matches!(decide(&p, class, None), Decision::Ask(_)),
+                "{class}"
+            );
         }
         let assistant = Policy::preset("assistant").unwrap();
         assert_eq!(decide(&assistant, "read", None), Decision::Auto);
-        assert!(matches!(decide(&assistant, "communicate", None), Decision::Ask(_)));
-        assert!(matches!(decide(&assistant, "spend", None), Decision::Ask(_)));
+        assert!(matches!(
+            decide(&assistant, "communicate", None),
+            Decision::Ask(_)
+        ));
+        assert!(matches!(
+            decide(&assistant, "spend", None),
+            Decision::Ask(_)
+        ));
         let delegate = Policy::preset("delegate").unwrap();
         assert_eq!(decide(&delegate, "communicate", None), Decision::Auto);
-        assert!(matches!(decide(&delegate, "spend", None), Decision::Ask(_)), "money always asks in presets");
+        assert!(
+            matches!(decide(&delegate, "spend", None), Decision::Ask(_)),
+            "money always asks in presets"
+        );
         assert!(matches!(decide(&delegate, "files", None), Decision::Ask(_)));
         assert!(Policy::preset("reckless").is_none());
         // unknown classes are `other`, which asks
-        assert!(matches!(decide(&delegate, "launch_missiles", None), Decision::Ask(_)));
+        assert!(matches!(
+            decide(&delegate, "launch_missiles", None),
+            Decision::Ask(_)
+        ));
     }
 
     #[test]
@@ -923,7 +1178,9 @@ mod tests {
         let mut p = Policy::preset("delegate").unwrap();
         let why = Some("imported content (ep_1)");
         // after untrusted reads, data-carrying actions need a human…
-        assert!(matches!(decide(&p, "communicate", why), Decision::Ask(r) if r.contains("read imported")));
+        assert!(
+            matches!(decide(&p, "communicate", why), Decision::Ask(r) if r.contains("read imported"))
+        );
         assert!(matches!(decide(&p, "web", why), Decision::Ask(_)));
         // …and so do calendar invites, record writes and plain reads
         assert!(matches!(decide(&p, "schedule", why), Decision::Ask(_)));
@@ -949,26 +1206,46 @@ mod tests {
     fn test_a_tainted_task_never_runs_on_its_own() {
         let why = Some("imported content (ep_1)");
         let everything_auto = Policy {
-            modes: ACTION_CLASSES.iter().map(|c| (c.to_string(), "auto".to_string())).collect(),
+            modes: ACTION_CLASSES
+                .iter()
+                .map(|c| (c.to_string(), "auto".to_string()))
+                .collect(),
             ..Policy::default()
         };
-        let mut policies: Vec<Policy> = PRESETS.iter().map(|(n, _)| Policy::preset(n).unwrap()).collect();
+        let mut policies: Vec<Policy> = PRESETS
+            .iter()
+            .map(|(n, _)| Policy::preset(n).unwrap())
+            .collect();
         policies.push(everything_auto.clone());
         // Whatever the preset, class or model-chosen class name (unknown
         // ones are `other`), a tainted action asks first…
         for p in &policies {
             for class in ACTION_CLASSES.iter().chain(&["launch_missiles", ""]) {
-                assert!(matches!(decide(p, class, why), Decision::Ask(_)), "{class} under {:?}", p.modes);
+                assert!(
+                    matches!(decide(p, class, why), Decision::Ask(_)),
+                    "{class} under {:?}",
+                    p.modes
+                );
             }
-            for needs in [vec![], vec!["read".to_string()], vec!["read".into(), "write_record".into()]] {
-                assert!(matches!(decide_all(p, &needs, why), Decision::Ask(_)), "{needs:?}");
+            for needs in [
+                vec![],
+                vec!["read".to_string()],
+                vec!["read".into(), "write_record".into()],
+            ] {
+                assert!(
+                    matches!(decide_all(p, &needs, why), Decision::Ask(_)),
+                    "{needs:?}"
+                );
             }
         }
         // …except that never stays never.
         let mut p = everything_auto;
         p.modes.insert("spend".into(), "never".into());
         assert!(matches!(decide(&p, "spend", why), Decision::Never(_)));
-        assert!(matches!(decide_all(&p, &["read".into(), "spend".into()], why), Decision::Never(_)));
+        assert!(matches!(
+            decide_all(&p, &["read".into(), "spend".into()], why),
+            Decision::Never(_)
+        ));
         // Only `read` is outside the data-carrying list.
         let mut sensitive: Vec<&str> = TAINT_SENSITIVE.to_vec();
         sensitive.push("read");
@@ -992,32 +1269,62 @@ mod tests {
         let s = store();
         assert_eq!(s.global_policy().unwrap(), Policy::default());
         let stored = s
-            .set_policy(&actor(), "global", &json!({
-                "modes": {"read": "auto", "spend": "sometimes", "bogus": "auto"},
-                "taint_guard": true, "tasks_per_day": 999_999
-            }))
+            .set_policy(
+                &actor(),
+                "global",
+                &json!({
+                    "modes": {"read": "auto", "spend": "sometimes", "bogus": "auto"},
+                    "taint_guard": true, "tasks_per_day": 999_999
+                }),
+            )
             .unwrap();
         assert_eq!(stored["modes"]["read"], "auto");
-        assert_eq!(stored["modes"]["spend"], "ask", "an unknown mode is ignored");
+        assert_eq!(
+            stored["modes"]["spend"], "ask",
+            "an unknown mode is ignored"
+        );
         assert!(stored["modes"].get("bogus").is_none());
         assert_eq!(stored["tasks_per_day"], 1000, "limits are clamped");
 
         let agent = s
-            .save_agent(&actor(), None, &AgentIn {
-                name: "Code".into(), harness: "claude_code".into(),
-                config: json!({"workdir": "/tmp/x", "api_key": "LEAK"}), enabled: None,
-            })
+            .save_agent(
+                &actor(),
+                None,
+                &AgentIn {
+                    name: "Code".into(),
+                    harness: "claude_code".into(),
+                    config: json!({"workdir": "/tmp/x", "api_key": "LEAK"}),
+                    enabled: None,
+                },
+            )
             .unwrap();
-        assert!(agent.config.get("api_key").is_none(), "secrets never land in config");
+        assert!(
+            agent.config.get("api_key").is_none(),
+            "secrets never land in config"
+        );
         assert!(s.set_policy(&actor(), "ag_nope", &json!({})).is_err());
-        s.set_policy(&actor(), &agent.id, &json!({"modes": {"communicate": "never"}})).unwrap();
+        s.set_policy(
+            &actor(),
+            &agent.id,
+            &json!({"modes": {"communicate": "never"}}),
+        )
+        .unwrap();
         let eff = s.effective_policy(Some(&agent.id)).unwrap();
         assert_eq!(eff.mode("read"), "auto", "inherits the global setting");
         assert_eq!(eff.mode("communicate"), "never", "its own override wins");
         assert_eq!(s.effective_policy(None).unwrap().mode("communicate"), "ask");
-        assert!(s.save_agent(&actor(), None, &AgentIn {
-            name: "x".into(), harness: "skynet".into(), config: json!({}), enabled: None,
-        }).is_err());
+        assert!(s
+            .save_agent(
+                &actor(),
+                None,
+                &AgentIn {
+                    name: "x".into(),
+                    harness: "skynet".into(),
+                    config: json!({}),
+                    enabled: None,
+                }
+            )
+            .is_err());
         s.delete_agent(&actor(), &agent.id).unwrap();
         assert!(s.agent(&agent.id).unwrap().is_none());
         assert_eq!(s.agent_policy_overrides(&agent.id).unwrap(), json!({}));
@@ -1027,27 +1334,67 @@ mod tests {
     fn test_task_lifecycle_and_approvals() {
         let s = store();
         let task = s
-            .create_agent_task(&actor(), Some("ask_1"), None, "email the plumber", "Send…",
-                &["communicate".into(), "warp".into(), "communicate".into()], None, false)
+            .create_agent_task(
+                &actor(),
+                Some("ask_1"),
+                None,
+                "email the plumber",
+                "Send…",
+                &["communicate".into(), "warp".into(), "communicate".into()],
+                None,
+                false,
+            )
             .unwrap();
         assert_eq!(task.status, "proposed");
         assert_eq!(task.classes, vec!["communicate", "other"]);
-        let ap = s.add_approval(&task.id, "dispatch", None, "send an email", &json!({}), "pending", None).unwrap();
+        let ap = s
+            .add_approval(
+                &task.id,
+                "dispatch",
+                None,
+                "send an email",
+                &json!({}),
+                "pending",
+                None,
+            )
+            .unwrap();
         assert_eq!(s.pending_approvals(false).unwrap().len(), 1);
         let decided = s.decide_approval(&ap, true, "human:dashboard").unwrap();
         assert_eq!(decided["status"], "approved");
-        assert!(s.decide_approval(&ap, false, "human:dashboard").is_err(), "decided once");
-        s.set_agent_task_status(&actor(), &task.id, "queued", None, None, None).unwrap();
-        s.set_agent_task_status(&actor(), &task.id, "running", None, None, None).unwrap();
+        assert!(
+            s.decide_approval(&ap, false, "human:dashboard").is_err(),
+            "decided once"
+        );
+        s.set_agent_task_status(&actor(), &task.id, "queued", None, None, None)
+            .unwrap();
+        s.set_agent_task_status(&actor(), &task.id, "running", None, None, None)
+            .unwrap();
         assert_eq!(s.agent_tasks_started_today().unwrap(), 1);
         assert_eq!(s.bump_agent_task_actions(&task.id).unwrap(), 1);
-        let done = s.set_agent_task_status(&actor(), &task.id, "done", Some("sent"), None, None).unwrap();
+        let done = s
+            .set_agent_task_status(&actor(), &task.id, "done", Some("sent"), None, None)
+            .unwrap();
         assert_eq!(done.result.as_deref(), Some("sent"));
-        assert!(s.set_agent_task_status(&actor(), &task.id, "running", None, None, None).is_err(), "ended stays ended");
+        assert!(
+            s.set_agent_task_status(&actor(), &task.id, "running", None, None, None)
+                .is_err(),
+            "ended stays ended"
+        );
 
         // a sensitive task hides from a locked view, approvals included
-        let secret = s.create_agent_task(&actor(), None, None, "x", "y", &[], None, true).unwrap();
-        s.add_approval(&secret.id, "dispatch", None, "z", &json!({}), "pending", None).unwrap();
+        let secret = s
+            .create_agent_task(&actor(), None, None, "x", "y", &[], None, true)
+            .unwrap();
+        s.add_approval(
+            &secret.id,
+            "dispatch",
+            None,
+            "z",
+            &json!({}),
+            "pending",
+            None,
+        )
+        .unwrap();
         assert_eq!(s.agent_tasks(10, false).unwrap().len(), 1);
         assert_eq!(s.agent_tasks(10, true).unwrap().len(), 2);
         assert!(s.pending_approvals(false).unwrap().is_empty());
@@ -1058,12 +1405,34 @@ mod tests {
     fn test_sync_carries_policy_tasks_and_decisions_not_agents() {
         let a = store();
         let b = store();
-        a.save_agent(&actor(), None, &AgentIn {
-            name: "Code".into(), harness: "claude_code".into(), config: json!({}), enabled: None,
-        }).unwrap();
-        a.set_policy(&actor(), "global", &json!({"modes": {"read": "auto"}})).unwrap();
-        let task = a.create_agent_task(&actor(), None, None, "r", "b", &["read".into()], None, false).unwrap();
-        let ap = a.add_approval(&task.id, "dispatch", None, "s", &json!({}), "pending", None).unwrap();
+        a.save_agent(
+            &actor(),
+            None,
+            &AgentIn {
+                name: "Code".into(),
+                harness: "claude_code".into(),
+                config: json!({}),
+                enabled: None,
+            },
+        )
+        .unwrap();
+        a.set_policy(&actor(), "global", &json!({"modes": {"read": "auto"}}))
+            .unwrap();
+        let task = a
+            .create_agent_task(
+                &actor(),
+                None,
+                None,
+                "r",
+                "b",
+                &["read".into()],
+                None,
+                false,
+            )
+            .unwrap();
+        let ap = a
+            .add_approval(&task.id, "dispatch", None, "s", &json!({}), "pending", None)
+            .unwrap();
         let page = a.agents_sync_export("").unwrap();
         assert!(page.get("agents").is_none(), "agent configs are node-local");
         assert!(b.agents_sync_apply(&page).unwrap() >= 3);
@@ -1072,7 +1441,8 @@ mod tests {
         // approve on B; the decision reaches A
         std::thread::sleep(std::time::Duration::from_millis(1100));
         b.decide_approval(&ap, true, "human:phone").unwrap();
-        a.agents_sync_apply(&b.agents_sync_export("").unwrap()).unwrap();
+        a.agents_sync_apply(&b.agents_sync_export("").unwrap())
+            .unwrap();
         assert_eq!(a.approval(&ap).unwrap().unwrap()["status"], "approved");
         // the stale pending copy never reopens it
         b.agents_sync_apply(&page).unwrap();
@@ -1081,17 +1451,26 @@ mod tests {
         // the directory: A publishes its agent; B learns where it runs
         let agent = a.agents().unwrap().remove(0);
         a.publish_agent(&agent, "nd_a", "MacBook", false).unwrap();
-        b.agents_sync_apply(&a.agents_sync_export("").unwrap()).unwrap();
+        b.agents_sync_apply(&a.agents_sync_export("").unwrap())
+            .unwrap();
         let dir = b.agent_directory().unwrap();
         assert_eq!(dir.len(), 1);
-        assert_eq!((dir[0].0.name.as_str(), dir[0].2.as_str()), ("Code", "MacBook"));
-        assert!(b.agents().unwrap().is_empty(), "the configuration itself stays on A");
+        assert_eq!(
+            (dir[0].0.name.as_str(), dir[0].2.as_str()),
+            ("Code", "MacBook")
+        );
+        assert!(
+            b.agents().unwrap().is_empty(),
+            "the configuration itself stays on A"
+        );
         // moved to B: B adopts it under the same id and republishes
         std::thread::sleep(std::time::Duration::from_millis(1100));
         let adopted = b.adopt_agent(&actor(), &agent).unwrap();
         assert_eq!(adopted.id, agent.id);
-        b.publish_agent(&adopted, "nd_b", "Mac mini", false).unwrap();
-        a.agents_sync_apply(&b.agents_sync_export("").unwrap()).unwrap();
+        b.publish_agent(&adopted, "nd_b", "Mac mini", false)
+            .unwrap();
+        a.agents_sync_apply(&b.agents_sync_export("").unwrap())
+            .unwrap();
         assert_eq!(a.agent_directory().unwrap()[0].2, "Mac mini");
     }
 }

@@ -238,7 +238,10 @@ fn episode_clauses(filter: &EpisodeFilter) -> Vec<Clause> {
             sql: "title LIKE ? ESCAPE '\\'".into(),
             params: vec![SqlValue::from(format!(
                 "%{}%",
-                q.trim().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+                q.trim()
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
             ))],
         });
     }
@@ -266,7 +269,11 @@ fn episode_sort(sort: &str, dir: &str) -> String {
         "scope" => "scope",
         _ => "COALESCE(event_time, ingest_time)",
     };
-    let dir = if dir.eq_ignore_ascii_case("asc") { "ASC" } else { "DESC" };
+    let dir = if dir.eq_ignore_ascii_case("asc") {
+        "ASC"
+    } else {
+        "DESC"
+    };
     format!("{expr} {dir}, id {dir}")
 }
 
@@ -339,7 +346,12 @@ impl Store {
                 lifecycle.insert(id, state);
             }
         }
-        Ok(EpisodePage { total, items, facets, lifecycle })
+        Ok(EpisodePage {
+            total,
+            items,
+            facets,
+            lifecycle,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -383,7 +395,10 @@ impl Store {
                 sql: "name LIKE ? ESCAPE '\\'".into(),
                 params: vec![SqlValue::from(format!(
                     "%{}%",
-                    q.trim().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+                    q.trim()
+                        .replace('\\', "\\\\")
+                        .replace('%', "\\%")
+                        .replace('_', "\\_")
                 ))],
             });
         }
@@ -398,15 +413,27 @@ impl Store {
         let order = match sort {
             "name" => format!(
                 "name COLLATE NOCASE {}",
-                if dir.eq_ignore_ascii_case("desc") { "DESC" } else { "ASC" }
+                if dir.eq_ignore_ascii_case("desc") {
+                    "DESC"
+                } else {
+                    "ASC"
+                }
             ),
             "created" => format!(
                 "created_at {}",
-                if dir.eq_ignore_ascii_case("asc") { "ASC" } else { "DESC" }
+                if dir.eq_ignore_ascii_case("asc") {
+                    "ASC"
+                } else {
+                    "DESC"
+                }
             ),
             _ => format!(
                 "episode_count {}",
-                if dir.eq_ignore_ascii_case("asc") { "ASC" } else { "DESC" }
+                if dir.eq_ignore_ascii_case("asc") {
+                    "ASC"
+                } else {
+                    "DESC"
+                }
             ),
         };
         let mut stmt = conn.prepare(&format!(
@@ -436,7 +463,11 @@ impl Store {
             entity_type: facet(&conn, "entities", "type", &clauses, "entity_type")?,
             scope: facet(&conn, "entities", "scope", &clauses, "scope")?,
         };
-        Ok(EntityPage { total, items, facets })
+        Ok(EntityPage {
+            total,
+            items,
+            facets,
+        })
     }
 
     /// Identities grid: every claimed/observed identifying attribute.
@@ -461,7 +492,10 @@ impl Store {
         if let Some(q) = q.filter(|s| !s.trim().is_empty()) {
             let like = format!(
                 "%{}%",
-                q.trim().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+                q.trim()
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
             );
             clauses.push(Clause {
                 dim: "q",
@@ -525,11 +559,7 @@ impl Store {
             });
         }
         clauses.extend(in_clause("relation", "relation", relations));
-        clauses.extend(in_clause(
-            "status",
-            &format!("({status_expr})"),
-            statuses,
-        ));
+        clauses.extend(in_clause("status", &format!("({status_expr})"), statuses));
         let (where_sql, params) = assemble(&clauses, "");
         let total: i64 = conn.query_row(
             &format!("SELECT COUNT(*) FROM edges {where_sql}"),
@@ -729,7 +759,13 @@ mod tests {
             ("git", "c1", "commit", "fix the flux capacitor", "work"),
             ("git", "c2", "commit", "add browse grid", "work"),
             ("imessage", "m1", "messages", "dinner plans", "personal"),
-            ("chrome", "b1", "browsing", "rust faceted search", "personal"),
+            (
+                "chrome",
+                "b1",
+                "browsing",
+                "rust faceted search",
+                "personal",
+            ),
         ]
         .into_iter()
         .map(|(source, r, kind, title, scope)| EpisodeDraft {
@@ -784,11 +820,7 @@ mod tests {
         // Own dimension keeps the unfiltered counts (chips stay clickable)…
         assert_eq!(filtered.facets.source.len(), 3);
         // …other dimensions reflect the source filter.
-        assert!(filtered
-            .facets
-            .scope
-            .iter()
-            .all(|f| f.value == "work"));
+        assert!(filtered.facets.scope.iter().all(|f| f.value == "work"));
 
         let searched = store
             .browse_episodes(
@@ -846,9 +878,7 @@ mod tests {
         assert_eq!(page.total, 1);
         assert_eq!(page.items[0].name, "Jon");
 
-        let ids = store
-            .browse_identities(&[], Some("jon@"), 0, 50)
-            .unwrap();
+        let ids = store.browse_identities(&[], Some("jon@"), 0, 50).unwrap();
         assert_eq!(ids.total, 1);
         assert_eq!(ids.items[0].value, "jon@example.com");
         assert_eq!(ids.facets.kind[0].value, "email");

@@ -140,12 +140,7 @@ impl Store {
     }
 
     /// Human resolution: fixed | not_an_issue. Never deletes.
-    pub fn resolve_lint_finding(
-        &self,
-        actor: &Actor,
-        id: &str,
-        resolution: &str,
-    ) -> Result<()> {
+    pub fn resolve_lint_finding(&self, actor: &Actor, id: &str, resolution: &str) -> Result<()> {
         if !matches!(resolution, "fixed" | "not_an_issue") {
             return Err(anyhow!("resolution must be fixed|not_an_issue"));
         }
@@ -218,9 +213,7 @@ impl Store {
                                  AND ed.t_expired IS NULL)
              ORDER BY e.name LIMIT {limit}"
         ))?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
@@ -334,7 +327,11 @@ impl Store {
         let entities: Vec<String> = stmt
             .query_map([from, to], |row| row.get(0))?
             .collect::<std::result::Result<_, _>>()?;
-        Ok(ReviewInputs { episodes, notes, entities })
+        Ok(ReviewInputs {
+            episodes,
+            notes,
+            entities,
+        })
     }
 
     /// Coverage gaps: entities the record keeps citing (90 days) that
@@ -356,9 +353,7 @@ impl Store {
              HAVING n >= 8
              ORDER BY n DESC LIMIT {limit}"
         ))?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }

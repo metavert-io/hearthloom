@@ -23,9 +23,20 @@ use crate::ids;
 use crate::time::now_utc;
 
 pub const RELATIONSHIP_KINDS: &[&str] = &[
-    "partner", "parent", "child", "family", "friend", "colleague",
-    "collaborator", "client", "investor", "advisor", "contact",
-    "acquaintance", "service", "me",
+    "partner",
+    "parent",
+    "child",
+    "family",
+    "friend",
+    "colleague",
+    "collaborator",
+    "client",
+    "investor",
+    "advisor",
+    "contact",
+    "acquaintance",
+    "service",
+    "me",
 ];
 
 /// Kinds that make someone inner-circle once confirmed. A FORMER
@@ -33,8 +44,15 @@ pub const RELATIONSHIP_KINDS: &[&str] = &[
 /// "was…" group in the UI) — bi-temporal history, not a separate kind.
 /// `contact` is the professional catch-all (your accountant, a
 /// client) — pair it with the freeform note qualifier, never a new kind.
-const CLOSE_KINDS: &[&str] =
-    &["partner", "parent", "child", "friend", "family", "collaborator", "advisor"];
+const CLOSE_KINDS: &[&str] = &[
+    "partner",
+    "parent",
+    "child",
+    "friend",
+    "family",
+    "collaborator",
+    "advisor",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelationshipRow {
@@ -282,7 +300,11 @@ impl Store {
         )?;
         let mix: Vec<String> = stmt
             .query_map([entity_id], |row| {
-                Ok(format!("{} ×{}", row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                Ok(format!(
+                    "{} ×{}",
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?
+                ))
             })?
             .collect::<std::result::Result<_, _>>()?;
         let mut stmt = conn.prepare(
@@ -333,7 +355,9 @@ impl Store {
             )
             .optional()?
         };
-        let Some((id, n, sources, total)) = candidate else { return Ok(false) };
+        let Some((id, n, sources, total)) = candidate else {
+            return Ok(false);
+        };
         if sources < 3 || total == 0 || (n as f64) / (total as f64) < 0.25 {
             return Ok(false);
         }
@@ -386,9 +410,7 @@ impl Store {
                       AND b.ingest_time >= datetime('now', '-60 days'))
              LIMIT ?1",
         )?;
-        let rows = stmt.query_map([limit as i64], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?;
+        let rows = stmt.query_map([limit as i64], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
@@ -460,7 +482,15 @@ impl Store {
                 _ => "'Person', 'Org'",
             },
         ))?;
-        type Agg = (String, String, String, i64, Option<String>, i64, Option<String>);
+        type Agg = (
+            String,
+            String,
+            String,
+            i64,
+            Option<String>,
+            i64,
+            Option<String>,
+        );
         let aggregates: Vec<Agg> = stmt
             .query_map([], |row| {
                 Ok((
@@ -584,50 +614,55 @@ impl Store {
         let cutoff_90 = cutoff_90.format("%Y-%m-%d").to_string();
         let mut rows: Vec<DirectoryRow> = aggregates
             .into_iter()
-            .map(|(id, name, entity_type, importance, last_day, n, months_raw)| {
-                let relationships = rel_map.remove(&id).unwrap_or_default();
-                let close_confirmed = relationships.iter().any(|r| {
-                    r.status == "confirmed" && CLOSE_KINDS.contains(&r.kind.as_str())
-                });
-                let active = last_day.as_deref().map(|d| d >= cutoff_90.as_str()).unwrap_or(false);
-                let is_me = relationships.iter().any(|r| r.kind == "me");
-                let tier = if is_me {
-                    "self" // the record's owner — a header card, not a tier
-                } else if importance > 0 || close_confirmed {
-                    "inner"
-                } else if active {
-                    "active"
-                } else {
-                    "drifting"
-                };
-                // sparkline: 12 monthly buckets from the concat months
-                let mut months = vec![0i64; 12];
-                if let Some(raw) = &months_raw {
-                    for month in raw.split(',') {
-                        if let Ok(diff) = month_diff(month, &today) {
-                            if diff < 12 {
-                                months[11 - diff as usize] += 1;
+            .map(
+                |(id, name, entity_type, importance, last_day, n, months_raw)| {
+                    let relationships = rel_map.remove(&id).unwrap_or_default();
+                    let close_confirmed = relationships
+                        .iter()
+                        .any(|r| r.status == "confirmed" && CLOSE_KINDS.contains(&r.kind.as_str()));
+                    let active = last_day
+                        .as_deref()
+                        .map(|d| d >= cutoff_90.as_str())
+                        .unwrap_or(false);
+                    let is_me = relationships.iter().any(|r| r.kind == "me");
+                    let tier = if is_me {
+                        "self" // the record's owner — a header card, not a tier
+                    } else if importance > 0 || close_confirmed {
+                        "inner"
+                    } else if active {
+                        "active"
+                    } else {
+                        "drifting"
+                    };
+                    // sparkline: 12 monthly buckets from the concat months
+                    let mut months = vec![0i64; 12];
+                    if let Some(raw) = &months_raw {
+                        for month in raw.split(',') {
+                            if let Ok(diff) = month_diff(month, &today) {
+                                if diff < 12 {
+                                    months[11 - diff as usize] += 1;
+                                }
                             }
                         }
                     }
-                }
-                DirectoryRow {
-                    notes: note_map.get(&id).copied().unwrap_or(0),
-                    seeking_match: seeking_set.contains(&id),
-                    goals: goal_map.get(&id).cloned().unwrap_or_default(),
-                    org: org_map.get(&id).cloned(),
-                    handle: handle_map.get(&id).cloned(),
-                    entity_id: id,
-                    name,
-                    entity_type,
-                    declared_importance: importance,
-                    last_evidence: last_day,
-                    evidence_year: n,
-                    months,
-                    relationships,
-                    tier: tier.into(),
-                }
-            })
+                    DirectoryRow {
+                        notes: note_map.get(&id).copied().unwrap_or(0),
+                        seeking_match: seeking_set.contains(&id),
+                        goals: goal_map.get(&id).cloned().unwrap_or_default(),
+                        org: org_map.get(&id).cloned(),
+                        handle: handle_map.get(&id).cloned(),
+                        entity_id: id,
+                        name,
+                        entity_type,
+                        declared_importance: importance,
+                        last_evidence: last_day,
+                        evidence_year: n,
+                        months,
+                        relationships,
+                        tier: tier.into(),
+                    }
+                },
+            )
             .collect();
 
         // Tier order, then evidence; cap per tier.
@@ -643,8 +678,7 @@ impl Store {
                 .then(b.declared_importance.cmp(&a.declared_importance))
                 .then(b.evidence_year.cmp(&a.evidence_year))
         });
-        let mut counts: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         rows.retain(|row| {
             let seen = counts.entry(row.tier.clone()).or_default();
             *seen += 1;
@@ -718,18 +752,34 @@ mod tests {
 
         // Predicted (inferred) → proposed; confirming keeps origin.
         let rel = store
-            .add_relationship(&actor(), &ada.id, "collaborator", "inferred",
-                &["ep_x".into()], None, None)
+            .add_relationship(
+                &actor(),
+                &ada.id,
+                "collaborator",
+                "inferred",
+                &["ep_x".into()],
+                None,
+                None,
+            )
             .unwrap();
         // duplicate proposal is a no-op
         assert_eq!(
             store
-                .add_relationship(&actor(), &ada.id, "collaborator", "inferred",
-                    &["ep_y".into()], None, None)
+                .add_relationship(
+                    &actor(),
+                    &ada.id,
+                    "collaborator",
+                    "inferred",
+                    &["ep_y".into()],
+                    None,
+                    None
+                )
                 .unwrap(),
             rel
         );
-        store.resolve_relationship(&actor(), &rel, "confirm").unwrap();
+        store
+            .resolve_relationship(&actor(), &rel, "confirm")
+            .unwrap();
         let rels = store.relationships_for(&ada.id).unwrap();
         assert_eq!(rels[0].status, "confirmed");
         assert_eq!(rels[0].origin, "inferred"); // never laundered

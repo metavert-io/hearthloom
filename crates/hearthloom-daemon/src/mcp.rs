@@ -20,7 +20,13 @@ const PROTOCOL_VERSION: &str = "2026-07-28";
 /// the client asks for one of these, answer with THAT version — answering
 /// with our newest made clients that don't know it (Claude Code 2.1, seen
 /// 2026-10-17) drop the server as a "protocol version mismatch".
-const SUPPORTED_VERSIONS: &[&str] = &["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+const SUPPORTED_VERSIONS: &[&str] = &[
+    "2026-07-28",
+    "2025-11-25",
+    "2025-06-18",
+    "2025-03-26",
+    "2024-11-05",
+];
 
 /// The protocol version to answer an `initialize` with.
 pub fn negotiate_version(params: &Value) -> &'static str {
@@ -76,7 +82,11 @@ pub async fn handle(
     Json(body).into_response()
 }
 
-fn call_tool(state: &AppState, auth: &crate::http::AuthInfo, params: &Value) -> Result<Value, String> {
+fn call_tool(
+    state: &AppState,
+    auth: &crate::http::AuthInfo,
+    params: &Value,
+) -> Result<Value, String> {
     let name = params
         .get("name")
         .and_then(|n| n.as_str())
@@ -92,7 +102,9 @@ fn call_tool(state: &AppState, auth: &crate::http::AuthInfo, params: &Value) -> 
             return Err(format!("this key has no grant to read memory ({name})"));
         }
         if !state.store.vault_status().0 {
-            return Err("scoped keys can't read while the vault is open — try again once it relocks".into());
+            return Err(
+                "scoped keys can't read while the vault is open — try again once it relocks".into(),
+            );
         }
     }
     let outcome = match name {
@@ -121,7 +133,10 @@ fn tool_search(state: &AppState, args: &Value) -> anyhow::Result<Value> {
         .get("query")
         .and_then(|q| q.as_str())
         .ok_or_else(|| anyhow::anyhow!("search requires 'query'"))?;
-    let detail = args.get("detail").and_then(|d| d.as_str()).unwrap_or("summary");
+    let detail = args
+        .get("detail")
+        .and_then(|d| d.as_str())
+        .unwrap_or("summary");
     let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(10) as usize;
 
     let embedding = state.query_embedding(query);
@@ -220,8 +235,14 @@ fn tool_propose_memory(
         .get("entries")
         .and_then(|e| e.as_array())
         .ok_or_else(|| anyhow::anyhow!("propose_memory requires 'entries' (array)"))?;
-    let kind = args.get("kind").and_then(|k| k.as_str()).unwrap_or("memory");
-    let mode = args.get("mode").and_then(|m| m.as_str()).unwrap_or("propose");
+    let kind = args
+        .get("kind")
+        .and_then(|k| k.as_str())
+        .unwrap_or("memory");
+    let mode = args
+        .get("mode")
+        .and_then(|m| m.as_str())
+        .unwrap_or("propose");
     let claims = auth.0.as_ref();
     let grants = claims.and_then(|c| c.grants.as_ref());
     let actor = Actor {
@@ -229,9 +250,16 @@ fn tool_propose_memory(
         // and Undo depend on it; other callers keep naming themselves.
         actor: match claims {
             Some(c) if c.grants.is_some() => c.agent_actor(),
-            _ => args.get("actor").and_then(|a| a.as_str()).unwrap_or("agent:mcp").to_string(),
+            _ => args
+                .get("actor")
+                .and_then(|a| a.as_str())
+                .unwrap_or("agent:mcp")
+                .to_string(),
         },
-        session_id: args.get("session_id").and_then(|s| s.as_str()).map(String::from),
+        session_id: args
+            .get("session_id")
+            .and_then(|s| s.as_str())
+            .map(String::from),
     };
     let text_of = |entry: &Value, keys: &[&str]| -> String {
         keys.iter()
@@ -246,7 +274,8 @@ fn tool_propose_memory(
             anyhow::bail!("commit at most 20 entries per call");
         }
         if let (Some(c), Some(g)) = (claims, grants) {
-            crate::http::scoped_key_rate_ok(&c.id, g, true, false).map_err(|m| anyhow::anyhow!(m))?;
+            crate::http::scoped_key_rate_ok(&c.id, g, true, false)
+                .map_err(|m| anyhow::anyhow!(m))?;
         }
         match kind {
             "task" => {
@@ -299,7 +328,8 @@ fn tool_propose_memory(
     if mode != "propose" {
         anyhow::bail!("mode must be \"propose\" or \"commit\"");
     }
-    if grants.is_some_and(|g| !g.memory.can_write() && !g.tasks.can_write() && !g.notes.can_write()) {
+    if grants.is_some_and(|g| !g.memory.can_write() && !g.tasks.can_write() && !g.notes.can_write())
+    {
         anyhow::bail!("this key has no grant to propose anything");
     }
     // Proposed tasks/notes ride the same review queue, tagged by kind.
@@ -392,8 +422,14 @@ mod tests {
 
     #[test]
     fn test_version_negotiation_echoes_what_the_client_speaks() {
-        assert_eq!(negotiate_version(&json!({"protocolVersion": "2025-06-18"})), "2025-06-18");
-        assert_eq!(negotiate_version(&json!({"protocolVersion": "1999-01-01"})), PROTOCOL_VERSION);
+        assert_eq!(
+            negotiate_version(&json!({"protocolVersion": "2025-06-18"})),
+            "2025-06-18"
+        );
+        assert_eq!(
+            negotiate_version(&json!({"protocolVersion": "1999-01-01"})),
+            PROTOCOL_VERSION
+        );
         assert_eq!(negotiate_version(&Value::Null), PROTOCOL_VERSION);
     }
 
@@ -427,7 +463,13 @@ mod tests {
         let id = out["committed"][0].as_str().unwrap().to_string();
         let (note, _) = state.store.note(&state.home, &id).unwrap().unwrap();
         assert_eq!(note.origin, hearthloom_core::store::AGENT_ORIGIN);
-        assert!(note.settled_at.is_none(), "still a live note: it settles on the normal path");
-        assert!(note.created_at.is_some(), "born now, like any note written live");
+        assert!(
+            note.settled_at.is_none(),
+            "still a live note: it settles on the normal path"
+        );
+        assert!(
+            note.created_at.is_some(),
+            "born now, like any note written live"
+        );
     }
 }

@@ -7,13 +7,21 @@ use hearthloom_core::Home;
 fn env_var_of(name: &str) -> String {
     let safe: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
         .collect();
     format!("HEARTHLOOM_FRIEND_KEY_{safe}")
 }
 
 pub fn friend_key(name: &str) -> Option<String> {
-    std::env::var(env_var_of(name)).ok().filter(|k| !k.trim().is_empty())
+    std::env::var(env_var_of(name))
+        .ok()
+        .filter(|k| !k.trim().is_empty())
 }
 
 pub fn store_friend_key(home: &Home, name: &str, key: &str) -> Result<()> {

@@ -247,7 +247,9 @@ impl Store {
         let Some((was_private, can_unseal)) = self.ask_privacy(id)? else {
             return Ok(None);
         };
-        let record = self.ask_get(id)?.ok_or_else(|| anyhow::anyhow!("ask vanished"))?;
+        let record = self
+            .ask_get(id)?
+            .ok_or_else(|| anyhow::anyhow!("ask vanished"))?;
         let root = record.thread.unwrap_or(record.id);
         if private == was_private {
             return Ok(Some((was_private, can_unseal)));
@@ -281,7 +283,11 @@ impl Store {
         }
         self.record_event(
             actor,
-            if private { "ask_sealed" } else { "ask_unsealed" },
+            if private {
+                "ask_sealed"
+            } else {
+                "ask_unsealed"
+            },
             &serde_json::json!({ "id": root }),
         )?;
         Ok(Some((private, private)))
@@ -357,7 +363,10 @@ impl Store {
     /// Ask outbound guard). A conversation stays tainted from then on.
     pub fn ask_set_tainted(&self, id: &str, reason: &str) -> Result<()> {
         let conn = self.lock();
-        conn.execute("UPDATE ask_log SET tainted = ?2 WHERE id = ?1", rusqlite::params![id, reason])?;
+        conn.execute(
+            "UPDATE ask_log SET tainted = ?2 WHERE id = ?1",
+            rusqlite::params![id, reason],
+        )?;
         Ok(())
     }
 
@@ -367,7 +376,9 @@ impl Store {
         let conn = self.lock();
         for id in ids {
             let reason: Option<String> = conn
-                .query_row("SELECT tainted FROM ask_log WHERE id = ?1", [id], |row| row.get(0))
+                .query_row("SELECT tainted FROM ask_log WHERE id = ?1", [id], |row| {
+                    row.get(0)
+                })
                 .optional()?
                 .flatten();
             if reason.is_some() {
@@ -427,7 +438,9 @@ mod tests {
     fn test_ask_trace_lifecycle() {
         let store = Store::open_in_memory().unwrap();
         let actor = Actor::new("human:test");
-        let id = store.ask_start(&actor, "what happened in march?", None).unwrap();
+        let id = store
+            .ask_start(&actor, "what happened in march?", None)
+            .unwrap();
 
         let running = store.ask_get(&id).unwrap().unwrap();
         assert_eq!(running.status, "running");
@@ -449,9 +462,19 @@ mod tests {
         assert_eq!(done.citations, json!(["ep_1"]));
 
         // Failures are traces too.
-        let id2 = store.ask_start(&actor, "unparseable question", None).unwrap();
+        let id2 = store
+            .ask_start(&actor, "unparseable question", None)
+            .unwrap();
         store
-            .ask_finish(&id2, None, Some("model returned prose"), &json!([]), &json!([]), 1, 900)
+            .ask_finish(
+                &id2,
+                None,
+                Some("model returned prose"),
+                &json!([]),
+                &json!([]),
+                1,
+                900,
+            )
             .unwrap();
 
         // History: newest first, searchable.
@@ -471,11 +494,29 @@ mod tests {
         // Root + a failed turn + a retry, chained on the root id.
         let root = store.ask_start(&actor, "rhr trends?", None).unwrap();
         store
-            .ask_finish(&root, Some("here are trends"), None, &json!([]), &json!([]), 2, 900)
+            .ask_finish(
+                &root,
+                Some("here are trends"),
+                None,
+                &json!([]),
+                &json!([]),
+                2,
+                900,
+            )
             .unwrap();
-        let failed = store.ask_start(&actor, "what predicted the gaps?", Some(&root)).unwrap();
+        let failed = store
+            .ask_start(&actor, "what predicted the gaps?", Some(&root))
+            .unwrap();
         store
-            .ask_finish(&failed, None, Some("credit balance too low"), &json!([]), &json!([]), 0, 10)
+            .ask_finish(
+                &failed,
+                None,
+                Some("credit balance too low"),
+                &json!([]),
+                &json!([]),
+                0,
+                10,
+            )
             .unwrap();
         let retry = store.ask_start(&actor, "try again", Some(&root)).unwrap();
 
@@ -506,13 +547,18 @@ mod tests {
         // One turn asked with the vault open seals the WHOLE conversation:
         // while locked no turn of it is reachable, by any route.
         store.vault_unlock(15);
-        let secret = store.ask_start(&actor, "private follow-up", Some(&root)).unwrap();
+        let secret = store
+            .ask_start(&actor, "private follow-up", Some(&root))
+            .unwrap();
         assert_eq!(store.ask_thread(&root).unwrap().len(), 4);
         assert_eq!(store.ask_history(0, 10, None).unwrap()[0].turns, 4);
         store.vault_lock();
         assert!(store.ask_thread(&root).unwrap().is_empty());
         for id in [&root, &failed, &retry, &secret] {
-            assert!(store.ask_get(id).unwrap().is_none(), "{id} hidden while locked");
+            assert!(
+                store.ask_get(id).unwrap().is_none(),
+                "{id} hidden while locked"
+            );
             assert!(store.ask_sensitive(id).unwrap(), "{id} stamped sensitive");
         }
         let history = store.ask_history(0, 10, None).unwrap();
@@ -541,12 +587,19 @@ mod tests {
     fn test_seal_by_hand_and_unseal_rules() {
         let store = Store::open_in_memory().unwrap();
         let actor = Actor::new("human:test");
-        let root = store.ask_start(&actor, "what should I get her?", None).unwrap();
-        let follow = store.ask_start(&actor, "something smaller", Some(&root)).unwrap();
+        let root = store
+            .ask_start(&actor, "what should I get her?", None)
+            .unwrap();
+        let follow = store
+            .ask_start(&actor, "something smaller", Some(&root))
+            .unwrap();
         assert_eq!(store.ask_privacy(&root).unwrap(), Some((false, false)));
 
         // Sealed while LOCKED: gone at once, by every route.
-        assert_eq!(store.ask_set_private(&actor, &follow, true).unwrap(), Some((true, true)));
+        assert_eq!(
+            store.ask_set_private(&actor, &follow, true).unwrap(),
+            Some((true, true))
+        );
         assert!(store.ask_get(&root).unwrap().is_none());
         assert!(store.ask_history(0, 10, None).unwrap().is_empty());
         assert_eq!(store.ask_privacy(&root).unwrap(), None);
@@ -560,16 +613,24 @@ mod tests {
         store.vault_unlock(15);
         let listed = &store.ask_history(0, 10, None).unwrap()[0];
         assert!(listed.private && listed.can_unseal);
-        assert_eq!(store.ask_set_private(&actor, &root, false).unwrap(), Some((false, false)));
+        assert_eq!(
+            store.ask_set_private(&actor, &root, false).unwrap(),
+            Some((false, false))
+        );
         store.vault_lock();
         assert_eq!(store.ask_thread(&root).unwrap().len(), 3, "public again");
 
         // Sealed by hand, then a vault-open question: permanent.
         store.ask_set_private(&actor, &root, true).unwrap();
         store.vault_unlock(15);
-        store.ask_start(&actor, "use the private notes", Some(&root)).unwrap();
+        store
+            .ask_start(&actor, "use the private notes", Some(&root))
+            .unwrap();
         assert_eq!(store.ask_privacy(&root).unwrap(), Some((true, false)));
-        let err = store.ask_set_private(&actor, &root, false).unwrap_err().to_string();
+        let err = store
+            .ask_set_private(&actor, &root, false)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("stays private"), "{err}");
         let listed = &store.ask_history(0, 10, None).unwrap()[0];
         assert!(listed.private && !listed.can_unseal);
@@ -584,10 +645,13 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let actor = Actor::new("human:test");
         let root = store.ask_start(&actor, "public opener", None).unwrap();
-        let follow = store.ask_start(&actor, "later private turn", Some(&root)).unwrap();
+        let follow = store
+            .ask_start(&actor, "later private turn", Some(&root))
+            .unwrap();
         {
             let conn = store.lock();
-            conn.execute("UPDATE ask_log SET sensitive = 1 WHERE id = ?1", [&follow]).unwrap();
+            conn.execute("UPDATE ask_log SET sensitive = 1 WHERE id = ?1", [&follow])
+                .unwrap();
         }
         assert!(store.ask_get(&root).unwrap().is_none());
         assert!(store.ask_history(0, 10, None).unwrap().is_empty());

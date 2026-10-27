@@ -134,7 +134,13 @@ async fn build_llm_envelope(
         }
         None => None,
     }
-    .or_else(|| state.store.consolidation_state("peer.public").ok().flatten())?;
+    .or_else(|| {
+        state
+            .store
+            .consolidation_state("peer.public")
+            .ok()
+            .flatten()
+    })?;
 
     let sealed = crate::peerkey::seal_to(&peer_public, api_key.trim().as_bytes()).ok()?;
     let mut env = serde_json::Map::new();
@@ -352,9 +358,10 @@ async fn send_heartbeat(state: &AppState, url: &str, key: &str, paused: bool) {
                 let _ = state.store.set_consolidation_state("peer_version", v);
             }
             if let Some(peer_llm) = body.get("llm_configured").and_then(|b| b.as_bool()) {
-                let _ = state
-                    .store
-                    .set_consolidation_state("peer_llm_configured", if peer_llm { "1" } else { "0" });
+                let _ = state.store.set_consolidation_state(
+                    "peer_llm_configured",
+                    if peer_llm { "1" } else { "0" },
+                );
             }
         }
     }
@@ -508,7 +515,9 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
         let res = client
-            .get(format!("{url}/v1/sync/episodes?after={cursor}&limit={BATCH}"))
+            .get(format!(
+                "{url}/v1/sync/episodes?after={cursor}&limit={BATCH}"
+            ))
             .bearer_auth(&key)
             .send()
             .await
@@ -520,7 +529,10 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
             );
         }
         let page: Value = res.json().await?;
-        let drained = page.get("drained").and_then(|d| d.as_bool()).unwrap_or(true);
+        let drained = page
+            .get("drained")
+            .and_then(|d| d.as_bool())
+            .unwrap_or(true);
         if drained {
             break;
         }
@@ -567,7 +579,9 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
                 .context("pushing scope changes")?;
             if res.status().is_success() {
                 scopes_pushed = changes.len();
-                state.store.set_consolidation_state(KEY_SCOPE_PUSH, &latest)?;
+                state
+                    .store
+                    .set_consolidation_state(KEY_SCOPE_PUSH, &latest)?;
             }
         }
         // pull theirs
@@ -588,13 +602,18 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
                             .unwrap_or_default();
                     if let Some((_, _, latest)) = changes.last() {
                         // v57 peers send their relay cursor; older ones don't
-                        let latest = body.get("next").and_then(|n| n.as_str())
-                            .map(String::from).unwrap_or_else(|| latest.clone());
+                        let latest = body
+                            .get("next")
+                            .and_then(|n| n.as_str())
+                            .map(String::from)
+                            .unwrap_or_else(|| latest.clone());
                         let _ = state.store.apply_scope_changes(
                             &hearthloom_core::store::Actor::new(format!("peer:{name}")),
                             &changes,
                         );
-                        state.store.set_consolidation_state(KEY_SCOPE_PULL, &latest)?;
+                        state
+                            .store
+                            .set_consolidation_state(KEY_SCOPE_PULL, &latest)?;
                     }
                 }
             }
@@ -623,7 +642,9 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
             // recency on both).
             if let (Ok(Some(card)), Ok(Some(stamp))) = (
                 state.store.consolidation_state("network.profile"),
-                state.store.consolidation_state("network.profile.updated_at"),
+                state
+                    .store
+                    .consolidation_state("network.profile.updated_at"),
             ) {
                 if let Some(obj) = operational.as_object_mut() {
                     obj.insert(
@@ -642,43 +663,53 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
                     .flatten()
                     .unwrap_or_default();
                 if let Some(obj) = operational.as_object_mut() {
-                    obj.insert("llm_budget".into(), json!({"value": value, "updated_at": stamp}));
+                    obj.insert(
+                        "llm_budget".into(),
+                        json!({"value": value, "updated_at": stamp}),
+                    );
                 }
             }
             // The visit rule too — and it comes back on the pull below,
             // since both nodes must cluster visits by the same rule.
-            if let (Some(rule), Some(obj)) =
-                (crate::visits::rule_envelope(&state.store), operational.as_object_mut())
-            {
+            if let (Some(rule), Some(obj)) = (
+                crate::visits::rule_envelope(&state.store),
+                operational.as_object_mut(),
+            ) {
                 obj.insert("visit_rule".into(), rule);
             }
             match client
-            .post(format!("{url}/v1/sync/operational"))
-            .bearer_auth(&key)
-            .json(&operational)
-            .send()
-            .await
-        {
-            Ok(res) if res.status().is_success() => {
-                mirror_ok = true;
-                state
-                    .store
-                    .set_consolidation_state(KEY_MIRROR_TS, &hearthloom_core::time::now_utc())?;
-                mirrored = res
-                    .json::<Value>()
-                    .await
-                    .ok()
-                    .and_then(|v| v.get("applied").and_then(|a| a.as_u64()))
-                    .unwrap_or(0) as usize;
-            }
-            // Best-effort by doctrine, but never SILENT: the progress
-            // surface counts this category as incomplete — say why.
-            Ok(res) => tracing::warn!(
-                "operational mirror refused by peer: {} {}",
-                res.status(),
-                res.text().await.unwrap_or_default().chars().take(200).collect::<String>()
-            ),
-            Err(err) => tracing::warn!("operational mirror push failed: {err:#}"),
+                .post(format!("{url}/v1/sync/operational"))
+                .bearer_auth(&key)
+                .json(&operational)
+                .send()
+                .await
+            {
+                Ok(res) if res.status().is_success() => {
+                    mirror_ok = true;
+                    state.store.set_consolidation_state(
+                        KEY_MIRROR_TS,
+                        &hearthloom_core::time::now_utc(),
+                    )?;
+                    mirrored = res
+                        .json::<Value>()
+                        .await
+                        .ok()
+                        .and_then(|v| v.get("applied").and_then(|a| a.as_u64()))
+                        .unwrap_or(0) as usize;
+                }
+                // Best-effort by doctrine, but never SILENT: the progress
+                // surface counts this category as incomplete — say why.
+                Ok(res) => tracing::warn!(
+                    "operational mirror refused by peer: {} {}",
+                    res.status(),
+                    res.text()
+                        .await
+                        .unwrap_or_default()
+                        .chars()
+                        .take(200)
+                        .collect::<String>()
+                ),
+                Err(err) => tracing::warn!("operational mirror push failed: {err:#}"),
             }
         }
         Err(err) => tracing::warn!("operational export failed: {err:#}"),
@@ -689,7 +720,12 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
     // push (apply_operational never deletes; the resurrection gate holds).
     // An older peer answers 404/405 — skipped.
     if mirror_ok {
-        if let Ok(res) = client.get(format!("{url}/v1/sync/operational")).bearer_auth(&key).send().await {
+        if let Ok(res) = client
+            .get(format!("{url}/v1/sync/operational"))
+            .bearer_auth(&key)
+            .send()
+            .await
+        {
             if res.status().is_success() {
                 if let Ok(theirs) = res.json::<Value>().await {
                     if let Some(rule) = theirs.get("visit_rule") {
@@ -698,14 +734,16 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
                         }
                     }
                     let (store, home) = (state.store.clone(), state.home.clone());
-                    let applied = tokio::task::spawn_blocking(move || store.apply_operational(&home, &theirs))
-                        .await
-                        .map_err(anyhow::Error::from)
-                        .and_then(|r| r)
-                        .unwrap_or_else(|err| {
-                            tracing::warn!("operational mirror pull failed: {err:#}");
-                            0
-                        });
+                    let applied = tokio::task::spawn_blocking(move || {
+                        store.apply_operational(&home, &theirs)
+                    })
+                    .await
+                    .map_err(anyhow::Error::from)
+                    .and_then(|r| r)
+                    .unwrap_or_else(|err| {
+                        tracing::warn!("operational mirror pull failed: {err:#}");
+                        0
+                    });
                     if applied > 0 {
                         crate::bus::touch(state, "operational.changed");
                     }
@@ -728,8 +766,14 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
         if let Ok(batch) = state.store.journal_export(push_seq, 500) {
-            let next = batch.get("next").and_then(|n| n.as_i64()).unwrap_or(push_seq);
-            let empty = batch.get("drained").and_then(|d| d.as_bool()).unwrap_or(true);
+            let next = batch
+                .get("next")
+                .and_then(|n| n.as_i64())
+                .unwrap_or(push_seq);
+            let empty = batch
+                .get("drained")
+                .and_then(|d| d.as_bool())
+                .unwrap_or(true);
             if !empty {
                 if let Ok(res) = client
                     .post(format!("{url}/v1/sync/journal"))
@@ -759,7 +803,10 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
         {
             if res.status().is_success() {
                 if let Ok(batch) = res.json::<Value>().await {
-                    let next = batch.get("next").and_then(|n| n.as_i64()).unwrap_or(pull_seq);
+                    let next = batch
+                        .get("next")
+                        .and_then(|n| n.as_i64())
+                        .unwrap_or(pull_seq);
                     let _ = state.store.apply_journal(
                         &hearthloom_core::store::Actor::new(format!("peer:{name}")),
                         &batch,
@@ -784,8 +831,14 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
         if let Ok(batch) = state.store.photo_points_export(push_seq, 500) {
-            let next = batch.get("next").and_then(|n| n.as_i64()).unwrap_or(push_seq);
-            let empty = batch.get("drained").and_then(|d| d.as_bool()).unwrap_or(true);
+            let next = batch
+                .get("next")
+                .and_then(|n| n.as_i64())
+                .unwrap_or(push_seq);
+            let empty = batch
+                .get("drained")
+                .and_then(|d| d.as_bool())
+                .unwrap_or(true);
             if !empty {
                 if let Ok(res) = client
                     .post(format!("{url}/v1/sync/photos"))
@@ -815,7 +868,10 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
         {
             if res.status().is_success() {
                 if let Ok(batch) = res.json::<Value>().await {
-                    let next = batch.get("next").and_then(|n| n.as_i64()).unwrap_or(pull_seq);
+                    let next = batch
+                        .get("next")
+                        .and_then(|n| n.as_i64())
+                        .unwrap_or(pull_seq);
                     let _ = state.store.photo_points_apply(&batch);
                     if next > pull_seq {
                         state
@@ -833,30 +889,64 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
     // Agent CONFIGURATIONS stay node-local (addresses and secrets belong
     // to one machine). 404 = an older peer; skipped.
     {
-        let since = state.store.consolidation_state("peer_agents_push_ts")?.unwrap_or_default();
+        let since = state
+            .store
+            .consolidation_state("peer_agents_push_ts")?
+            .unwrap_or_default();
         if let Ok(batch) = state.store.agents_sync_export(&since) {
-            let next = batch.get("next").and_then(|n| n.as_str()).unwrap_or(&since).to_string();
+            let next = batch
+                .get("next")
+                .and_then(|n| n.as_str())
+                .unwrap_or(&since)
+                .to_string();
             let has_rows = ["governance", "tasks", "approvals", "directory", "nodes"]
                 .iter()
-                .any(|k| batch.get(*k).and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty()));
+                .any(|k| {
+                    batch
+                        .get(*k)
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|a| !a.is_empty())
+                });
             if has_rows {
-                if let Ok(res) = client.post(format!("{url}/v1/sync/agents")).bearer_auth(&key).json(&batch).send().await {
+                if let Ok(res) = client
+                    .post(format!("{url}/v1/sync/agents"))
+                    .bearer_auth(&key)
+                    .json(&batch)
+                    .send()
+                    .await
+                {
                     if res.status().is_success() && next > since {
-                        state.store.set_consolidation_state("peer_agents_push_ts", &next)?;
+                        state
+                            .store
+                            .set_consolidation_state("peer_agents_push_ts", &next)?;
                     }
                 }
             }
         }
-        let since_pull = state.store.consolidation_state("peer_agents_pull_ts")?.unwrap_or_default();
-        if let Ok(res) = client.get(format!("{url}/v1/sync/agents?since={since_pull}")).bearer_auth(&key).send().await {
+        let since_pull = state
+            .store
+            .consolidation_state("peer_agents_pull_ts")?
+            .unwrap_or_default();
+        if let Ok(res) = client
+            .get(format!("{url}/v1/sync/agents?since={since_pull}"))
+            .bearer_auth(&key)
+            .send()
+            .await
+        {
             if res.status().is_success() {
                 if let Ok(batch) = res.json::<Value>().await {
-                    let next = batch.get("next").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                    let next = batch
+                        .get("next")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     if state.store.agents_sync_apply(&batch).unwrap_or(0) > 0 {
                         crate::agents::kick();
                     }
                     if !next.is_empty() && next > since_pull {
-                        state.store.set_consolidation_state("peer_agents_pull_ts", &next)?;
+                        state
+                            .store
+                            .set_consolidation_state("peer_agents_pull_ts", &next)?;
                     }
                 }
             }
@@ -869,30 +959,67 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
     // entity and edge ids differ between nodes, so the undo record never
     // travels. 404 = an older peer; skipped.
     {
-        let since = state.store.consolidation_state("peer_retire_push_ts")?.unwrap_or_default();
+        let since = state
+            .store
+            .consolidation_state("peer_retire_push_ts")?
+            .unwrap_or_default();
         if let Ok(batch) = state.store.retirements_sync_export(&since) {
-            let next = batch.get("next").and_then(|n| n.as_str()).unwrap_or(&since).to_string();
-            let has_rows = ["retirements", "summary_inputs"]
-                .iter()
-                .any(|k| batch.get(*k).and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty()));
+            let next = batch
+                .get("next")
+                .and_then(|n| n.as_str())
+                .unwrap_or(&since)
+                .to_string();
+            let has_rows = ["retirements", "summary_inputs"].iter().any(|k| {
+                batch
+                    .get(*k)
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|a| !a.is_empty())
+            });
             if has_rows {
-                if let Ok(res) = client.post(format!("{url}/v1/sync/retirements")).bearer_auth(&key).json(&batch).send().await {
+                if let Ok(res) = client
+                    .post(format!("{url}/v1/sync/retirements"))
+                    .bearer_auth(&key)
+                    .json(&batch)
+                    .send()
+                    .await
+                {
                     if res.status().is_success() && next > since {
-                        state.store.set_consolidation_state("peer_retire_push_ts", &next)?;
+                        state
+                            .store
+                            .set_consolidation_state("peer_retire_push_ts", &next)?;
                     }
                 }
             }
         }
-        let since_pull = state.store.consolidation_state("peer_retire_pull_ts")?.unwrap_or_default();
-        if let Ok(res) = client.get(format!("{url}/v1/sync/retirements?since={since_pull}")).bearer_auth(&key).send().await {
+        let since_pull = state
+            .store
+            .consolidation_state("peer_retire_pull_ts")?
+            .unwrap_or_default();
+        if let Ok(res) = client
+            .get(format!("{url}/v1/sync/retirements?since={since_pull}"))
+            .bearer_auth(&key)
+            .send()
+            .await
+        {
             if res.status().is_success() {
                 if let Ok(batch) = res.json::<Value>().await {
-                    let next = batch.get("next").and_then(|n| n.as_str()).unwrap_or("").to_string();
-                    if !state.store.retirements_sync_apply(&batch).unwrap_or_default().is_empty() {
+                    let next = batch
+                        .get("next")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if !state
+                        .store
+                        .retirements_sync_apply(&batch)
+                        .unwrap_or_default()
+                        .is_empty()
+                    {
                         crate::retire::catch_up(state).await;
                     }
                     if !next.is_empty() && next > since_pull {
-                        state.store.set_consolidation_state("peer_retire_pull_ts", &next)?;
+                        state
+                            .store
+                            .set_consolidation_state("peer_retire_pull_ts", &next)?;
                     }
                 }
             }
@@ -909,9 +1036,21 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
             .consolidation_state("peer_sharing_push_ts")?
             .unwrap_or_default();
         if let Ok(batch) = state.store.sharing_sync_export(&since) {
-            let next = batch.get("next").and_then(|n| n.as_str()).unwrap_or(&since).to_string();
-            let has_rows = batch.get("grants").and_then(|g| g.as_array()).map(|a| !a.is_empty()).unwrap_or(false)
-                || batch.get("shares").and_then(|s| s.as_array()).map(|a| !a.is_empty()).unwrap_or(false);
+            let next = batch
+                .get("next")
+                .and_then(|n| n.as_str())
+                .unwrap_or(&since)
+                .to_string();
+            let has_rows = batch
+                .get("grants")
+                .and_then(|g| g.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false)
+                || batch
+                    .get("shares")
+                    .and_then(|s| s.as_array())
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false);
             // v54: group rows ride every page whole (outside the cursor),
             // so push when THEY changed too — judged by a signature of
             // their stamps, remembered once the peer has accepted it.
@@ -920,11 +1059,13 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
                 .and_then(|g| g.as_array())
                 .map(|rows| {
                     rows.iter()
-                        .map(|g| format!(
-                            "{}@{}",
-                            g["id"].as_str().unwrap_or(""),
-                            g["updated_at"].as_str().unwrap_or("")
-                        ))
+                        .map(|g| {
+                            format!(
+                                "{}@{}",
+                                g["id"].as_str().unwrap_or(""),
+                                g["updated_at"].as_str().unwrap_or("")
+                            )
+                        })
                         .collect::<Vec<_>>()
                         .join(",")
                 })
@@ -944,9 +1085,13 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
                 {
                     if res.status().is_success() {
                         if next > since {
-                            state.store.set_consolidation_state("peer_sharing_push_ts", &next)?;
+                            state
+                                .store
+                                .set_consolidation_state("peer_sharing_push_ts", &next)?;
                         }
-                        state.store.set_consolidation_state("peer_sharing_groups_sig", &groups_sig)?;
+                        state
+                            .store
+                            .set_consolidation_state("peer_sharing_groups_sig", &groups_sig)?;
                     }
                 }
             }
@@ -963,10 +1108,16 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
         {
             if res.status().is_success() {
                 if let Ok(batch) = res.json::<Value>().await {
-                    let next = batch.get("next").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                    let next = batch
+                        .get("next")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let _ = state.store.sharing_sync_apply(&batch);
                     if !next.is_empty() && next > since_pull {
-                        state.store.set_consolidation_state("peer_sharing_pull_ts", &next)?;
+                        state
+                            .store
+                            .set_consolidation_state("peer_sharing_pull_ts", &next)?;
                     }
                 }
             }
@@ -991,7 +1142,11 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
             .consolidation_state("peer_telemetry_push_ts")?
             .unwrap_or_default();
         if let Ok(batch) = state.store.telemetry_since(&since, 2000) {
-            let next = batch.get("next").and_then(|n| n.as_str()).unwrap_or(&since).to_string();
+            let next = batch
+                .get("next")
+                .and_then(|n| n.as_str())
+                .unwrap_or(&since)
+                .to_string();
             if let Ok(res) = client
                 .post(format!("{url}/v1/sync/telemetry"))
                 .bearer_auth(&key)
@@ -1000,7 +1155,9 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
                 .await
             {
                 if res.status().is_success() && next > since {
-                    state.store.set_consolidation_state("peer_telemetry_push_ts", &next)?;
+                    state
+                        .store
+                        .set_consolidation_state("peer_telemetry_push_ts", &next)?;
                 }
             }
         }
@@ -1016,10 +1173,16 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
         {
             if res.status().is_success() {
                 if let Ok(batch) = res.json::<Value>().await {
-                    let next = batch.get("next").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                    let next = batch
+                        .get("next")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let _ = state.store.apply_telemetry(&batch);
                     if next > since_pull {
-                        state.store.set_consolidation_state("peer_telemetry_pull_ts", &next)?;
+                        state
+                            .store
+                            .set_consolidation_state("peer_telemetry_pull_ts", &next)?;
                     }
                 }
             }
@@ -1037,7 +1200,11 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
             .consolidation_state("peer_llm_usage_push_ts")?
             .unwrap_or_default();
         if let Ok(batch) = state.store.llm_usage_since(&since, 2000) {
-            let next = batch.get("next").and_then(|n| n.as_str()).unwrap_or(&since).to_string();
+            let next = batch
+                .get("next")
+                .and_then(|n| n.as_str())
+                .unwrap_or(&since)
+                .to_string();
             if let Ok(res) = client
                 .post(format!("{url}/v1/sync/llm_usage"))
                 .bearer_auth(&key)
@@ -1046,7 +1213,9 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
                 .await
             {
                 if res.status().is_success() && next > since {
-                    state.store.set_consolidation_state("peer_llm_usage_push_ts", &next)?;
+                    state
+                        .store
+                        .set_consolidation_state("peer_llm_usage_push_ts", &next)?;
                 }
             }
         }
@@ -1062,10 +1231,16 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
         {
             if res.status().is_success() {
                 if let Ok(batch) = res.json::<Value>().await {
-                    let next = batch.get("next").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                    let next = batch
+                        .get("next")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let _ = state.store.apply_llm_usage(&batch);
                     if next > since_pull {
-                        state.store.set_consolidation_state("peer_llm_usage_pull_ts", &next)?;
+                        state
+                            .store
+                            .set_consolidation_state("peer_llm_usage_pull_ts", &next)?;
                     }
                 }
             }
@@ -1099,7 +1274,11 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
                 _ => state.store.device_states_since(&since, 2000),
             };
             if let Ok(batch) = batch {
-                let next = batch.get("next").and_then(|n| n.as_str()).unwrap_or(&since).to_string();
+                let next = batch
+                    .get("next")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or(&since)
+                    .to_string();
                 if let Ok(res) = client
                     .post(format!("{url}/v1/sync/{path}"))
                     .bearer_auth(&key)
@@ -1126,8 +1305,11 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
             {
                 if res.status().is_success() {
                     if let Ok(batch) = res.json::<Value>().await {
-                        let next =
-                            batch.get("next").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                        let next = batch
+                            .get("next")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         let _ = match path {
                             "locations" => state.store.observations_apply(&batch),
                             "contacts" => state.store.contacts_apply(&batch),
@@ -1155,7 +1337,11 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
             .consolidation_state("peer_notif_push_ts")?
             .unwrap_or_default();
         if let Ok(batch) = state.store.notifications_since(&since, 500) {
-            let next = batch.get("next").and_then(|n| n.as_str()).unwrap_or(&since).to_string();
+            let next = batch
+                .get("next")
+                .and_then(|n| n.as_str())
+                .unwrap_or(&since)
+                .to_string();
             if let Ok(res) = client
                 .post(format!("{url}/v1/sync/notifications"))
                 .bearer_auth(&key)
@@ -1165,7 +1351,9 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
             {
                 // 404 = an older peer without v38: skip, never fail (wire discipline)
                 if res.status().is_success() && next > since {
-                    state.store.set_consolidation_state("peer_notif_push_ts", &next)?;
+                    state
+                        .store
+                        .set_consolidation_state("peer_notif_push_ts", &next)?;
                 }
             }
         }
@@ -1181,10 +1369,16 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
         {
             if res.status().is_success() {
                 if let Ok(batch) = res.json::<Value>().await {
-                    let next = batch.get("next").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                    let next = batch
+                        .get("next")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let _ = state.store.apply_notifications(&batch);
                     if next > since_pull {
-                        state.store.set_consolidation_state("peer_notif_pull_ts", &next)?;
+                        state
+                            .store
+                            .set_consolidation_state("peer_notif_pull_ts", &next)?;
                     }
                 }
             }
@@ -1200,7 +1394,11 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
             .consolidation_state("peer_verdict_push_ts")?
             .unwrap_or_default();
         if let Ok(batch) = state.store.verdicts_since(&since, 500) {
-            let next = batch.get("next").and_then(|n| n.as_str()).unwrap_or(&since).to_string();
+            let next = batch
+                .get("next")
+                .and_then(|n| n.as_str())
+                .unwrap_or(&since)
+                .to_string();
             if let Ok(res) = client
                 .post(format!("{url}/v1/sync/extractions"))
                 .bearer_auth(&key)
@@ -1209,7 +1407,9 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
                 .await
             {
                 if res.status().is_success() && next > since {
-                    state.store.set_consolidation_state("peer_verdict_push_ts", &next)?;
+                    state
+                        .store
+                        .set_consolidation_state("peer_verdict_push_ts", &next)?;
                 }
             }
         }
@@ -1225,13 +1425,19 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
         {
             if res.status().is_success() {
                 if let Ok(batch) = res.json::<Value>().await {
-                    let next = batch.get("next").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                    let next = batch
+                        .get("next")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let _ = state.store.apply_verdicts(
                         &hearthloom_core::store::Actor::new(format!("peer:{name}")),
                         &batch,
                     );
                     if next > since_pull {
-                        state.store.set_consolidation_state("peer_verdict_pull_ts", &next)?;
+                        state
+                            .store
+                            .set_consolidation_state("peer_verdict_pull_ts", &next)?;
                     }
                 }
             }
@@ -1249,7 +1455,10 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
             .unwrap_or_default();
         if let Ok(kv) = state.store.plugin_kv_since(&since, 500) {
             if !kv.is_empty() {
-                let next = state.store.plugin_kv_cursor(&since, 500).unwrap_or_else(|_| since.clone());
+                let next = state
+                    .store
+                    .plugin_kv_cursor(&since, 500)
+                    .unwrap_or_else(|_| since.clone());
                 let batch = json!({
                     "kv": kv.iter()
                         .map(|(p, k, v, ts)| json!([p, k, v, ts]))
@@ -1263,7 +1472,9 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
                     .await
                 {
                     if res.status().is_success() && next > since {
-                        state.store.set_consolidation_state("peer_plugin_kv_push_ts", &next)?;
+                        state
+                            .store
+                            .set_consolidation_state("peer_plugin_kv_push_ts", &next)?;
                     }
                 }
             }
@@ -1280,7 +1491,11 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
         {
             if res.status().is_success() {
                 if let Ok(batch) = res.json::<Value>().await {
-                    let next = batch.get("next").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                    let next = batch
+                        .get("next")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let rows: Vec<(String, String, String, String)> = batch
                         .get("kv")
                         .and_then(|v| v.as_array())
@@ -1300,7 +1515,9 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
                         .unwrap_or_default();
                     let _ = state.store.apply_plugin_kv(&rows);
                     if next > since_pull {
-                        state.store.set_consolidation_state("peer_plugin_kv_pull_ts", &next)?;
+                        state
+                            .store
+                            .set_consolidation_state("peer_plugin_kv_pull_ts", &next)?;
                     }
                     // files: fetch any entry newer than what's on disk
                     if let Some(files) = batch.get("files").and_then(|v| v.as_array()) {
@@ -1318,7 +1535,9 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
                             if !mirrored_here {
                                 continue;
                             }
-                            let Ok(rel) = crate::plugins::safe_rel_path(rel) else { continue };
+                            let Ok(rel) = crate::plugins::safe_rel_path(rel) else {
+                                continue;
+                            };
                             let local = crate::plugins::plugin_dir(state, plugin)
                                 .join("data")
                                 .join(rel);
@@ -1343,19 +1562,23 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
                                 if res.status().is_success() {
                                     if let Ok(bytes) = res.bytes().await {
                                         let local = local.clone();
-                                        let _ = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-                                            if let Some(parent) = local.parent() {
-                                                std::fs::create_dir_all(parent)?;
-                                            }
-                                            std::fs::write(&local, &bytes)?;
-                                            // stamp the peer's mtime so LWW converges
-                                            let f = std::fs::File::options().write(true).open(&local)?;
-                                            f.set_modified(
-                                                std::time::UNIX_EPOCH
-                                                    + std::time::Duration::from_secs(mtime),
-                                            )?;
-                                            Ok(())
-                                        })
+                                        let _ = tokio::task::spawn_blocking(
+                                            move || -> anyhow::Result<()> {
+                                                if let Some(parent) = local.parent() {
+                                                    std::fs::create_dir_all(parent)?;
+                                                }
+                                                std::fs::write(&local, &bytes)?;
+                                                // stamp the peer's mtime so LWW converges
+                                                let f = std::fs::File::options()
+                                                    .write(true)
+                                                    .open(&local)?;
+                                                f.set_modified(
+                                                    std::time::UNIX_EPOCH
+                                                        + std::time::Duration::from_secs(mtime),
+                                                )?;
+                                                Ok(())
+                                            },
+                                        )
                                         .await;
                                     }
                                 }
@@ -1372,9 +1595,12 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
         .consolidation_state("peer_first_sync_notified")?
         .is_none()
     {
-        state.store.set_consolidation_state("peer_first_sync_notified", "1")?;
+        state
+            .store
+            .set_consolidation_state("peer_first_sync_notified", "1")?;
         crate::provisioner::notify_system(
-            state, "info",
+            state,
+            "info",
             &format!("First sync with {name} completed"),
             "your two nodes are converging — new memories now flow both ways",
             Some("first-sync"),
@@ -1425,8 +1651,11 @@ pub async fn run_loop(state: AppState) {
             Err(err) => {
                 tracing::warn!("peer sync skipped: {err:#}");
                 crate::monitor::log(
-                    &state, "warn", "sync_failed",
-                    &format!("peer sync skipped: {err:#}"), None,
+                    &state,
+                    "warn",
+                    "sync_failed",
+                    &format!("peer sync skipped: {err:#}"),
+                    None,
                 );
                 // FAILSAFE: a failed cycle (peer restarting, transient
                 // 502) retries once after 60s instead of waiting out the
@@ -1458,7 +1687,9 @@ pub async fn run_loop(state: AppState) {
                     .set_consolidation_state("peer_fail_streak", &streak.to_string());
                 if streak == 5 {
                     crate::provisioner::notify_system(
-                        &state, "warn", "Peer sync has been failing",
+                        &state,
+                        "warn",
+                        "Peer sync has been failing",
                         "five consecutive cycles couldn't reach your other node — \
                          check it on the Peering page",
                         Some("sync-failing"),
@@ -1479,7 +1710,10 @@ mod tests {
         // scopes and the operational snapshot fully mirrored is NOT the
         // 82% the episodes-only bar showed — it's Σdone/Σtotal.
         let cats = [(4120, 5000), (12, 12), (640, 640)];
-        assert_eq!(total_pct(&cats), 100 * (4120 + 12 + 640) / (5000 + 12 + 640)); // 84
+        assert_eq!(
+            total_pct(&cats),
+            100 * (4120 + 12 + 640) / (5000 + 12 + 640)
+        ); // 84
         assert_eq!(total_pct(&cats), 84);
         // a tiny finished category barely moves a huge unfinished one
         assert_eq!(total_pct(&[(0, 10_000), (5, 5)]), 0);

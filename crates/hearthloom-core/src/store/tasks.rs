@@ -40,7 +40,9 @@ pub fn extract_hashtags(text: &str) -> (String, Vec<String>) {
     let mut clean = Vec::new();
     for word in text.split_whitespace() {
         if let Some(tag) = word.strip_prefix('#').filter(|t| {
-            t.len() >= 2 && t.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            t.len() >= 2
+                && t.chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
         }) {
             let tag = tag.to_lowercase();
             if !tags.contains(&tag) {
@@ -278,11 +280,7 @@ fn workout_metrics(payload: &Value) -> Vec<(String, f64, &'static str)> {
                     .find_map(|k| get(k).and_then(|v| v.as_str()))
                     .unwrap_or("flexibility");
                 if let Some(seconds) = get("seconds").and_then(|v| v.as_f64()) {
-                    out.push((
-                        format!("flexibility/{}/seconds", slug(name)),
-                        seconds,
-                        "s",
-                    ));
+                    out.push((format!("flexibility/{}/seconds", slug(name)), seconds, "s"));
                 }
             }
             _ => {}
@@ -430,9 +428,7 @@ impl Store {
         let conn = self.lock();
         // Archived (and legacy 'deleted') tasks are hidden by default;
         // asking for status=archived opens the drawer.
-        let mut sql = format!(
-            "SELECT {TASK_COLUMNS} FROM tasks WHERE 1=1{guard}"
-        );
+        let mut sql = format!("SELECT {TASK_COLUMNS} FROM tasks WHERE 1=1{guard}");
         match status {
             Some("archived") => sql.push_str(" AND status IN ('archived', 'deleted')"),
             Some(_) => sql.push_str(" AND status = ?1"),
@@ -491,11 +487,16 @@ impl Store {
         let placeholders: Vec<String> = (1..=cols.len()).map(|i| format!("?{i}")).collect();
         let sql = format!(
             "INSERT OR REPLACE INTO tasks ({}) VALUES ({})",
-            cols.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", "),
+            cols.iter()
+                .map(|c| c.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
             placeholders.join(", ")
         );
-        let params: Vec<rusqlite::types::Value> =
-            cols.iter().map(|c| super::json_to_sql(&map[c.as_str()])).collect();
+        let params: Vec<rusqlite::types::Value> = cols
+            .iter()
+            .map(|c| super::json_to_sql(&map[c.as_str()]))
+            .collect();
         conn.execute(&sql, rusqlite::params_from_iter(params))?;
         if let Some(desc) = map.get("description").and_then(|v| v.as_str()) {
             index_task_mentions(&conn, id, desc)?;
@@ -522,11 +523,16 @@ impl Store {
             let desc = post
                 .as_deref()
                 .and_then(|p| serde_json::from_str::<Value>(p).ok())
-                .and_then(|o| o.get("description").and_then(|d| d.as_str()).map(String::from))
+                .and_then(|o| {
+                    o.get("description")
+                        .and_then(|d| d.as_str())
+                        .map(String::from)
+                })
                 .unwrap_or_default();
             Ok((id, desc, ts))
         })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>().map_err(Into::into)
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// Permanently remove an ARCHIVED task row. Tasks are operational
@@ -619,18 +625,21 @@ impl Store {
         if let Some(raw) = description.map(str::trim).filter(|d| !d.is_empty()) {
             // Edits stay hashtag-aware: "#urgent fix the fence" retags.
             let (clean, new_tags) = extract_hashtags(raw);
-            let clean = if clean.trim().is_empty() { raw } else { clean.trim() };
+            let clean = if clean.trim().is_empty() {
+                raw
+            } else {
+                clean.trim()
+            };
             changed += conn.execute(
                 "UPDATE tasks SET description = ?1, updated_at = ?2 WHERE id = ?3",
                 rusqlite::params![clean, now, id],
             )?;
             index_task_mentions(&conn, id, clean)?;
             if !new_tags.is_empty() {
-                let existing: Option<String> = conn.query_row(
-                    "SELECT tags FROM tasks WHERE id = ?1",
-                    [id],
-                    |row| row.get(0),
-                )?;
+                let existing: Option<String> =
+                    conn.query_row("SELECT tags FROM tasks WHERE id = ?1", [id], |row| {
+                        row.get(0)
+                    })?;
                 let mut tags: Vec<String> = existing
                     .and_then(|t| serde_json::from_str(&t).ok())
                     .unwrap_or_default();
@@ -749,7 +758,11 @@ impl Store {
         });
 
         // Phase 2, lock released: mint the episode via the one write path.
-        let episode_kind = if task.kind == "workout" { "workout" } else { "task_done" };
+        let episode_kind = if task.kind == "workout" {
+            "workout"
+        } else {
+            "task_done"
+        };
         let body = render_completion_body(&task, template.as_ref());
         let draft = crate::ingest::EpisodeDraft {
             source: "desk".into(),
@@ -822,24 +835,26 @@ impl Store {
                 .as_deref()
                 .and_then(|r| next_occurrence(r, &task.frequency))
                 .or_else(|| next_occurrence(&now, &task.frequency));
-            Some(self.add_task(
-                actor,
-                &task.kind,
-                &task.description,
-                // Checklists recur unchecked; forms recur empty.
-                match task.kind.as_str() {
-                    "checklist" => task.payload.clone().map(|p| reset_checklist(&p)),
-                    "form" | "workout" => None,
-                    _ => task.payload.clone(),
-                }
-                .as_ref(),
-                task.template_id.as_deref(),
-                &task.frequency,
-                &task.scope,
-                task.goal_id.as_deref(),
-                next_remind.as_deref(),
-                &task.tags,
-            )?)
+            Some(
+                self.add_task(
+                    actor,
+                    &task.kind,
+                    &task.description,
+                    // Checklists recur unchecked; forms recur empty.
+                    match task.kind.as_str() {
+                        "checklist" => task.payload.clone().map(|p| reset_checklist(&p)),
+                        "form" | "workout" => None,
+                        _ => task.payload.clone(),
+                    }
+                    .as_ref(),
+                    task.template_id.as_deref(),
+                    &task.frequency,
+                    &task.scope,
+                    task.goal_id.as_deref(),
+                    next_remind.as_deref(),
+                    &task.tags,
+                )?,
+            )
         } else {
             None
         };
@@ -847,7 +862,10 @@ impl Store {
         Ok(CompletionOutcome {
             episode_id,
             next_task_id,
-            offer_note: template.as_ref().map(|t| t.note_on_complete).unwrap_or(false),
+            offer_note: template
+                .as_ref()
+                .map(|t| t.note_on_complete)
+                .unwrap_or(false),
         })
     }
 
@@ -913,7 +931,9 @@ impl Store {
             .query_map([], |row| row.get(0))?
             .collect::<std::result::Result<_, _>>()?;
         for payload in payloads {
-            let Ok(value) = serde_json::from_str::<Value>(&payload) else { continue };
+            let Ok(value) = serde_json::from_str::<Value>(&payload) else {
+                continue;
+            };
             for exercise in value
                 .get("exercises")
                 .and_then(|v| v.as_array())
@@ -921,9 +941,15 @@ impl Store {
                 .flatten()
             {
                 let name = exercise.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let category = exercise.get("category").and_then(|v| v.as_str()).unwrap_or("");
+                let category = exercise
+                    .get("category")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 if !name.is_empty() {
-                    remember(format!("{category}/{}", name.to_lowercase()), exercise.clone());
+                    remember(
+                        format!("{category}/{}", name.to_lowercase()),
+                        exercise.clone(),
+                    );
                 }
             }
         }
@@ -940,7 +966,9 @@ impl Store {
             .collect::<std::result::Result<_, _>>()?;
         for (metric, value) in rows {
             let parts: Vec<&str> = metric.split('/').collect();
-            let [category, slug, measure] = parts.as_slice() else { continue };
+            let [category, slug, measure] = parts.as_slice() else {
+                continue;
+            };
             let name = slug.replace('_', " ");
             let key = format!("{category}/{name}");
             match (*category, *measure) {
@@ -977,9 +1005,7 @@ impl Store {
                    AND id NOT IN (SELECT DISTINCT episode_id FROM metric_points)
                  LIMIT ?1",
             )?;
-            let rows = stmt.query_map([cap as i64], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?;
+            let rows = stmt.query_map([cap as i64], |row| Ok((row.get(0)?, row.get(1)?)))?;
             rows.collect::<std::result::Result<_, _>>()?
         };
         let mut minted = 0usize;
@@ -997,11 +1023,12 @@ impl Store {
             let Ok(text) = std::fs::read_to_string(home.root().join(&content_ref)) else {
                 continue;
             };
-            let Some(payload_line) = text.lines().find_map(|l| l.strip_prefix("payload: "))
-            else {
+            let Some(payload_line) = text.lines().find_map(|l| l.strip_prefix("payload: ")) else {
                 continue;
             };
-            let Ok(payload) = serde_json::from_str::<Value>(payload_line) else { continue };
+            let Ok(payload) = serde_json::from_str::<Value>(payload_line) else {
+                continue;
+            };
             let conn = self.lock();
             for (metric, value, unit) in workout_metrics(&payload) {
                 minted += conn.execute(
@@ -1141,7 +1168,10 @@ impl Store {
                      VALUES (?1, 'plain', ?2, ?3, NULL, NULL, 'one-time', 'personal',
                              NULL, ?4, ?5, ?6, ?7, ?7)",
                     rusqlite::params![
-                        id, title, serde_json::to_string(&tags)?, due,
+                        id,
+                        title,
+                        serde_json::to_string(&tags)?,
+                        due,
                         if completed { "done" } else { "open" },
                         if completed { Some(now.as_str()) } else { None },
                         now
@@ -1222,8 +1252,18 @@ mod tests {
         drop(conn);
 
         let id = store
-            .add_task(&actor(), "plain", "Send report to @[Ada Lovelace] by Friday",
-                None, None, "one-time", "personal", None, None, &[])
+            .add_task(
+                &actor(),
+                "plain",
+                "Send report to @[Ada Lovelace] by Friday",
+                None,
+                None,
+                "one-time",
+                "personal",
+                None,
+                None,
+                &[],
+            )
             .unwrap();
         let hits = store.tasks_mentioning("en_ada", 10).unwrap();
         assert_eq!(hits.len(), 1, "picked mention links the task to the entity");
@@ -1231,7 +1271,15 @@ mod tests {
 
         // Bare @text never links; editing away the mention unlinks.
         store
-            .update_task(&actor(), &id, Some("email @ada instead"), None, None, None, None)
+            .update_task(
+                &actor(),
+                &id,
+                Some("email @ada instead"),
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert!(store.tasks_mentioning("en_ada", 10).unwrap().is_empty());
     }
@@ -1374,14 +1422,30 @@ mod tests {
         let (_tmp, _home, store) = setup();
         store
             .add_task(
-                &actor(), "plain", "secret errand", None, None, "one-time",
-                "private", None, None, &[],
+                &actor(),
+                "plain",
+                "secret errand",
+                None,
+                None,
+                "one-time",
+                "private",
+                None,
+                None,
+                &[],
             )
             .unwrap();
         store
             .add_task(
-                &actor(), "plain", "public errand", None, None, "one-time",
-                "personal", None, None, &[],
+                &actor(),
+                "plain",
+                "public errand",
+                None,
+                None,
+                "one-time",
+                "personal",
+                None,
+                None,
+                &[],
             )
             .unwrap();
         assert_eq!(store.list_tasks(None, 50).unwrap().len(), 1);

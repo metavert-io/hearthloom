@@ -308,7 +308,13 @@ impl Store {
             })?
             .collect::<std::result::Result<_, _>>()?;
         drop(stmt);
-        let next = super::page_cursor(&conn, "synced_at", "FROM llm_usage WHERE synced_at > ?1", since, limit)?;
+        let next = super::page_cursor(
+            &conn,
+            "synced_at",
+            "FROM llm_usage WHERE synced_at > ?1",
+            since,
+            limit,
+        )?;
         Ok(json!({ "items": items, "next": next }))
     }
 
@@ -316,7 +322,11 @@ impl Store {
     pub fn apply_llm_usage(&self, batch: &Value) -> Result<usize> {
         let conn = self.lock();
         let mut applied = 0usize;
-        for r in batch.get("items").and_then(|v| v.as_array()).unwrap_or(&vec![]) {
+        for r in batch
+            .get("items")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&vec![])
+        {
             applied += conn.execute(
                 "INSERT OR IGNORE INTO llm_usage (id, ts, node, purpose, ref_id, provider,
                      model, tier, input_tokens, output_tokens, cache_creation_tokens,
@@ -333,8 +343,12 @@ impl Store {
                     r.get("tier").and_then(|v| v.as_str()),
                     r.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
                     r.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
-                    r.get("cache_creation_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
-                    r.get("cache_read_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
+                    r.get("cache_creation_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
+                    r.get("cache_read_tokens")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0),
                     r.get("latency_ms").and_then(|v| v.as_i64()).unwrap_or(0),
                     r.get("status").and_then(|v| v.as_str()).unwrap_or("ok"),
                     r.get("items").and_then(|v| v.as_i64()).unwrap_or(0),
@@ -350,7 +364,11 @@ mod tests {
     use super::*;
 
     fn usage(input: i64, output: i64) -> Usage {
-        Usage { input_tokens: input, output_tokens: output, ..Default::default() }
+        Usage {
+            input_tokens: input,
+            output_tokens: output,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -358,22 +376,53 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         store.vault_unlock(5);
         store
-            .record_llm_usage("local", "ask", Some("ask_1"), "anthropic",
-                "claude-opus-4-8", "high", &usage(1000, 200), 850, "ok")
+            .record_llm_usage(
+                "local",
+                "ask",
+                Some("ask_1"),
+                "anthropic",
+                "claude-opus-4-8",
+                "high",
+                &usage(1000, 200),
+                850,
+                "ok",
+            )
             .unwrap();
         store
-            .record_llm_usage("local", "daily_digest", None, "anthropic",
-                "claude-sonnet-4-6", "medium", &usage(5000, 800), 1200, "ok")
+            .record_llm_usage(
+                "local",
+                "daily_digest",
+                None,
+                "anthropic",
+                "claude-sonnet-4-6",
+                "medium",
+                &usage(5000, 800),
+                1200,
+                "ok",
+            )
             .unwrap();
         store
-            .record_llm_usage("local", "ask", Some("ask_1"), "anthropic",
-                "claude-opus-4-8", "high", &usage(0, 0), 300, "error")
+            .record_llm_usage(
+                "local",
+                "ask",
+                Some("ask_1"),
+                "anthropic",
+                "claude-opus-4-8",
+                "high",
+                &usage(0, 0),
+                300,
+                "error",
+            )
             .unwrap();
 
         let s = store.llm_usage_summary(1, None).unwrap();
         assert_eq!(s["purposes"].as_array().unwrap().len(), 2);
-        let ask = s["purposes"].as_array().unwrap().iter()
-            .find(|p| p["key"] == "ask").unwrap();
+        let ask = s["purposes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["key"] == "ask")
+            .unwrap();
         assert_eq!(ask["calls"], 2);
         assert_eq!(ask["input_tokens"], 1000);
         assert_eq!(ask["errors"], 1);
@@ -387,17 +436,37 @@ mod tests {
     #[test]
     fn test_local_model_runs_are_ledger_rows_and_sync() {
         let a = Store::open_in_memory().unwrap();
-        a.record_local_model_run("local", "embed_backfill", "all-MiniLM-L6-v2", 300, 4200).unwrap();
-        a.record_llm_usage("local", "ask", None, "anthropic",
-            "claude-opus-4-8", "high", &usage(1000, 200), 850, "ok").unwrap();
+        a.record_local_model_run("local", "embed_backfill", "all-MiniLM-L6-v2", 300, 4200)
+            .unwrap();
+        a.record_llm_usage(
+            "local",
+            "ask",
+            None,
+            "anthropic",
+            "claude-opus-4-8",
+            "high",
+            &usage(1000, 200),
+            850,
+            "ok",
+        )
+        .unwrap();
         a.vault_unlock(5);
         let cells = a.llm_spend_cells("2000-01-01", "2999-01-01", None).unwrap();
-        let run = cells.iter().find(|c| c["purpose"] == "embed_backfill").unwrap();
+        let run = cells
+            .iter()
+            .find(|c| c["purpose"] == "embed_backfill")
+            .unwrap();
         assert_eq!(run["model"], "local:all-MiniLM-L6-v2");
         assert_eq!(run["provider"], "local");
-        assert_eq!((run["items"].as_i64(), run["calls"].as_i64()), (Some(300), Some(1)));
+        assert_eq!(
+            (run["items"].as_i64(), run["calls"].as_i64()),
+            (Some(300), Some(1))
+        );
         assert_eq!(run["input_tokens"], 0);
-        assert!(crate::provider::pricing_for(run["model"].as_str().unwrap()).is_some(), "free, not unpriced");
+        assert!(
+            crate::provider::pricing_for(run["model"].as_str().unwrap()).is_some(),
+            "free, not unpriced"
+        );
         a.vault_lock();
 
         // The budget's raw material is readable with the vault locked.
@@ -405,7 +474,10 @@ mod tests {
         assert_eq!(totals.len(), 2);
         let opus = totals.iter().find(|(m, _)| m == "claude-opus-4-8").unwrap();
         assert_eq!((opus.1.input_tokens, opus.1.output_tokens), (1000, 200));
-        assert!(a.llm_usage_totals("2999-01-01", "2999-02-01").unwrap().is_empty());
+        assert!(a
+            .llm_usage_totals("2999-01-01", "2999-02-01")
+            .unwrap()
+            .is_empty());
 
         // `items` crosses the sync leg; a batch from a peer that predates
         // the field applies with 0.
@@ -414,7 +486,13 @@ mod tests {
         assert_eq!(b.apply_llm_usage(&batch).unwrap(), 2);
         b.vault_unlock(5);
         let synced = b.llm_spend_cells("2000-01-01", "2999-01-01", None).unwrap();
-        assert_eq!(synced.iter().find(|c| c["purpose"] == "embed_backfill").unwrap()["items"], 300);
+        assert_eq!(
+            synced
+                .iter()
+                .find(|c| c["purpose"] == "embed_backfill")
+                .unwrap()["items"],
+            300
+        );
         b.vault_lock();
         let c = Store::open_in_memory().unwrap();
         for row in batch["items"].as_array_mut().unwrap() {
@@ -427,8 +505,17 @@ mod tests {
     fn test_reads_blanket_gated_on_vault() {
         let store = Store::open_in_memory().unwrap();
         store
-            .record_llm_usage("local", "ask", Some("a"), "anthropic",
-                "claude-opus-4-8", "high", &usage(1, 1), 1, "ok")
+            .record_llm_usage(
+                "local",
+                "ask",
+                Some("a"),
+                "anthropic",
+                "claude-opus-4-8",
+                "high",
+                &usage(1, 1),
+                1,
+                "ok",
+            )
             .unwrap();
         // Locked: both read surfaces refuse outright (no filtered view).
         assert!(store.llm_usage_summary(1, None).is_err());
@@ -445,10 +532,30 @@ mod tests {
     fn test_apply_is_replay_safe_union() {
         let a = Store::open_in_memory().unwrap();
         let b = Store::open_in_memory().unwrap();
-        a.record_llm_usage("local", "ask", None, "anthropic",
-            "claude-haiku-4-5", "low", &usage(10, 5), 40, "ok").unwrap();
-        b.record_llm_usage("cloud", "extraction", None, "anthropic",
-            "claude-sonnet-4-6", "medium", &usage(20, 8), 90, "ok").unwrap();
+        a.record_llm_usage(
+            "local",
+            "ask",
+            None,
+            "anthropic",
+            "claude-haiku-4-5",
+            "low",
+            &usage(10, 5),
+            40,
+            "ok",
+        )
+        .unwrap();
+        b.record_llm_usage(
+            "cloud",
+            "extraction",
+            None,
+            "anthropic",
+            "claude-sonnet-4-6",
+            "medium",
+            &usage(20, 8),
+            90,
+            "ok",
+        )
+        .unwrap();
         let batch = a.llm_usage_since("", 100).unwrap();
         assert_eq!(b.apply_llm_usage(&batch).unwrap(), 1);
         assert_eq!(b.apply_llm_usage(&batch).unwrap(), 0); // replay = no-op

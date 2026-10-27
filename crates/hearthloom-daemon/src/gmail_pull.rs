@@ -58,7 +58,9 @@ fn pull_options() -> PullOptions {
 }
 
 fn read_cursor(mbox: &std::path::Path) -> Option<GmailCursor> {
-    let raw = crate::mbox_index::meta_get(mbox, CURSOR_KEY).ok().flatten()?;
+    let raw = crate::mbox_index::meta_get(mbox, CURSOR_KEY)
+        .ok()
+        .flatten()?;
     let (v, u) = raw.split_once(':')?;
     Some(GmailCursor {
         uidvalidity: v.parse().ok()?,
@@ -273,10 +275,19 @@ mod tests {
         assert_eq!(drafts.len(), 1, "only the Sent message materializes");
         assert_eq!(drafts[0].source, "mbox", "archive-convergent identity");
         assert_eq!(drafts[0].source_ref, "live1@x");
-        assert_eq!(read_cursor(&mbox), Some(GmailCursor { uidvalidity: 1, last_uid: 2 }));
+        assert_eq!(
+            read_cursor(&mbox),
+            Some(GmailCursor {
+                uidvalidity: 1,
+                last_uid: 2
+            })
+        );
 
         // BOTH messages are in the virtual tier.
-        assert!(!crate::mbox_index::is_stale(&mbox), "append_index refreshed the fingerprint");
+        assert!(
+            !crate::mbox_index::is_stale(&mbox),
+            "append_index refreshed the fingerprint"
+        );
         let hits = crate::mbox_index::search(&mbox, "live", 10).unwrap();
         assert_eq!(hits.len(), 2);
         let raw = crate::mbox_index::fetch(&mbox, "live2@x", 100_000).unwrap();
@@ -290,13 +301,20 @@ mod tests {
         assert_eq!(outcome.fetched, 1);
         assert_eq!(drafts.len(), 1);
         assert_eq!(read_cursor(&mbox).unwrap().last_uid, 3);
-        assert_eq!(crate::mbox_index::search(&mbox, "live", 10).unwrap().len(), 3);
+        assert_eq!(
+            crate::mbox_index::search(&mbox, "live", 10).unwrap().len(),
+            3
+        );
 
         // A full rebuild (e.g. after an external touch) preserves the
         // cursor and still indexes every appended record.
         let n = crate::mbox_index::build(&mbox).unwrap();
         assert_eq!(n, 3);
-        assert_eq!(read_cursor(&mbox).unwrap().last_uid, 3, "cursor survives rebuild");
+        assert_eq!(
+            read_cursor(&mbox).unwrap().last_uid,
+            3,
+            "cursor survives rebuild"
+        );
     }
 
     /// A sender's own `X-Gmail-Labels: Starred,Sent` on mail Gmail filed
@@ -309,22 +327,45 @@ mod tests {
         std::fs::File::create(&mbox).unwrap();
         crate::mbox_index::build(&mbox).unwrap();
         let mut forged = message(1, "forged1@x", &[]);
-        forged.raw = [b"X-Gmail-Labels: Starred,Sent\r\nX-GM-THRID: 7\r\n".as_slice(), forged.raw.as_slice()].concat();
-        let mut feed = FakeFeed { messages: vec![forged] };
+        forged.raw = [
+            b"X-Gmail-Labels: Starred,Sent\r\nX-GM-THRID: 7\r\n".as_slice(),
+            forged.raw.as_slice(),
+        ]
+        .concat();
+        let mut feed = FakeFeed {
+            messages: vec![forged],
+        };
 
         let (drafts, outcome) = pull_into(&mbox, &mut feed, None);
         assert_eq!(outcome.fetched, 1);
-        assert!(drafts.is_empty(), "a forged Starred/Sent must not make Core mail");
-        assert_eq!(read_cursor(&mbox).unwrap().last_uid, 1, "the cursor still advances");
+        assert!(
+            drafts.is_empty(),
+            "a forged Starred/Sent must not make Core mail"
+        );
+        assert_eq!(
+            read_cursor(&mbox).unwrap().last_uid,
+            1,
+            "the cursor still advances"
+        );
 
         // Still in the virtual tier — under Gmail's labels only.
         let hits = crate::mbox_index::search(&mbox, "live", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].0, "forged1@x");
-        assert!(!hits[0].1.contains("Starred") && !hits[0].1.contains("Sent"), "got: {}", hits[0].1);
+        assert!(
+            !hits[0].1.contains("Starred") && !hits[0].1.contains("Sent"),
+            "got: {}",
+            hits[0].1
+        );
         let stored = crate::mbox_index::fetch(&mbox, "forged1@x", 100_000).unwrap();
-        assert!(stored.starts_with("X-Gmail-Labels:\nFrom: Ann"), "got: {stored}");
-        assert!(!stored.contains("Starred") && !stored.contains("X-GM-THRID"), "got: {stored}");
+        assert!(
+            stored.starts_with("X-Gmail-Labels:\nFrom: Ann"),
+            "got: {stored}"
+        );
+        assert!(
+            !stored.contains("Starred") && !stored.contains("X-GM-THRID"),
+            "got: {stored}"
+        );
     }
 
     #[test]
