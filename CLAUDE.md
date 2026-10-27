@@ -14,20 +14,27 @@ holds the maintainer's local deploy settings and points to local work
 notes (design log cited below by date, plans, research), which are
 not part of the repository.
 
-## Build checks (run all three before calling anything done)
+## Build checks (run all of these before calling anything done)
 
 ```
+cargo fmt --all
 cargo build --workspace
-cargo clippy --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-GitHub Actions runs the same three on Linux (how hosted nodes run) and
+GitHub Actions runs the same checks on Linux (how hosted nodes run) and
 macOS for every push to `main` and every pull request
-(`.github/workflows/ci.yml`; clippy warnings don't fail it), with CodeQL
-and a gitleaks secret scan alongside: check `gh run list` after pushing.
-Because of the Linux job, a shell-out to a macOS-only tool (`ditto`,
-`launchctl`, `osascript`…) needs a fallback or a `cfg` gate.
+(`.github/workflows/ci.yml`: unformatted code and clippy warnings fail
+it), with CodeQL and a gitleaks secret scan alongside: check `gh run
+list` after pushing. CI uses the newest stable Rust, so a Rust release
+can add clippy lints that fail it until they are fixed. Because of the
+Linux job, a shell-out to a macOS-only tool (`ditto`, `launchctl`,
+`osascript`…) needs a fallback or a `cfg` gate. `audit.yml` checks
+`Cargo.lock` against RustSec when dependencies change and once a week
+(`deny.toml` holds the policy). GitHub's advisory database, which
+Dependabot uses, misses most RustSec advisories, so a red audit is the
+signal to `cargo update -p <crate>`.
 
 Deploying: `cargo build --release && install -m 755 target/release/hearthloom
 ~/.local/bin/hearthloom && launchctl kickstart -k "gui/$(id -u)/com.hearthloom.daemon"`.
