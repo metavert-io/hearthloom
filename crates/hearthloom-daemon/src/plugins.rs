@@ -128,6 +128,17 @@ pub fn valid_publish_path(path: &str) -> bool {
         })
 }
 
+/// An ember name: 1-40 chars of [a-z0-9-], not starting with '-'. The
+/// manifest rule, and the check before a name goes into a registry URL.
+pub fn valid_ember_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 40
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !name.starts_with('-')
+}
+
 impl Manifest {
     pub fn validate(&self) -> Result<()> {
         if self.protocol != PROTOCOL {
@@ -136,14 +147,7 @@ impl Manifest {
                 self.protocol
             );
         }
-        let ok_name = !self.name.is_empty()
-            && self.name.len() <= 40
-            && self
-                .name
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-            && !self.name.starts_with('-');
-        if !ok_name {
+        if !valid_ember_name(&self.name) {
             bail!("plugin name must be 1-40 chars of [a-z0-9-] (got {:?})", self.name);
         }
         if self.name == "self" || self.name == "ui" {
@@ -834,7 +838,7 @@ pub fn ui_contributions(state: &AppState) -> Result<Value> {
                 "dial": v.get("dial").and_then(|d| d.as_bool()).unwrap_or(false),
             }))
         };
-        if let Some(n) = ui.get("nav").and_then(&entry) {
+        if let Some(n) = ui.get("nav").and_then(entry) {
             nav.push(n); // one top-nav entry per plugin, by shape
         }
         for (list, out) in [("visualize", &mut visualize), ("hamburger", &mut hamburger), ("desk", &mut desk), ("card", &mut card)] {

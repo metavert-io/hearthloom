@@ -782,7 +782,8 @@ async function route() {
   try {
     if (page === "desk") return renderDesk();
     if (page === "today") return renderDay(localToday());
-    if (page === "day") return renderDay(arg || localToday());
+    // The date comes from the URL: only YYYY-MM-DD reaches the Day view.
+    if (page === "day") return renderDay(/^\d{4}-\d{2}-\d{2}$/.test(arg) ? arg : localToday());
     if (page === "search") return renderSearch(arg);
     if (page === "browse") return renderBrowse(arg || "episodes");
     if (page === "privacy") return renderPrivacy();
@@ -1299,7 +1300,7 @@ async function renderDay(date) {
   }
   const content = document.getElementById("day-content");
   content.classList.add("day-loading");
-  const day = await api(`/v1/recall?on=${date}&detail=full`);
+  const day = await api(`/v1/recall?on=${encodeURIComponent(date)}&detail=full`);
   content.classList.remove("day-loading");
   // order by wall-clock as displayed: episode's own offset, else browser's
   const browserOffset = -new Date().getTimezoneOffset();
@@ -1361,7 +1362,7 @@ async function renderDay(date) {
     ${visitChip(date)}
     <div class="day-nav">
       <button id="day-prev">← previous</button>
-      <input type="date" id="day-pick" value="${date}">
+      <input type="date" id="day-pick" value="${esc(date)}">
       <button id="day-next">next →</button>
       <span class="statchip" id="day-count"></span>
     </div>
@@ -2060,7 +2061,7 @@ async function openPersonModal(name) {
       // known git repos are Project entities — filter to those
       const data = await api(`/v1/browse/entities?q=${encodeURIComponent(q)}&type=Project&limit=6`).catch(() => null);
       const hits = (data?.items || []).filter((i) => i.name !== entity.name).slice(0, 6);
-      const isUrl = /github\.com/i.test(q);
+      const isUrl = /^(https?:\/\/)?(www\.)?github\.com\//i.test(q);
       attachPop.innerHTML = hits.map((h) =>
         `<button class="ne-mention-opt" data-name="${esc(h.name)}">◈ ${esc(h.name)}<span class="meta">repo</span></button>`).join("")
         + (isUrl ? `<button class="ne-mention-opt" data-name="${esc(repoName(q))}">+ add ${esc(repoName(q))}<span class="meta">from URL</span></button>` : "");
@@ -3559,7 +3560,9 @@ async function toggleBrowseEpisode(tr, id, colspan) {
 }
 
 async function renderBrowse(tab) {
-  if (!browseState[tab]) tab = "episodes";
+  // The tab comes from the URL: only an own key of browseState is a tab
+  // ("__proto__" would otherwise hand back Object.prototype to write into).
+  if (!Object.hasOwn(browseState, tab)) tab = "episodes";
   setNav("browse");
   const st = browseState[tab];
   const token = ++browseToken;

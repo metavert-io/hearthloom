@@ -11,7 +11,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use tract_onnx::prelude::*;
 
-type Model = SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
+type Model = Arc<TypedRunnableModel>;
 
 const MAX_TOKENS: usize = 128;
 
@@ -108,7 +108,7 @@ impl Embedder {
 
         // Output is [1, seq, hidden]: mean-pool the sequence, L2-normalize.
         let output = outputs[0]
-            .to_array_view::<f32>()
+            .to_plain_array_view::<f32>()
             .context("extracting output tensor")?;
         let (seq_len, hidden) = (output.shape()[1], output.shape()[2]);
         let mut pooled = vec![0.0f32; hidden];
@@ -140,7 +140,7 @@ pub fn floats_to_bytes(v: &[f32]) -> Vec<u8> {
 }
 
 pub fn bytes_to_floats(b: &[u8]) -> Vec<f32> {
-    b.chunks_exact(4)
+    b.as_chunks::<4>().0.iter()
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }

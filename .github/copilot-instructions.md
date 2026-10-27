@@ -55,6 +55,11 @@ describes the system; where this summary is shorter, they win.
   (app.js).
 - Escape stored text (the modules' `esc` helpers) before it reaches
   `innerHTML`.
+- Route arguments come from the URL, which anyone can craft: validate
+  their shape, escape them, and look them up with `Object.hasOwn`, never
+  `obj[arg]` alone (`__proto__` is a key).
+- Paths built from names or synced rows stay inside their folder; an
+  absolute path joined onto a root replaces it.
 
 ## Repository hygiene
 No real people, contact details, hostnames, tokens or deployment identifiers in

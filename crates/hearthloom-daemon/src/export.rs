@@ -352,6 +352,21 @@ pub fn apply_incoming_restore(home: &hearthloom_core::Home) -> Result<()> {
 /// the record is EMPTY (the wizard's job — no exotic merge-into-existing
 /// cases). Extracts files/, stages the db as .incoming, then exits so
 /// the supervisor restarts us through apply_incoming_restore.
+/// Where an export entry lands on restore, or None to skip it. The
+/// database is staged beside the live one, `files/…` lands under the home
+/// root, and the rest (manifest, tables/) is informational. zip-slip guard:
+/// plain relative segments only. `..` escapes the home root, and so does
+/// an absolute name ("files//etc/x"): joining one replaces the root.
+fn restore_dest(root: &Path, name: &str) -> Option<std::path::PathBuf> {
+    if name == "hearthloom.db" {
+        return Some(root.join("hearthloom.db.incoming"));
+    }
+    let rel = Path::new(name.strip_prefix("files/")?);
+    rel.components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)))
+        .then(|| root.join(rel))
+}
+
 pub fn stage_restore(state: &AppState, zip_path: &Path) -> Result<Value> {
     if state.store.sync_head().unwrap_or(0) > 0 {
         return Err(anyhow!(
@@ -365,20 +380,11 @@ pub fn stage_restore(state: &AppState, zip_path: &Path) -> Result<Value> {
     let mut has_db = false;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
-        let name = entry.name().to_string();
-        let dest = if name == "hearthloom.db" {
-            has_db = true;
-            root.join("hearthloom.db.incoming")
-        } else if let Some(rel) = name.strip_prefix("files/") {
-            // zip-slip guard: reject any path that escapes the home root
-            let rel_path = Path::new(rel);
-            if rel_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-                continue;
-            }
-            root.join(rel_path)
-        } else {
-            continue; // manifest + tables/ are informational
+        let name = entry.name()?.to_string();
+        let Some(dest) = restore_dest(&root, &name) else {
+            continue;
         };
+        has_db |= name == "hearthloom.db";
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -400,6 +406,17 @@ pub fn stage_restore(state: &AppState, zip_path: &Path) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_restore_lands_only_inside_the_home() {
+        let root = Path::new("/srv/hl");
+        assert_eq!(restore_dest(root, "hearthloom.db"), Some(root.join("hearthloom.db.incoming")));
+        assert_eq!(restore_dest(root, "files/notes/a.md"), Some(root.join("notes/a.md")));
+        assert_eq!(restore_dest(root, "manifest.json"), None);
+        for evil in ["files/../../etc/x", "files//etc/passwd", "files/./x", "files/a/../../b"] {
+            assert_eq!(restore_dest(root, evil), None, "{evil:?} must be skipped");
+        }
+    }
 
     #[test]
     fn test_walk_skips_ember_keys_and_secrets() {

@@ -1,0 +1,10 @@
+# cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/
+# CI's audit.yml runs `cargo deny check advisories` (the RustSec database)
+# when dependencies change and once a week. Only that check is configured.
+
+[advisories]
+# Unmaintained crates count only when a workspace crate depends on them
+# directly. The transitive ones today have no known vulnerability: paste
+# (via tokenizers) and unsafe-libyaml (via serde_yaml, which is itself
+# deprecated upstream: replacing it is the way to clear this one).
+unmaintained = "workspace"

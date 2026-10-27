@@ -1172,7 +1172,7 @@ async fn handle_source(client: &Client, command: SourceCmd) -> Result<()> {
                 "registered virtual source {} [{}] — handles: {}",
                 result["registered"].as_str().unwrap_or(&name),
                 result["adapter"].as_str().unwrap_or(&adapter),
-                &result["capabilities"],
+                result["capabilities"],
             );
         }
         SourceCmd::Search { name, query, limit } => {

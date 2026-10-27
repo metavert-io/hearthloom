@@ -154,6 +154,11 @@ pub async fn stage(
     name: &str,
     version: Option<String>,
 ) -> Result<Staged> {
+    // Both end up in registry URLs: a name or version holding '/' or '..'
+    // would address some other path on the registry host.
+    if !crate::plugins::valid_ember_name(name) {
+        bail!("{name:?} isn't an ember name (1-40 chars of [a-z0-9-])");
+    }
     let root = root
         .or_else(configured_registry)
         .ok_or_else(|| anyhow!("no ember registry is configured (set HEARTHLOOM_REGISTRY_URL)"))?;
@@ -183,6 +188,9 @@ pub async fn stage(
             .ok_or_else(|| anyhow!("{name} has no released versions"))?
             .to_string(),
     };
+    if !valid_version(&version) {
+        bail!("{version:?} isn't a version");
+    }
     let record: Value = http
         .get(format!("{base}/embers/{name}/{version}"))
         .send()
@@ -418,4 +426,35 @@ pub fn verify_ed25519(pubkey_b64: &str, payload: &str, sig_b64: &str) -> Result<
     VerifyingKey::from_bytes(&key_bytes)?
         .verify(payload.as_bytes(), &Signature::from_bytes(&sig_bytes))
         .map_err(|_| anyhow!("signature does not match the payload"))
+}
+
+/// A release version as the registry names it (e.g. `0.7.1`,
+/// `1.0.0-rc.1+build.5`): 1-64 chars of [0-9A-Za-z.+-], no "..".
+fn valid_version(version: &str) -> bool {
+    !version.is_empty()
+        && version.len() <= 64
+        && !version.contains("..")
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '-'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_version;
+    use crate::plugins::valid_ember_name;
+
+    #[test]
+    fn test_only_plain_names_and_versions_reach_a_registry_url() {
+        for ok in ["0.7.1", "1.0.0-rc.1+build.5", "2"] {
+            assert!(valid_version(ok), "{ok}");
+        }
+        for bad in ["", "../x", "0.1/../../admin", "1.0 ", "a?b", "1..2"] {
+            assert!(!valid_version(bad), "{bad:?}");
+        }
+        assert!(valid_ember_name("hpresence") && valid_ember_name("h-tesla2"));
+        for bad in ["", "-x", "../x", "a/b", "Caps", "x?y=1"] {
+            assert!(!valid_ember_name(bad), "{bad:?}");
+        }
+    }
 }

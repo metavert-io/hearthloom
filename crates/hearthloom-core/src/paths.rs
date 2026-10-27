@@ -130,6 +130,9 @@ impl Home {
     /// Write a note's markdown file. Returns the path relative to root.
     pub fn write_note(&self, slug: &str, content: &str) -> Result<String> {
         let rel = format!("notes/{slug}.md");
+        if !stays_inside(&rel) {
+            anyhow::bail!("note slug {slug:?} would write outside the notes folder");
+        }
         let path = self.root.join(&rel);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -168,6 +171,9 @@ impl Home {
             _ => ("0000", "00", "00"),
         };
         let rel = format!("raw/{y}/{m}/{d}/{episode_id}.txt");
+        if !stays_inside(&rel) {
+            anyhow::bail!("raw path {rel:?} would write outside the raw folder");
+        }
         let path = self.root.join(&rel);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -175,6 +181,16 @@ impl Home {
         fs::write(&path, content).with_context(|| format!("writing {}", path.display()))?;
         Ok(rel)
     }
+}
+
+/// A path relative to the home root that can't leave it: not absolute, no
+/// empty, `.` or `..` segment, no backslash or NUL. Slugs and dates come
+/// from synced rows and ingest input, so the writers check, not only their
+/// callers.
+fn stays_inside(rel: &str) -> bool {
+    !rel.starts_with('/')
+        && !rel.contains(['\\', '\0'])
+        && rel.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..")
 }
 
 #[cfg(test)]
@@ -199,5 +215,19 @@ mod tests {
 
         // Idempotent re-init.
         home.init().unwrap();
+    }
+
+    #[test]
+    fn test_writers_stay_inside_the_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path().join("hl"));
+        home.init().unwrap();
+        assert_eq!(home.write_note("ideas/plan", "x").unwrap(), "notes/ideas/plan.md");
+        for slug in ["../../escape", "a/../../b", "/etc/x", "a\\b"] {
+            assert!(home.write_note(slug, "x").is_err(), "{slug:?} must be refused");
+        }
+        assert!(home.write_raw("../../escape", "2026-03-15", "x").is_err());
+        assert!(home.write_raw("ep_x", "..-..-..", "x").is_err());
+        assert!(!tmp.path().join("escape.md").exists() && !tmp.path().join("escape.txt").exists());
     }
 }

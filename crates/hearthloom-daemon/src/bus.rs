@@ -344,7 +344,7 @@ impl SseParser {
                     out.push(SseMessage {
                         id: self.id.take(),
                         event: self.event.take().unwrap_or_else(|| "message".into()),
-                        data: self.data.drain(..).collect::<Vec<_>>().join("\n"),
+                        data: std::mem::take(&mut self.data).join("\n"),
                     });
                 }
                 continue;

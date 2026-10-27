@@ -772,6 +772,16 @@ mod key_ceiling_tests {
     }
 
     #[test]
+    fn test_ember_pages_can_be_framed_only_by_the_dashboard() {
+        // /plugins/ is static for the browser rule, so this header is what
+        // keeps another site from framing an ember page and answering its
+        // handshake as the parent window.
+        assert_eq!(super::EMBER_PAGE_CSP, "frame-ancestors 'self'");
+        assert!(axum::http::HeaderValue::from_str(super::EMBER_PAGE_CSP).is_ok());
+        assert!(super::is_static_path("/plugins/x/ui/index.html"));
+    }
+
+    #[test]
     fn test_ordinary_keys_reach_only_their_scope() {
         // read: the record, nothing that manages the node.
         assert!(may(&["read"], "GET", "/v1/search"));
@@ -2906,7 +2916,7 @@ async fn ingest_capture(
     } else {
         let title: String = text.lines().next().unwrap_or("").chars().take(60).collect();
         let mut note = text.clone();
-        note.push_str(&format!("\n\n_Captured {}{}_", &when.chars().take(16).collect::<String>().replace('T', " "),
+        note.push_str(&format!("\n\n_Captured {}{}_", when.chars().take(16).collect::<String>().replace('T', " "),
             place.as_ref().map(|p| format!(" at {p}")).unwrap_or_default()));
         let id = state.store.create_note(
             &actor, &state.home, &title, &note, &["capture".to_string()], "personal", None,
@@ -11623,15 +11633,23 @@ async fn plugin_ui_asset(
         "woff2" => "font/woff2",
         _ => "application/octet-stream",
     };
+    // Only the dashboard may frame an ember page. /plugins/ is exempt from
+    // the browser rule (static), so without this any site could frame the
+    // page, become its parent and answer the page's handshake itself.
     (
         [
             (axum::http::header::CONTENT_TYPE, mime),
             (axum::http::header::CACHE_CONTROL, "no-cache, must-revalidate"),
+            (axum::http::header::CONTENT_SECURITY_POLICY, EMBER_PAGE_CSP),
         ],
         bytes,
     )
         .into_response()
 }
+
+/// The CSP on every file under /plugins/{name}/ui/: framing only, so an
+/// ember's own scripts and styles keep working as they are.
+const EMBER_PAGE_CSP: &str = "frame-ancestors 'self'";
 
 /// Serve a public file an enabled ember declared under `publish` (the
 /// address → a file in its own data store). Pre-auth by design and

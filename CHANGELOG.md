@@ -8,6 +8,32 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+### Security
+- **A crafted Day-view link could inject markup into the dashboard.** The
+  date in `#/day/<date>` reached the page unescaped. The dashboard's
+  Content-Security-Policy stopped scripts but not injected HTML. The Day
+  view now takes only a YYYY-MM-DD date and escapes it.
+- **A crafted Browse link could write into the page's shared objects.**
+  `#/browse/__proto__` looked up the view's state through an inherited
+  key, and `#/browse/constructor` called the wrong function. Only real tab
+  names count now.
+- **Only the dashboard can frame an ember's pages** (`frame-ancestors
+  'self'`). Before, any site could frame one, become its parent window and
+  answer its handshake.
+- **Restoring an export can't write outside the home folder.** The check
+  caught `..` but not an absolute name such as `files//etc/x`, which
+  replaced the home root when joined.
+- **Writing notes and raw content, and fetching from an ember registry,
+  check their paths and names.** A note slug or episode date that would
+  leave the home folder is refused, and a registry request takes only a
+  plain ember name and version.
+- **Dependencies patched for RustSec advisories:** zip 9 (three flaws in
+  archive extraction functions Hearthloom doesn't call), tract 0.23 (an
+  integer overflow in its NNEF model parser; the embeddings it computes
+  are unchanged), h2 0.4.20 (unbounded empty DATA frames) and tokio 1.54.1
+  (I/O safety). CI now checks `Cargo.lock` against the RustSec database
+  when dependencies change and every week.
+
 ### Fixed
 - **Placing a downloaded export works on Linux nodes.** Keeping a copy of
   an export the Downloads card found, or moving one across disks, ran
