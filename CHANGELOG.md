@@ -8,6 +8,33 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.77 — 2026-11-03
+
+### Security
+When a task or a question has read something you didn't write, every
+action after that waits for your OK (the taint rule). Four ways around
+that rule are closed.
+
+- **An agent that reads the web part-way through a task now asks before
+  its next action.** A task's taint was fixed when the task was made. Now
+  fetching a page, searching the web, calling another tool's integration,
+  reaching a friend's Hearthloom or running a shell command that reaches
+  the network taints the task, and every later action waits for you. The
+  approval says what it read.
+- **An agent reading your record counts other people's words.** When an
+  agent's search, recall or graph lookup returns mail, imports or anything
+  else you didn't write, its task is tainted, just as a question to Ask
+  would be.
+- **A friend's answer taints the question.** A hand-off to an agent after
+  reading a friend's Hearthloom now asks first, and the rest of the
+  conversation counts as tainted. You can still ask that same friend a
+  follow-up; passing their answer on to another friend stays blocked.
+- **Hermes and OpenClaw are judged on everything they can do.** Hearthloom
+  sees little or nothing of what they do inside, so sending them a task is
+  now judged on all their abilities, not on what the model said the task
+  needs. With the default "ask first" rules nothing changes; under the
+  "assistant" and "delegate" presets, sending them a task now asks first.
+
 ## 0.5.76 — 2026-11-03
 
 Six rough edges found while setting up a third node, an always-on Mac
