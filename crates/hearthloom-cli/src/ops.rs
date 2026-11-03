@@ -589,6 +589,52 @@ pub async fn export(client: &Client, out: Option<std::path::PathBuf>) -> Result<
 }
 
 /// `hearthloom node`: list the nodes, or change this one.
+/// `hearthloom peer pair <address>` — what the wizard's "I already run
+/// another node" does. The key comes from stdin (prompted without echo on
+/// a terminal), never argv, where shell history and `ps` would keep it.
+pub async fn peer_pair(client: &Client, address: &str, name: &str, as_json: bool) -> Result<()> {
+    use std::io::{IsTerminal, Read};
+    let address = address.trim().trim_end_matches('/');
+    let key = if std::io::stdin().is_terminal() {
+        prompt_secret("peer key (minted on that node: ☰ → API Keys, scope peer)")?
+    } else {
+        let mut value = String::new();
+        std::io::stdin().read_to_string(&mut value)?;
+        value.trim().to_string()
+    };
+    if key.is_empty() {
+        bail!("no key — paste it at the prompt, or pipe it: printf '%s' \"$KEY\" | hearthloom peer pair {address}");
+    }
+    let res = client
+        .post(
+            "/v1/peer",
+            &json!({"actor": "human:cli", "name": name, "url": address, "key": key}),
+        )
+        .await?;
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&res)?);
+    } else {
+        println!("paired with {name} ({address}) — syncing starts within minutes (`hearthloom sync --now` starts it now)");
+    }
+    Ok(())
+}
+
+/// `hearthloom peer unpair` — stop syncing; the node also retires its own
+/// key on the other side when that node answers.
+pub async fn peer_unpair(client: &Client, as_json: bool) -> Result<()> {
+    let res = client
+        .delete_json("/v1/peer", &json!({"actor": "human:cli"}))
+        .await?;
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&res)?);
+    } else if res["remote_key_revoked"] == true {
+        println!("unpaired — and this node's key on the other one is revoked");
+    } else {
+        println!("unpaired — the other node didn't answer, so revoke this node's key on its API Keys page");
+    }
+    Ok(())
+}
+
 pub async fn node(
     client: &Client,
     name: Option<String>,

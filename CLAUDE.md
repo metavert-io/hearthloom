@@ -841,7 +841,10 @@ the design log 2026-07-14.
   (what `agents::preamble` writes) or ran inside a configured agent's
   working folder (`agents::agent_workdirs`); the outcome lands as an
   `agent_task` episode instead. A new local importer that could capture
-  agent activity must leave it out the same way. A node can stop
+  agent activity must leave it out the same way. Read an agent's folder
+  only through `agents::workdir` (it expands a leading `~`, 0.5.76): if
+  the run and `agent_workdirs` saw different paths, the agent's sessions
+  would come back as the owner's words. A node can stop
   importing its own machine's files altogether (`node.imports`, Peering
   page / `hearthloom node --imports off`).
 - **THE FRIEND CEILING (0.5.63 — a fixed security hole, don't re-open

@@ -408,6 +408,17 @@ enum SourceCmd {
 enum PeerCmd {
     /// Pairing status, cursors, and the last sync outcome.
     Status,
+    /// Pair with your always-on node. Its `peer`-scope key (minted on THAT
+    /// node: ☰ → API Keys) is read from stdin, never taken as an argument.
+    Pair {
+        /// The other node's address, e.g. https://brain.example.com
+        address: String,
+        /// What to call it on this node.
+        #[arg(long, default_value = "cloud")]
+        name: String,
+    },
+    /// Stop syncing with the paired node (and retire this node's key there).
+    Unpair,
     /// Run one push+pull cycle right now.
     Sync {
         /// Re-offer EVERYTHING from the beginning (after re-pairing).
@@ -910,9 +921,13 @@ async fn main() -> Result<()> {
             );
         }
         Cmd::Peer { cmd } => {
-            let client = Client::new(home)?;
+            let client = Client::with_url(home, url.clone())?;
             let result = match cmd {
                 PeerCmd::Status => client.get("/v1/peer", &[]).await?,
+                PeerCmd::Pair { address, name } => {
+                    return ops::peer_pair(&client, &address, &name, as_json).await;
+                }
+                PeerCmd::Unpair => return ops::peer_unpair(&client, as_json).await,
                 PeerCmd::Sync { full } => {
                     client
                         .post(

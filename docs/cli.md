@@ -249,13 +249,21 @@ hearthloom notify "backup finished" "23GB to the NAS"
 Posts a notification (for scripts and cron jobs). The origin is stamped
 from your key — scripts can't impersonate the system.
 
-### `peer` — pairing status
+### `peer` — pairing
 
 ```
-hearthloom peer
+hearthloom peer status
+hearthloom peer pair https://brain.example.com            # prompts for the key
+printf '%s' "$KEY" | hearthloom peer pair https://brain.example.com --name cloud
+hearthloom peer sync [--full]
+hearthloom peer unpair
 ```
 
-Pairing state, sync cursors, last outcome for the always-on peer.
+`status` shows the pairing state, sync cursors and the last outcome for the
+always-on peer. `pair` does what the setup wizard's "I already run another
+node" does: the key is a `peer`-scope key minted on THAT node (☰ → API
+Keys), read from stdin and never taken as an argument. `unpair` stops
+syncing and retires this node's key on the other one when it answers.
 
 ### `quarantine` — the human gate
 

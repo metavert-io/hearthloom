@@ -1731,7 +1731,7 @@ pub async fn run_query(
     let llm = state
         .llm
         .as_ref()
-        .ok_or_else(|| anyhow!("deep query needs an LLM provider (provider.llm in config)"))?;
+        .ok_or_else(|| anyhow!(crate::agents::ask_elsewhere(state).0))?;
 
     let brain =
         brain_for_ask(&std::fs::read_to_string(state.home.brain_index_path()).unwrap_or_default());

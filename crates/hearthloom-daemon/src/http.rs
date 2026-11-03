@@ -9428,6 +9428,10 @@ async fn deep_query(
     if body.question.trim().is_empty() {
         return Err(bad_request("question is required"));
     }
+    if state.llm.is_none() {
+        // not an ask that failed: this node can't think (no trace row)
+        return Err(bad_request(crate::agents::ask_elsewhere(&state).0));
+    }
     let actor = Actor::new(body.actor);
     let (context, root) = thread_context(&state, &body.thread);
     let ask_id = state
@@ -9717,9 +9721,14 @@ async fn agents_mutate(
     let out = match body.action.as_str() {
         "save" => {
             let input = body.agent.as_ref().ok_or_else(|| bad_request("agent details are required"))?;
-            let saved = state.store.save_agent(&actor, body.id.as_deref(), input).map_err(refuse)?;
+            let input = crate::agents::normalize_input(input);
+            let saved = state.store.save_agent(&actor, body.id.as_deref(), &input).map_err(refuse)?;
             let _ = state.store.publish_agent(&saved, &crate::agents::node_id(&state), &crate::agents::node_name(&state), false);
-            json!({"agent": saved})
+            // saved either way; say so now rather than at the first task
+            let warning = crate::agents::workdir(&saved.config)
+                .filter(|dir| saved.harness == "claude_code" && !dir.is_dir())
+                .map(|dir| format!("the working folder {} doesn't exist yet", dir.display()));
+            json!({"agent": saved, "warning": warning})
         }
         "delete" => {
             let agent = need_agent(&body.id)?;
@@ -9756,7 +9765,16 @@ async fn agents_mutate(
             json!({"script": crate::agents::hermes::hook_script(&agent.id, &me, &token)})
         }
         "test" => {
-            let agent = need_agent(&body.id)?;
+            // What the form shows, saved or not: "test" before "save" used to
+            // check the stored folder and report a good one missing.
+            let mut agent = need_agent(&body.id)?;
+            if let Some(input) = &body.agent {
+                for key in ["workdir", "url"] {
+                    if let Some(value) = input.config[key].as_str() {
+                        agent.config[key] = json!(value);
+                    }
+                }
+            }
             json!({"test": agents_test(&agent).await})
         }
         "rename_node" => {
@@ -9822,9 +9840,8 @@ async fn agents_mutate(
 async fn agents_test(agent: &hearthloom_core::store::AgentRow) -> Value {
     match agent.harness.as_str() {
         "claude_code" => {
-            let workdir_ok = agent.config["workdir"]
-                .as_str()
-                .is_some_and(|w| std::path::Path::new(w).is_dir());
+            let workdir = crate::agents::workdir(&agent.config);
+            let workdir_ok = workdir.as_ref().is_some_and(|w| w.is_dir());
             // the same `claude` the bridge will run
             let version = match crate::agents::claude_code::find_claude(agent) {
                 Ok(path) => tokio::process::Command::new(path)
@@ -9836,7 +9853,18 @@ async fn agents_test(agent: &hearthloom_core::store::AgentRow) -> Value {
                     .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()),
                 Err(_) => None,
             };
-            json!({"ok": workdir_ok && version.is_some(), "claude": version, "workdir_ok": workdir_ok})
+            let error = match (&workdir, workdir_ok, &version) {
+                (None, _, _) => Some("choose a working folder".to_string()),
+                (Some(dir), false, _) => Some(format!(
+                    "the working folder {} doesn't exist",
+                    dir.display()
+                )),
+                (_, _, None) => {
+                    Some("Claude Code isn't installed where Hearthloom can find it".to_string())
+                }
+                _ => None,
+            };
+            json!({"ok": error.is_none(), "claude": version, "workdir_ok": workdir_ok, "error": error})
         }
         _ => {
             let Some(url) = agent.config["url"]
@@ -10360,6 +10388,14 @@ async fn deep_query_stream(
     let state_clone = state.clone();
     let sender_final = sender.clone();
     crate::scoped::spawn(async move {
+        if state_clone.llm.is_none() {
+            // A node with no AI key (an agents box, by design): point to the
+            // nodes that can answer instead of tracing a failed ask.
+            let (message, address) = crate::agents::ask_elsewhere(&state_clone);
+            let _ = sender_final.send(json!({"type": "fail", "message": message,
+                "elsewhere": address, "untraced": true}));
+            return;
+        }
         let actor = Actor::new("human:dashboard");
         let (context, root) = thread_context(&state_clone, &thread_ids);
         // Every ask is traced start-to-finish (QA/improvement loop).

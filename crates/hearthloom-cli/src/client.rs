@@ -175,6 +175,18 @@ impl Client {
         Self::decode(resp).await
     }
 
+    /// DELETE with a JSON body (routes that want `{actor}`, e.g. unpairing).
+    pub async fn delete_json(&self, path: &str, body: &Value) -> Result<Value> {
+        self.ensure_daemon().await?;
+        let resp = self
+            .http
+            .delete(format!("{}{}", self.base_url, path))
+            .json(body)
+            .send()
+            .await?;
+        Self::decode(resp).await
+    }
+
     async fn decode(resp: reqwest::Response) -> Result<Value> {
         let status = resp.status();
         let value: Value = resp

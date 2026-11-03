@@ -22,7 +22,7 @@ pub fn find_claude(agent: &AgentRow) -> Result<std::path::PathBuf> {
         .as_str()
         .filter(|p| !p.trim().is_empty())
     {
-        let path = std::path::PathBuf::from(path);
+        let path = super::expand_home(path);
         return if path.is_file() {
             Ok(path)
         } else {
@@ -128,17 +128,17 @@ pub async fn run(
     task: &AgentTaskRow,
     token: &str,
 ) -> Result<String> {
-    let workdir = agent.config["workdir"]
-        .as_str()
-        .filter(|w| !w.trim().is_empty())
-        .ok_or_else(|| {
-            anyhow!(
-                "choose a working folder for {} on the Agents page",
-                agent.name
-            )
-        })?;
-    if !std::path::Path::new(workdir).is_dir() {
-        return Err(anyhow!("the working folder {workdir} doesn't exist"));
+    let workdir = super::workdir(&agent.config).ok_or_else(|| {
+        anyhow!(
+            "choose a working folder for {} on the Agents page",
+            agent.name
+        )
+    })?;
+    if !workdir.is_dir() {
+        return Err(anyhow!(
+            "the working folder {} doesn't exist",
+            workdir.display()
+        ));
     }
     let claude = find_claude(agent)?;
     let config_path = write_mcp_config(state, agent, task, token)?;

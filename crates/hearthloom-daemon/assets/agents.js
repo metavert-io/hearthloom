@@ -202,8 +202,14 @@ function addAgent() {
         <b>${esc(h.label)}</b> ${depthBadge(h.depth)}
         ${fits.some((f) => f.id === h.id) ? `<span class="task-tag plain-tag">fits</span>` : ""}
         <span class="meta">${esc(h.blurb)}</span><span class="meta">runs ${esc(h.runs)}</span></button>`).join("")}</div>
-    ${pick ? `<div class="searchbar" style="margin-top:var(--s2)">
-      <input id="agent-new-name" placeholder="name it — e.g. ${pick === "claude_code" ? "Desk hand" : "Assistant"}" maxlength="60">
+    ${pick ? `<div class="searchbar" style="margin-top:var(--s2); flex-wrap:wrap; align-items:end">
+      <label class="meta agent-field">name
+        <input id="agent-new-name" placeholder="e.g. ${pick === "claude_code" ? "Desk hand" : "Assistant"}" maxlength="60"></label>
+      ${pick === "claude_code"
+        ? `<label class="meta agent-field">working folder — where it works on this machine
+            <input id="agent-new-where" placeholder="~/agents/desk-hand"></label>`
+        : `<label class="meta agent-field">${pick === "hermes" ? "API server address" : "gateway address"}
+            <input id="agent-new-where" placeholder="${pick === "hermes" ? "http://127.0.0.1:8642" : "http://127.0.0.1:18789"}"></label>`}
       <button class="btn" id="agent-create">add ${esc(data.catalog.find((h) => h.id === pick)?.label || "")}</button></div>` : ""}
     <p class="meta" id="agent-add-note" hidden></p>
   </div>`;
@@ -269,9 +275,19 @@ function wire(body) {
   const create = body.querySelector("#agent-create");
   if (create) create.onclick = async () => {
     const harness = body.querySelector(".agent-choice.on")?.dataset.harness;
-    const name = body.querySelector("#agent-new-name").value.trim() || data.catalog.find((h) => h.id === harness)?.label;
-    const res = await post("/v1/agents", { action: "save", agent: { name, harness, config: {} } }, body.querySelector("#agent-add-note"));
-    if (res) { ui.openAgent = res.agent.id; ui.adding = null; ui.goal = []; load(); }
+    const label = data.catalog.find((h) => h.id === harness)?.label;
+    let name = body.querySelector("#agent-new-name").value.trim();
+    let where = body.querySelector("#agent-new-where")?.value.trim() || "";
+    // a path typed into the name box is the folder (it happened)
+    if (harness === "claude_code" && !where && /^[~/]/.test(name)) { where = name; name = ""; }
+    const config = where ? { [harness === "claude_code" ? "workdir" : "url"]: where } : {};
+    const noteEl = body.querySelector("#agent-add-note");
+    const res = await post("/v1/agents", { action: "save", agent: { name: name || label, harness, config } }, noteEl);
+    if (res) {
+      ui.openAgent = res.agent.id; ui.adding = null; ui.goal = [];
+      await load();
+      if (res.warning) note(document.querySelector(`[data-agent="${CSS.escape(res.agent.id)}"] .agent-status`), `added — but ${res.warning}`);
+    }
   };
 
   body.querySelectorAll("[data-agent]").forEach((card) => {
@@ -280,19 +296,26 @@ function wire(body) {
     card.querySelector(".agent-open").onclick = () => { ui.openAgent = ui.openAgent === id ? null : id; paint(); };
     if (ui.openAgent !== id) return;
     const entry = data.agents.find((e) => e.agent.id === id);
-    card.querySelector(".agent-save").onclick = async () => {
+    // what the form shows now, saved or not
+    const formAgent = () => {
       const config = {};
       card.querySelectorAll(".agent-cfg").forEach((i) => {
         if (i.value.trim()) config[i.dataset.key] = i.type === "number" ? Number(i.value) : i.value.trim();
       });
-      const res = await post("/v1/agents", { action: "save", id, agent: {
-        name: card.querySelector(".agent-name").value, harness: entry.agent.harness, config,
-        enabled: card.querySelector(".agent-enabled").checked } }, status);
-      if (res) { note(status, "saved"); load(); }
+      return { name: card.querySelector(".agent-name").value, harness: entry.agent.harness, config,
+        enabled: card.querySelector(".agent-enabled").checked };
+    };
+    card.querySelector(".agent-save").onclick = async () => {
+      const res = await post("/v1/agents", { action: "save", id, agent: formAgent() }, status);
+      if (res) {
+        await load();
+        note(card.isConnected ? status : document.querySelector(`[data-agent="${CSS.escape(id)}"] .agent-status`),
+          res.warning ? `saved — but ${res.warning}` : "saved");
+      }
     };
     card.querySelector(".agent-test").onclick = async () => {
       note(status, "testing…");
-      const res = await post("/v1/agents", { action: "test", id }, status);
+      const res = await post("/v1/agents", { action: "test", id, agent: formAgent() }, status);
       if (res) note(status, res.test.ok ? `✓ reachable${res.test.claude ? ` — ${res.test.claude}` : ""}`
         : `✗ not ready: ${res.test.error || (res.test.workdir_ok === false ? "the working folder doesn't exist" : `answered ${res.test.status ?? "nothing"}`)}`);
     };

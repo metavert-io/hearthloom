@@ -2787,7 +2787,14 @@ async function renderWelcome() {
   // browser users: the admin exists → the door locks (the posture rule).
   const me = await fetch("/v1/auth/me").then((r) => r.json()).catch(() => ({}));
   const showBootstrap = me.auth === "open" && !me.provisioner;
-  let step = 0;
+  // Step numbers count the steps on screen (pairing can hide some, the
+  // Gmail step appears late) — call again whenever one shows or hides.
+  const numberSteps = () => {
+    let n = 0;
+    view.querySelectorAll(".wz-n").forEach((el) => {
+      el.textContent = el.closest("[hidden]") ? "" : String(++n);
+    });
+  };
   view.innerHTML = `
     <span class="eyebrow">first light</span>
     <h1 class="pagehead">Welcome to your second brain</h1>
@@ -2809,7 +2816,7 @@ async function renderWelcome() {
 
     ${showBootstrap ? `
     <div class="card">
-      <div class="section-title">${++step} · protect this brain</div>
+      <div class="section-title"><span class="wz-n"></span> · protect this brain</div>
       <p class="meta">Right now anyone who can reach this page can read the record.
         Choose the email and password that become its one login — from that moment
         every visit (browser, CLI, API) signs in first. The password never leaves
@@ -2825,43 +2832,7 @@ async function renderWelcome() {
     </div>` : ""}
 
     <div class="card">
-      <div class="section-title">${++step} · who are you?</div>
-      <p class="meta">Your name and emails are how every source — commits, invites, mail,
-        messages — resolves to <b>one person: you</b>. A work email labels its material
-        <i>work</i>; a personal one stays <i>personal</i>. Do this before the first import
-        and the record sorts itself.</p>
-      <div class="searchbar" style="flex-wrap:wrap">
-        <input id="wz-name" placeholder="your name" style="flex:1">
-      </div>
-      <div class="searchbar" style="flex-wrap:wrap">
-        <input id="wz-email-1" placeholder="you@personal…" style="flex:1">
-        <select id="wz-scope-1"><option value="personal">personal</option><option value="work">work</option></select>
-      </div>
-      <div class="searchbar" style="flex-wrap:wrap">
-        <input id="wz-email-2" placeholder="you@work… (optional)" style="flex:1">
-        <select id="wz-scope-2"><option value="work">work</option><option value="personal">personal</option></select>
-        <button class="btn" id="wz-claim">that's me</button>
-      </div>
-      <p class="meta" id="wz-claim-note" hidden></p>
-    </div>
-
-    <div class="section-title" style="margin-top:var(--s4)">${++step} · connect the thinking
-      <span class="meta" style="font-weight:400">— optional; only Ask, digests, and
-        idle-time understanding need it</span></div>
-    <div id="wz-ai"><div class="loading">…</div></div>
-
-    <div class="section-title" style="margin-top:var(--s4)">${++step} · give search meaning
-      <span class="meta" style="font-weight:400">— optional; a one-time ~90MB local model download</span></div>
-    <div id="wz-embeddings"></div>
-
-    <div id="wz-gmail-step" hidden>
-      <div class="section-title" style="margin-top:var(--s4)">${++step} · keep mail current
-        <span class="meta" style="font-weight:400">— optional; live Gmail pull past your last export</span></div>
-      <div id="wz-gmail"></div>
-    </div>
-
-    <div class="card">
-      <div class="section-title">${++step} · one hearth or two?</div>
+      <div class="section-title"><span class="wz-n"></span> · one hearth or two?</div>
       <p class="meta">
         <label><input type="radio" name="wz-mode" value="solo" checked>
           <b>This is my first node</b> — start here, add a counterpart anytime.</label><br>
@@ -2882,16 +2853,61 @@ async function renderWelcome() {
             <input id="wz-peer-key" placeholder="hl_…" style="flex:1">
             <button class="btn" id="wz-pair">pair</button>
           </div>
-          <p class="meta" id="wz-pair-note" hidden></p>`}
+          <p class="meta" id="wz-pair-note" hidden></p>
+          <p class="meta" id="wz-paired-steps">Your other node already does the thinking, pulls
+            your mail and pairs with your phone, so those steps are hidden here.
+            <button class="linkish" id="wz-show-solo">show them anyway</button></p>`}
       </div>
     </div>
 
-    <div class="section-title" style="margin-top:var(--s4)">${++step} · bring your phone
+    <div class="card">
+      <div class="section-title"><span class="wz-n"></span> · who are you?</div>
+      <p class="meta">Your name and emails are how every source — commits, invites, mail,
+        messages — resolves to <b>one person: you</b>. A work email labels its material
+        <i>work</i>; a personal one stays <i>personal</i>. Do this before the first import
+        and the record sorts itself.</p>
+      <div class="searchbar" style="flex-wrap:wrap">
+        <input id="wz-name" placeholder="your name" style="flex:1">
+      </div>
+      <div class="searchbar" style="flex-wrap:wrap">
+        <input id="wz-email-1" placeholder="you@personal…" style="flex:1">
+        <select id="wz-scope-1"><option value="personal">personal</option><option value="work">work</option></select>
+      </div>
+      <div class="searchbar" style="flex-wrap:wrap">
+        <input id="wz-email-2" placeholder="you@work… (optional)" style="flex:1">
+        <select id="wz-scope-2"><option value="work">work</option><option value="personal">personal</option></select>
+        <button class="btn" id="wz-claim">that's me</button>
+      </div>
+      <p class="meta" id="wz-claim-note" hidden></p>
+    </div>
+
+    <div class="wz-solo">
+    <div class="section-title" style="margin-top:var(--s4)"><span class="wz-n"></span> · connect the thinking
+      <span class="meta" style="font-weight:400">— optional; only Ask, digests, and
+        idle-time understanding need it</span></div>
+    <div id="wz-ai"><div class="loading">…</div></div>
+    </div>
+
+    <div class="section-title" style="margin-top:var(--s4)"><span class="wz-n"></span> · give search meaning
+      <span class="meta" style="font-weight:400">— optional; a one-time ~90MB local model download</span></div>
+    <div id="wz-embeddings"></div>
+
+    <div class="wz-solo">
+    <div id="wz-gmail-step" hidden>
+      <div class="section-title" style="margin-top:var(--s4)"><span class="wz-n"></span> · keep mail current
+        <span class="meta" style="font-weight:400">— optional; live Gmail pull past your last export</span></div>
+      <div id="wz-gmail"></div>
+    </div>
+    </div>
+
+    <div class="wz-solo">
+    <div class="section-title" style="margin-top:var(--s4)"><span class="wz-n"></span> · bring your phone
       <span class="meta" style="font-weight:400">— the Hearthloom app pairs with one scan</span></div>
     <div id="wz-device"></div>
+    </div>
 
     <div class="card">
-      <div class="section-title">${++step} · feed the record</div>
+      <div class="section-title"><span class="wz-n"></span> · feed the record</div>
       ${cloud ? "" : `
       <p class="meta"><b>Instant, no permissions needed</b> — already on this machine:</p>
       <div class="tend-actions" style="flex-wrap:wrap">
@@ -2923,6 +2939,7 @@ async function renderWelcome() {
         <a class="btn btn-quiet wz-exit" href="#/desk" id="wz-done">I'm all set — take me to the Desk →</a>
       </div>
     </div>`;
+  numberSteps();
   // The wizard's exits: mark setup done on the click itself, before the
   // link's hash change reaches the leave-setup intercept.
   view.querySelectorAll(".wz-exit").forEach((exit) =>
@@ -3077,7 +3094,8 @@ async function renderWelcome() {
       // paintGmail empties its host when the status endpoint is missing
       if (view.querySelector("#wz-gmail").innerHTML) gmailStep.hidden = false;
       else gmailStep.remove();
-    }).catch(() => gmailStep.remove());
+      numberSteps();
+    }).catch(() => { gmailStep.remove(); numberSteps(); });
     intg.paintPair(view.querySelector("#wz-device"));
   }).catch(() => {});
   // The UI bootstrap: creates the admin and signs them straight in (the
@@ -3116,10 +3134,20 @@ async function renderWelcome() {
     note.hidden = false;
     note.textContent = "skipped — the record stays open to anyone who can reach this page until a login exists; come back here anytime.";
   });
+  // A node joining an existing one (not the cloud, which others join)
+  // leaves thinking, mail and the phone to it: those steps fold away.
+  const showSolo = (show) => {
+    view.querySelectorAll(".wz-solo").forEach((el) => { el.hidden = !show; });
+    const note = view.querySelector("#wz-paired-steps");
+    if (note) note.hidden = show;
+    numberSteps();
+  };
   view.querySelectorAll('[name="wz-mode"]').forEach((r) => r.onchange = () => {
-    view.querySelector("#wz-peer").hidden =
-      view.querySelector('[name="wz-mode"]:checked').value !== "peer";
+    const peer = view.querySelector('[name="wz-mode"]:checked').value === "peer";
+    view.querySelector("#wz-peer").hidden = !peer;
+    if (!cloud) showSolo(!peer);
   });
+  view.querySelector("#wz-show-solo")?.addEventListener("click", () => showSolo(true));
   view.querySelector("#wz-mint")?.addEventListener("click", async () => {
     const res = await apiPost("/v1/keys", {
       actor: "human:onboarding", name: "my-other-machine", scopes: ["peer"],
@@ -4497,9 +4525,13 @@ async function askSend() {
     finish();
   });
   source.addEventListener("fail", (event) => {
-    let message = "the engine stumbled";
-    try { message = JSON.parse(event.data).message; } catch {}
-    askAppend(`<div class="ask-a">⚠ ${esc(message)}<div class="meta" style="color:var(--ink-faint);margin-top:4px">this failure was traced for the QA loop</div></div>`);
+    let fail = { message: "the engine stumbled" };
+    try { fail = JSON.parse(event.data); } catch {}
+    // A node with no AI provider says where to ask instead (nothing traced).
+    const elsewhere = /^https:\/\//.test(fail.elsewhere || "")
+      ? `<div style="margin-top:6px"><a class="btn btn-quiet" href="${esc(fail.elsewhere)}" target="_blank" rel="noopener noreferrer">open ${esc(fail.elsewhere.replace(/^https:\/\//, ""))} ↗</a></div>` : "";
+    const traced = fail.untraced ? "" : `<div class="meta" style="color:var(--ink-faint);margin-top:4px">this failure was traced for the QA loop</div>`;
+    askAppend(`<div class="ask-a">⚠ ${esc(fail.message)}${elsewhere}${traced}</div>`);
     finish();
   });
   source.addEventListener("done", finish);

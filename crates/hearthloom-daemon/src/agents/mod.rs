@@ -148,20 +148,92 @@ pub fn imports_here(state: &AppState) -> bool {
     imports_mode(state) == "on"
 }
 
+/// A folder path as typed by a person: a leading `~` means the home folder.
+/// Nothing runs these through a shell, so without this `~/agents/x` is a
+/// relative path that never exists (the Mac mini's setup, 2026-11-03).
+pub fn expand_home(path: &str) -> std::path::PathBuf {
+    let path = path.trim();
+    let home = std::env::var_os("HOME").filter(|h| !h.is_empty());
+    match (home, path) {
+        (Some(home), "~") => home.into(),
+        (Some(home), _) if path.starts_with("~/") => std::path::Path::new(&home).join(&path[2..]),
+        _ => path.into(),
+    }
+}
+
+/// An agent's working folder, `~` expanded; None when it has none.
+pub fn workdir(config: &Value) -> Option<std::path::PathBuf> {
+    config["workdir"]
+        .as_str()
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .map(expand_home)
+}
+
+/// Agent details from the dashboard with the folder written out in full,
+/// so the card shows (and every later reader gets) the real path.
+pub fn normalize_input(input: &hearthloom_core::store::AgentIn) -> hearthloom_core::store::AgentIn {
+    let mut input = input.clone();
+    if let Some(dir) = workdir(&input.config) {
+        input.config["workdir"] = json!(dir.display().to_string());
+    }
+    input
+}
+
+/// What to say when Ask reaches a node with no AI provider: which of the
+/// owner's nodes can answer, and the paired node's address when it is one
+/// a browser can open. (message, address)
+pub fn ask_elsewhere(state: &AppState) -> (String, Option<String>) {
+    let here = node_id(state);
+    let able: Vec<String> = state
+        .store
+        .nodes()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| n["node_id"].as_str() != Some(here.as_str()) && n["roles"]["llm"] == true)
+        .filter_map(|n| n["name"].as_str().map(String::from))
+        .collect();
+    let address = state
+        .store
+        .peer()
+        .ok()
+        .flatten()
+        .map(|(_, url)| url.trim_end_matches('/').to_string())
+        .filter(|url| url.starts_with("https://"));
+    let me = node_name(state);
+    let message = match (able.as_slice(), &address) {
+        ([], _) => format!(
+            "{me} has no AI provider, so it can't answer questions. Add one under Integrations → AI provider."
+        ),
+        (names, Some(url)) => format!(
+            "{me} has no AI provider, so it can't answer questions. Ask on {} instead — your paired node is at {url}.",
+            join_names(names)
+        ),
+        (names, None) => format!(
+            "{me} has no AI provider, so it can't answer questions. Ask on {} instead.",
+            join_names(names)
+        ),
+    };
+    (message, address)
+}
+
+fn join_names(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} or {last}", rest.join(", ")),
+    }
+}
+
 /// The working folders of the agents configured on this node, as written
 /// and as the OS resolves them (/tmp is /private/tmp): sessions that ran
 /// there are the agent's, not the owner's.
 pub fn agent_workdirs(state: &AppState) -> Vec<std::path::PathBuf> {
     let mut dirs = Vec::new();
     for agent in state.store.agents().unwrap_or_default() {
-        let Some(dir) = agent.config["workdir"]
-            .as_str()
-            .map(str::trim)
-            .filter(|w| !w.is_empty())
-        else {
+        let Some(dir) = workdir(&agent.config) else {
             continue;
         };
-        let dir = std::path::PathBuf::from(dir);
         if let Ok(real) = dir.canonicalize() {
             if real != dir {
                 dirs.push(real);
@@ -1169,6 +1241,72 @@ mod tests {
         assert_eq!(g["preset"], "cautious");
         assert_eq!(g["recommended"], "hermes");
         assert_eq!(guidance(&c(&["files"]), true)["recommended"], "claude_code");
+    }
+
+    #[test]
+    fn test_an_agent_folder_may_start_with_a_tilde() {
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME in tests"));
+        assert_eq!(
+            expand_home("~/agents/desk-hand"),
+            home.join("agents/desk-hand")
+        );
+        assert_eq!(expand_home("  ~  "), home);
+        assert_eq!(
+            expand_home("/srv/work"),
+            std::path::PathBuf::from("/srv/work")
+        );
+        // another user's home is left as typed
+        assert_eq!(expand_home("~ada/x"), std::path::PathBuf::from("~ada/x"));
+        assert_eq!(workdir(&json!({"workdir": " ~/x "})), Some(home.join("x")));
+        assert_eq!(workdir(&json!({"workdir": "  "})), None);
+        let saved = normalize_input(&hearthloom_core::store::AgentIn {
+            name: "Desk hand".into(),
+            harness: "claude_code".into(),
+            config: json!({"workdir": "~/x", "model": "m"}),
+            enabled: None,
+        });
+        assert_eq!(
+            saved.config["workdir"],
+            json!(home.join("x").display().to_string())
+        );
+        assert_eq!(saved.config["model"], "m");
+    }
+
+    #[test]
+    fn test_a_node_that_cannot_think_names_the_ones_that_can() {
+        let (state, _tmp) = state();
+        let (alone, address) = ask_elsewhere(&state);
+        assert!(alone.contains("Add one under Integrations"), "{alone}");
+        assert!(address.is_none());
+
+        let publish = |id: &str, name: &str, llm: bool| {
+            state
+                .store
+                .publish_node(id, name, "local", &json!({"llm": llm}), "0")
+                .unwrap()
+        };
+        publish("nd_cloud", "Cloud", true);
+        publish("nd_laptop", "Laptop", true);
+        publish("nd_box", "Box", false);
+        let (msg, address) = ask_elsewhere(&state);
+        assert!(msg.contains("Cloud") && msg.contains("Laptop"), "{msg}");
+        assert!(!msg.contains("Box"), "{msg}");
+        assert!(address.is_none(), "not paired: no address to offer");
+
+        let me = Actor::new("human:test");
+        state
+            .store
+            .set_peer(&me, "cloud", "https://brain.example.com/")
+            .unwrap();
+        let (msg, address) = ask_elsewhere(&state);
+        assert_eq!(address.as_deref(), Some("https://brain.example.com"));
+        assert!(msg.contains("https://brain.example.com"), "{msg}");
+        // a loopback peer is no address for a browser elsewhere
+        state
+            .store
+            .set_peer(&me, "attic", "http://127.0.0.1:43279")
+            .unwrap();
+        assert!(ask_elsewhere(&state).1.is_none());
     }
 
     fn state() -> (AppState, tempfile::TempDir) {
