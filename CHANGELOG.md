@@ -8,6 +8,8 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.74 — 2026-11-02
+
 ### Security
 - **A crafted Day-view link could inject markup into the dashboard.** The
   date in `#/day/<date>` reached the page unescaped. The dashboard's
@@ -69,6 +71,14 @@ pin release tags, never a branch.
   `--imports`).
 
 ### Fixed
+- **A third node gets your whole record.** The always-on node never passed
+  on an episode it had received from another machine, a rule written when
+  every setup had exactly two nodes. With a laptop and a second computer
+  both paired to the cloud node, each machine's own memories (and every
+  agent's outcome) stopped at the cloud and never reached the other. The
+  cloud node now leaves out only what the asking machine sent it, as the
+  deletion journal already did, and it serves these pages off its request
+  workers, since a new machine's first sync walks the whole record.
 - **The cloud node no longer looks offline to your other machines.** A
   node announced itself only when it synced, and the hub never runs a sync
   of its own, so the others saw it as last seen at its last restart. That
