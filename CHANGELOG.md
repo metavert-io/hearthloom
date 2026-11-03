@@ -8,6 +8,39 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.78 — 2026-11-03
+
+Schema **v61**. Update every node in the same release: the origin of
+each memory travels between your nodes with it.
+
+### Added
+- **How it got here.** Every memory now says who first wrote it (an
+  import, you, your phone, an agent), on which of your nodes and when,
+  who let it in when someone else proposed it, and the route it took
+  between your nodes to reach this one (MacBook → Cloud → Mac mini).
+  Expand a memory in the Day view or Memories, run
+  `hearthloom provenance <id>` (`--json` too), or ask Ask where something
+  came from: it now sees the origin when it reads a memory.
+- **Agents leave a trail.** An agent's task keeps everything it read that
+  you didn't write (pages, searches, other tools, other people's writing
+  in your record) and everything it wrote. A memory an agent produced —
+  its result, or a proposal you accepted — names the task; a summary
+  lists what it summarised.
+
+### Changed
+- **Other people's words are no longer filed as yours.** Message threads,
+  browsing history, screen captures, chat assistants' replies, coding
+  sessions, calendar invitations (imported or live), scans and media
+  titles are kept as *imported*, including everything already in your
+  record. Reading them now counts as reading something you didn't write,
+  so Ask and agents ask before acting afterwards, and a friend can't be
+  asked in the same question after one of them was read.
+
+### Notes
+- Memories that reached a node from another one before this release say
+  only which node sent them.
+- Git commits are still treated as your own words, whoever wrote them.
+
 ## 0.5.77 — 2026-11-03
 
 ### Security
