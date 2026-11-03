@@ -4853,9 +4853,21 @@ async fn sync_episodes(
     axum::Extension(auth): axum::Extension<AuthInfo>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&auth, "peer")?;
-    let page = state
-        .store
-        .sync_export(&state.home, params.after, params.limit.min(500))?;
+    // Everything but what THIS peer sent us: a hub relays one spoke's
+    // episodes to the next. Off the async workers (THE HANDLER CONTRACT): a
+    // new spoke's first pull walks the whole record, 500 bodies a page.
+    let requester = auth.0.as_ref().map(|c| c.name.clone());
+    let (store, home) = (state.store.clone(), state.home.clone());
+    let page = crate::scoped::spawn_blocking(move || {
+        store.sync_export_for(
+            &home,
+            params.after,
+            params.limit.min(500),
+            requester.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("export task: {e}"))??;
     Ok(Json(json!({
         "episodes": page.episodes,
         "next_cursor": page.next_cursor,

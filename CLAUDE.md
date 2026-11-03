@@ -691,6 +691,13 @@ the design log 2026-07-14.
   UNRECOVERABLE — that is the exact defect that lost a checklist. `restore_*`
   methods rebuild from the journal (`/v1/tasks/{id}/restore`,
   `/v1/tasks/deleted`). op_journal is Exported in TABLE_CLASSES.
+- **A HUB LEAVES OUT ONLY WHAT THE ASKING PEER SENT (0.5.74).** Every
+  export a peer pulls takes the asker's key name and skips `actor =
+  'peer:<asker>'` (`sync_export_for`, `journal_export_for`); the blanket
+  `actor NOT LIKE 'peer:%'` is only for a spoke pushing to its hub. Until
+  0.5.74 the episode export used the blanket rule on the hub too, so a
+  second spoke never received the first one's episodes (the comment said
+  "v1 is exactly two nodes"). A new pulled leg follows the same rule.
 - **SYNC LEGS PAGE BY A LOCAL STAMP OR SEQUENCE, NEVER BY THE SENDER'S
   (v57, multi-node M4).** A row relayed through a hub keeps its original
   stamp; a third node's cursor is past it, so a leg that pages by

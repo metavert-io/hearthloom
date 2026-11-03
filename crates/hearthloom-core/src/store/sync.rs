@@ -157,10 +157,28 @@ pub struct SyncPage {
 
 impl Store {
     /// Episodes after `after` (an episodes.rowid cursor), as drafts a
-    /// peer can POST straight into /v1/ingest. Private is excluded at
-    /// the SQL layer, always. Bodies are re-read from raw/ outside the
-    /// store lock.
+    /// peer can POST straight into /v1/ingest, leaving out everything a
+    /// peer sent this node — what a spoke pushes to its hub. Bodies are
+    /// re-read from raw/ outside the store lock.
     pub fn sync_export(&self, home: &Home, after: i64, limit: usize) -> Result<SyncPage> {
+        self.sync_export_for(home, after, limit, None)
+    }
+
+    /// `sync_export` for one asking peer (a hub serving a spoke's pull,
+    /// `requester` = the name of the key it asks with): only what THAT
+    /// peer sent is left out, so another spoke's episodes relay through
+    /// the hub. Before 0.5.74 a hub re-exported nothing a peer had sent,
+    /// so the laptop's episodes never reached a second spoke (the
+    /// journal's echo guard, `journal_export_for`, already worked this
+    /// way). Episodes page by this node's own rowid, so a relayed row
+    /// gets a fresh place in every spoke's cursor.
+    pub fn sync_export_for(
+        &self,
+        home: &Home,
+        after: i64,
+        limit: usize,
+        requester: Option<&str>,
+    ) -> Result<SyncPage> {
         struct Row {
             rowid: i64,
             id: String,
@@ -177,36 +195,42 @@ impl Store {
         }
         let rows: Vec<Row> = {
             let conn = self.lock();
-            let mut stmt = conn.prepare(
-                // actor NOT LIKE 'peer:%': never re-export what a peer
-                // sent us — kills echo traffic in a two-node pairing.
-                // (Transitive multi-node sync would revisit this; v1 is
-                // exactly two nodes by doctrine.)
-                // Since 2026-07-11 (Jon): a user's OWN peers are full
-                // replicas — private included, vault-locked on both
-                // sides. Only the FRIEND surface excludes private.
+            // The echo guard: never hand a peer back what it sent us (the
+            // asking peer's own rows, or — pushing to a hub — every row a
+            // peer sent). Since 2026-07-11 (Jon): a user's OWN peers are
+            // full replicas — private included, vault-locked on both
+            // sides. Only the FRIEND surface excludes private.
+            let echo_guard = match requester {
+                Some(_) => "actor != ?3",
+                None => "actor NOT LIKE 'peer:%' AND ?3 = ''",
+            };
+            let requester_actor = requester.map(|r| format!("peer:{r}")).unwrap_or_default();
+            let mut stmt = conn.prepare(&format!(
                 "SELECT rowid, id, source, source_ref, kind, title, event_time,
                         tz_offset_minutes, time_uncertainty, trust, scope, content_ref
                  FROM episodes /* all-episodes: peer sync carries every episode; a retirement travels as its own event */
-                 WHERE rowid > ?1 AND actor NOT LIKE 'peer:%'
-                 ORDER BY rowid LIMIT ?2",
+                 WHERE rowid > ?1 AND {echo_guard}
+                 ORDER BY rowid LIMIT ?2"
+            ))?;
+            let mapped = stmt.query_map(
+                rusqlite::params![after, limit as i64, requester_actor],
+                |row| {
+                    Ok(Row {
+                        rowid: row.get(0)?,
+                        id: row.get(1)?,
+                        source: row.get(2)?,
+                        source_ref: row.get(3)?,
+                        kind: row.get(4)?,
+                        title: row.get(5)?,
+                        event_time: row.get(6)?,
+                        tz_offset_minutes: row.get(7)?,
+                        time_uncertainty: row.get(8)?,
+                        trust: row.get(9)?,
+                        scope: row.get(10)?,
+                        content_ref: row.get(11)?,
+                    })
+                },
             )?;
-            let mapped = stmt.query_map(rusqlite::params![after, limit as i64], |row| {
-                Ok(Row {
-                    rowid: row.get(0)?,
-                    id: row.get(1)?,
-                    source: row.get(2)?,
-                    source_ref: row.get(3)?,
-                    kind: row.get(4)?,
-                    title: row.get(5)?,
-                    event_time: row.get(6)?,
-                    tz_offset_minutes: row.get(7)?,
-                    time_uncertainty: row.get(8)?,
-                    trust: row.get(9)?,
-                    scope: row.get(10)?,
-                    content_ref: row.get(11)?,
-                })
-            })?;
             mapped.collect::<std::result::Result<Vec<_>, _>>()?
         };
         // entity refs per episode — a second short lock, then file reads
@@ -1094,6 +1118,59 @@ mod tests {
         let back = store.apply_batch(&home, &batch).unwrap();
         assert_eq!(back.episodes_new, 0);
         assert_eq!(back.episodes_existing, 3);
+    }
+
+    /// A hub relays one spoke's episodes to the other, and never hands a
+    /// spoke back its own (the third-node bug: before 0.5.74 a hub
+    /// re-exported nothing a peer had sent).
+    #[test]
+    fn test_hub_relays_one_spokes_episodes_to_another() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path().to_path_buf());
+        home.init().unwrap();
+        let hub = Store::open(&home.db_path()).unwrap();
+        let draft = |r: &str| EpisodeDraft {
+            source: "note".into(),
+            source_ref: r.into(),
+            kind: "note".into(),
+            title: r.into(),
+            body: format!("body of {r}"),
+            event_time: crate::EventTime::unknown(),
+            trust: "self".into(),
+            scope: Some("personal".into()),
+            entities: vec![],
+            edges: vec![],
+        };
+        for (actor, r) in [
+            ("peer:laptop", "from-laptop"),
+            ("peer:mini", "from-mini"),
+            ("human:hub", "on-hub"),
+        ] {
+            hub.apply_batch(
+                &home,
+                &IngestBatch {
+                    actor: actor.into(),
+                    session_id: None,
+                    episodes: vec![draft(r)],
+                },
+            )
+            .unwrap();
+        }
+        let refs = |page: SyncPage| -> Vec<String> {
+            let mut v: Vec<String> = page.episodes.into_iter().map(|d| d.source_ref).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            refs(hub.sync_export_for(&home, 0, 10, Some("mini")).unwrap()),
+            ["from-laptop", "on-hub"]
+        );
+        assert_eq!(
+            refs(hub.sync_export_for(&home, 0, 10, Some("laptop")).unwrap()),
+            ["from-mini", "on-hub"]
+        );
+        // pushing upstream (no requester) still sends only this node's own
+        assert_eq!(refs(hub.sync_export(&home, 0, 10).unwrap()), ["on-hub"]);
     }
 
     #[test]
