@@ -101,6 +101,18 @@ pub fn one_line(view: &Value) -> String {
             .unwrap_or("an unknown node")
             .to_string()
     };
+    if view["writer"].is_null() {
+        let via: Vec<String> = view["route"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|h| name(&h["node"]))
+            .collect();
+        return format!(
+            "who first wrote it isn't known (it came via {} before Hearthloom kept track)",
+            via.join(" → ")
+        );
+    }
     let mut line = format!(
         "written by {}",
         view["writer_label"].as_str().unwrap_or("?")
@@ -155,6 +167,7 @@ mod tests {
         );
         assert!(writer_label(None).starts_with("not known"));
         let view = json!({
+            "writer": "adapter:imessage",
             "writer_label": "the imessage import",
             "node": {"id": "nd_1", "name": "MacBook"}, "at": "2026-11-02T10:00:00Z",
             "route": [{"node": {"id": "nd_1", "name": "MacBook"}}, {"node": {"id": "nd_2", "name": "Cloud"}},
@@ -164,6 +177,12 @@ mod tests {
         assert_eq!(
             one_line(&view),
             "written by the imessage import on MacBook at 2026-11-02 10:00 · came via Cloud → Mac mini"
+        );
+        let unknown = json!({"writer": null,
+            "route": [{"node": {"name": "cloud"}}, {"node": {"name": "Mac mini"}}]});
+        assert_eq!(
+            one_line(&unknown),
+            "who first wrote it isn't known (it came via cloud → Mac mini before Hearthloom kept track)"
         );
     }
 }

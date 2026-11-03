@@ -630,11 +630,15 @@ pub async fn provenance(client: &Client, id: &str, as_json: bool) -> Result<()> 
     } else {
         format!(" on {}", node(&view["node"]))
     };
-    println!(
-        "written by {}{on}{}",
-        s(&view["writer_label"]),
-        when(&view["at"])
-    );
+    if view["writer"].is_null() {
+        println!("who first wrote it isn't known");
+    } else {
+        println!(
+            "written by {}{on}{}",
+            s(&view["writer_label"]),
+            when(&view["at"])
+        );
+    }
     if let Some(by) = view["accepted_by_label"].as_str() {
         println!("let in by {by}");
     }

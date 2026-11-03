@@ -213,7 +213,9 @@ function provenanceHtml(p) {
   if (!p) return "";
   const lines = [];
   const where = p.node?.id ? ` on ${originNode(p.node)}` : "";
-  lines.push(`<div><b>Written by ${esc(p.writer_label || "someone")}</b>${where}${originWhen(p.at)}</div>`);
+  lines.push(p.writer
+    ? `<div><b>Written by ${esc(p.writer_label || "someone")}</b>${where}${originWhen(p.at)}</div>`
+    : `<div><b>Who first wrote it isn't known</b></div>`);
   if (p.accepted_by_label) lines.push(`<div>Let in by ${esc(p.accepted_by_label)}</div>`);
   const route = p.route || [];
   if (route.length > 1) {
