@@ -100,7 +100,9 @@ workspace with `npm i playwright`) — screenshot + pageerror check.
   `retirement_rows` the node-local undo record, `summary_inputs` synced,
   `entities.hidden_by`, `sources.retired_by` — see the RETIREMENT
   invariant), v58 `nodes` (synced node list; `agents::publish_self`
-  every sync; the thinking lease reads it), v57 relay stamps (`synced_at` on every timestamp-synced
+  every sync AND every 5 minutes from the agent runner — the hub runs no
+  sync cycle of its own, so before 0.5.74 its entry aged from its last
+  restart; the thinking lease reads it), v57 relay stamps (`synced_at` on every timestamp-synced
   table — see SYNC LEGS PAGE BY A LOCAL STAMP), v56 agent_directory, v55 agents (`agents` node-local, `governance`,
   `agent_tasks`, `agent_approvals` synced; `ask_log.tainted`), v54 friend groups (`friend_groups` + the
   node-local `peer_groups` cache — see the FRIEND GROUPS invariant),
@@ -812,6 +814,29 @@ the design log 2026-07-14.
   `publish` addresses stay under `/.well-known/` and are pre-auth +
   killswitch-allowed by design. Ember programs run under launchd on a
   Mac and under the daemon's own supervisor (`sidecar.rs`) elsewhere.
+- **THE EMBER HANDSHAKE LIVES IN TWO FILES (0.5.74).** The page's half
+  is `assets/ember.js` (served pre-auth; ember pages load it instead of
+  carrying a copy): it believes only `ev.source === window.parent &&
+  ev.origin === location.origin` and always calls `location.origin`,
+  never a `base` from a message. The dashboard's half is
+  `assets/ember-shell.js`: `handOver` posts the token ONCE per src (a
+  sandboxed frame can only be addressed "*", so a frame that has
+  navigated elsewhere must never get it — app.js/desk.js posted it on
+  every load until 0.5.74), `openLinks`/`openExternal` open what a page
+  asks in a new tab with no opener. The node serves ember pages with
+  `frame-ancestors 'self'` and refuses them as a top-level document
+  (`ember_page_top_level`). A new message type, or any other place that
+  frames an ember, goes through these two files; `tests/ember-handshake`
+  (CI, real Chromium) must keep passing.
+- **AN AGENT'S RUN IS NEVER THE OWNER'S WORDS (0.5.74).** The idle local
+  refresh imports Claude Code sessions at trust `self`, so it leaves out
+  every session that opens with `hearthloom_core::AGENT_PREAMBLE_MARK`
+  (what `agents::preamble` writes) or ran inside a configured agent's
+  working folder (`agents::agent_workdirs`); the outcome lands as an
+  `agent_task` episode instead. A new local importer that could capture
+  agent activity must leave it out the same way. A node can stop
+  importing its own machine's files altogether (`node.imports`, Peering
+  page / `hearthloom node --imports off`).
 - **THE FRIEND CEILING (0.5.63 — a fixed security hole, don't re-open
   it).** A key whose only scope is `friend` (what connecting a friend
   mints — it belongs to ANOTHER PERSON) reaches only

@@ -217,6 +217,13 @@ pub async fn asset(Path(name): Path<String>) -> Response {
         "rewind.js" => (include_bytes!("../assets/rewind.js"), "text/javascript"),
         "dial.js" => (include_bytes!("../assets/dial.js"), "text/javascript"),
         "chart-svg.js" => (include_bytes!("../assets/chart-svg.js"), "text/javascript"),
+        // The ember handshake: the page's half (loaded inside the sandbox,
+        // pre-auth like chart-svg.js) and the dashboard's half.
+        "ember.js" => (include_bytes!("../assets/ember.js"), "text/javascript"),
+        "ember-shell.js" => (
+            include_bytes!("../assets/ember-shell.js"),
+            "text/javascript",
+        ),
         "constellation.js" => (
             include_bytes!("../assets/constellation.js"),
             "text/javascript",

@@ -7,6 +7,7 @@
 // Lazy-loaded like atlas/pulse; helpers passed in from app.js.
 
 import { buildNoteEditor, paintNoteList, attachMentionTypeahead, MENTION_RE } from "/assets/notes.js";
+import { handOver, openLinks } from "/assets/ember-shell.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&#39;", "'": "&#39;" }[c]));
@@ -1161,19 +1162,12 @@ async function paintPluginWidgets(host) {
       <iframe sandbox="allow-scripts" src="/plugins/${encodeURIComponent(w.plugin)}/ui/${w.page}"
         style="width:100%;height:${Math.min(Math.max(w.height || 160, 80), 480)}px;border:0;border-radius:8px;background:transparent"></iframe>`;
     const frame = wrap.querySelector("iframe");
-    frame.addEventListener("load", async () => {
-      let token = null;
-      try {
-        token = (await apiPost(`/v1/plugins/${encodeURIComponent(w.plugin)}/ui-token`, {})).token;
-      } catch { /* older daemon or disabled — widget renders tokenless */ }
-      const palette = {};
-      const styles = getComputedStyle(document.documentElement);
-      for (const v of ["--bg", "--ink", "--ink-faint", "--accent", "--card", "--line", "--chart-1", "--chart-2", "--chart-3", "--chart-4", "--chart-5", "--chart-6", "--chart-7", "--chart-8", "--chart-heat"]) {
-        palette[v] = styles.getPropertyValue(v).trim();
-      }
-      frame.contentWindow.postMessage(
-        { type: "hearthloom", token, base: location.origin, palette }, "*");
+    // Once, on the widget's first load (an older daemon or a disabled ember
+    // answers no token: the widget renders tokenless).
+    handOver(frame, {
+      token: async () => (await apiPost(`/v1/plugins/${encodeURIComponent(w.plugin)}/ui-token`, {})).token,
     });
+    openLinks(frame);
     host.append(wrap);
   }
 }

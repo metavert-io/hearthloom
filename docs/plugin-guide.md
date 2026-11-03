@@ -200,7 +200,7 @@ as the redirect URI with the provider, then:
    "ttl_secs"?}` — state is 16–256 random printable characters; the URL
    must be https and carry the same `state`. (Your page or your program
    may call it.)
-2. From your page: `parent.postMessage({type: "hearthloom-oauth"}, "*")`.
+2. From your page: `h.signIn()` (with `/assets/ember.js`, below).
    The dashboard opens the URL the daemon holds for you (never a URL from
    the message) in a new tab, or shows a link if the browser blocks it.
 3. The provider sends the user back; the daemon checks the state
@@ -297,25 +297,52 @@ tolerate LWW.
 Your `ui/` files are served at `/plugins/<name>/ui/…` and rendered
 inside `<iframe sandbox="allow-scripts">`. That sandbox is the security
 model: **your page's JavaScript never runs in the dashboard's origin**,
-so it cannot ride the user's login session. Instead, when your page
-loads, the shell posts you a message:
+so it cannot ride the user's login session. Instead, once your page has
+loaded, the dashboard hands it a 12-hour key carrying exactly your
+granted scopes (revoked when the user disables or uninstalls you).
 
-```js
-addEventListener("message", (ev) => {
-  if (ev.data?.type !== "hearthloom") return;
-  const { token, base, palette } = ev.data;
-  // token: a 12-hour key carrying exactly your granted scopes
-  //        (revoked when the user disables/uninstalls you)
-  // base:  the daemon origin for fetch()es
-  // palette: CSS custom properties (--bg, --ink, --ink-faint,
-  //          --accent, --card, --line) — apply them to match the
-  //          user's theme, light or dark
-});
+Load the node's handshake script and use the client it gives you:
+
+```html
+<script src="/assets/ember.js"></script>
+<script>
+  window.hearth.then(async (h) => {
+    const count = await h.kv("count");      // null when unset
+    await h.kvPut("count", (count || 0) + 1);
+    const today = await h.file("today.json"); // what your program wrote
+  });
+</script>
 ```
 
-Fetch with `Authorization: Bearer <token>` against `base` — the daemon
-answers cross-origin, credential-less requests for exactly this
-purpose. See `hpresence/ui/hearth.js` for a copy-paste handshake.
+The client (`h`) has `kv(key)` / `kvPut(key, value)`, `file(path)`,
+`secrets()` (names only) / `secretPut(key, text)` (your program can read
+a secret; no page ever can), `oauthPending(state, url)` + `signIn()`
+(below), `open(url)`, `onTimespan(fn)` (pages with `dial: true`), `base`
+(the node's address) and `hasToken`. Errors throw, with the HTTP status
+on `err.status`. The script also applies the user's theme colours as CSS
+custom properties (`--bg`, `--ink`, `--ink-faint`, `--accent`, `--card`,
+`--line`, `--chart-1`…`--chart-8`, `--chart-heat`), marks the page
+`<html data-framed="1">`, and reports your content height so the frame
+fits it (no inner scrollbar).
+
+**Don't write your own `message` listener.** `ember.js` is the one place
+that decides who may talk to your page: only the dashboard that embeds
+it (not a sibling frame, not a window that opened the page, not a site
+that frames it), and the client always calls the node that served the
+page, whatever a message says. It ships with the node, so a fix reaches
+every ember with the next Hearthloom release. `hearthloom ember
+validate` warns about a page that listens for messages itself; if you
+truly must, accept a message only when `ev.source === window.parent &&
+ev.origin === location.origin`.
+
+The page stays put: the dashboard hands the key over once, on the first
+load, so a page that navigates inside its frame (to another of your
+pages, or another site) arrives without one. Each page is its own
+manifest entry. Links to other sites open in a new tab through the
+dashboard (`ember.js` does this for every `<a href>` to another site, or
+call `h.open(url)`). And an ember page only ever opens inside the
+dashboard: the node refuses it as a tab of its own, and no other site
+may frame it.
 
 If you render with the house chart library (`<script
 src="/assets/chart-svg.js">` works inside the sandbox — it's a
@@ -402,6 +429,6 @@ The node handles this for you:
 2. Write a loop: read `HEARTHLOOM_PLUGIN_KEY_FILE`, do your thing,
    `POST /v1/ingest` with deterministic `source_ref`s, park state in
    `/v1/plugins/self/kv/*`.
-3. Drop an `index.html` in `ui/` with the postMessage handshake.
+3. Drop an `index.html` in `ui/` that loads `/assets/ember.js`.
 4. `☰ → Integrations → plugins →` your folder → review → install.
 5. Watch `~/.hearthloom/plugins/<name>/plugin.log`.

@@ -16,6 +16,19 @@ const BODY_CAP: usize = 64 * 1024;
 /// Ingest all sessions under a Claude Code projects dir (default
 /// `~/.claude/projects`).
 pub fn ingest(dir: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
+    ingest_except(dir, scope, &[])
+}
+
+/// `ingest`, also leaving out every session that ran inside one of
+/// `agent_dirs` (the working folders of the node's agents). Sessions a
+/// Hearthloom agent ran are left out wherever they ran (they open with
+/// [`hearthloom_core::AGENT_PREAMBLE_MARK`]): an agent's transcript is not
+/// the owner's words, and its outcome is recorded as an `agent_task`.
+pub fn ingest_except(
+    dir: &Path,
+    scope: Option<&str>,
+    agent_dirs: &[PathBuf],
+) -> Result<Vec<EpisodeDraft>> {
     let mut files = Vec::new();
     collect_session_files(dir, &mut files)?;
     if files.is_empty() {
@@ -23,7 +36,7 @@ pub fn ingest(dir: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
     }
     let mut drafts = Vec::new();
     for file in files {
-        match session_to_draft(&file, scope) {
+        match session_to_draft(&file, scope, agent_dirs) {
             Ok(Some(draft)) => drafts.push(draft),
             Ok(None) => {} // empty / agent-only session
             Err(err) => tracing::warn!("skipping {}: {err}", file.display()),
@@ -82,7 +95,11 @@ fn cap(text: &str, limit: usize) -> &str {
     &text[..cut]
 }
 
-fn session_to_draft(path: &Path, scope: Option<&str>) -> Result<Option<EpisodeDraft>> {
+fn session_to_draft(
+    path: &Path,
+    scope: Option<&str>,
+    agent_dirs: &[PathBuf],
+) -> Result<Option<EpisodeDraft>> {
     let raw = std::fs::read_to_string(path)?;
     let mut session_id = None;
     let mut cwd: Option<String> = None;
@@ -152,9 +169,20 @@ fn session_to_draft(path: &Path, scope: Option<&str>) -> Result<Option<EpisodeDr
         .find(|(s, _)| s == "you")
         .map(|(_, t)| t.trim().replace('\n', " "))
         .unwrap_or_default();
+    // A Hearthloom agent's run, or a session in an agent's folder.
+    if first_prompt.starts_with(hearthloom_core::AGENT_PREAMBLE_MARK) {
+        return Ok(None);
+    }
     let title: String = first_prompt.chars().take(80).collect();
 
     let workspace = cwd.clone().unwrap_or_default();
+    if !workspace.is_empty()
+        && agent_dirs
+            .iter()
+            .any(|d| Path::new(&workspace).starts_with(d))
+    {
+        return Ok(None);
+    }
     let project = Path::new(&workspace)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -241,5 +269,73 @@ mod tests {
         assert!(!draft.body.contains("meta noise"));
         assert_eq!(draft.entities[0].entity_type, "Project");
         assert_eq!(draft.entities[0].name, "myproj");
+    }
+
+    /// An agent's runs are not the owner's words: a session that opens with
+    /// the agent preamble is left out wherever it ran, and so is any session
+    /// inside an agent's working folder. The owner's own sessions stay.
+    #[test]
+    fn test_agent_sessions_are_left_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let write = |dir: &str, id: &str, cwd: &str, prompt: &str| {
+            let proj = tmp.path().join(dir);
+            fs::create_dir_all(&proj).unwrap();
+            let line = serde_json::json!({"type":"user","sessionId":id,"cwd":cwd,
+                "timestamp":"2026-11-02T10:00:00.000Z",
+                "message":{"role":"user","content":prompt}});
+            fs::write(proj.join(format!("{id}.jsonl")), line.to_string()).unwrap();
+        };
+        write(
+            "-Users-you-notes",
+            "mine",
+            "/Users/you/notes",
+            "Tidy my reading list",
+        );
+        write(
+            "-Users-you-elsewhere",
+            "preamble",
+            "/Users/you/elsewhere",
+            &format!(
+                "{} (a personal memory system), as the agent named \"Desk hand\". Book it.",
+                hearthloom_core::AGENT_PREAMBLE_MARK
+            ),
+        );
+        write(
+            "-Users-you-agents-desk",
+            "in-folder",
+            "/Users/you/agents/desk",
+            "Summarise the inbox",
+        );
+        write(
+            "-Users-you-agents-desk-sub",
+            "in-subfolder",
+            "/Users/you/agents/desk/sub",
+            "Look deeper",
+        );
+        // A sibling whose name merely starts the same way is not inside it.
+        write(
+            "-Users-you-agents-desktop",
+            "sibling",
+            "/Users/you/agents/desktop",
+            "Mine too",
+        );
+
+        let agent_dirs = [PathBuf::from("/Users/you/agents/desk")];
+        let mut kept: Vec<String> = ingest_except(tmp.path(), None, &agent_dirs)
+            .unwrap()
+            .into_iter()
+            .map(|d| d.source_ref)
+            .collect();
+        kept.sort();
+        assert_eq!(kept, ["mine", "sibling"]);
+
+        // Without the folder list, only the preamble rule applies.
+        let mut kept: Vec<String> = ingest(tmp.path(), None)
+            .unwrap()
+            .into_iter()
+            .map(|d| d.source_ref)
+            .collect();
+        kept.sort();
+        assert_eq!(kept, ["in-folder", "in-subfolder", "mine", "sibling"]);
     }
 }

@@ -20,6 +20,22 @@ pin release tags, never a branch.
 - **Only the dashboard can frame an ember's pages** (`frame-ancestors
   'self'`). Before, any site could frame one, become its parent window and
   answer its handshake.
+- **An ember's token goes to its frame once, on the first load.** The
+  dashboard used to hand it over on every load of the frame, and a frame
+  can only be addressed "anyone" (it is sandboxed). So if a page followed a
+  link to another site inside its frame, that site received the ember's
+  12-hour token and the node's address. No published ember had such a link.
+- **An ember page opens only inside the dashboard.** The node refuses one
+  opened as a tab of its own, which a site could otherwise do and then
+  message the page.
+- **Your agents' runs are no longer imported as your own words.** A node's
+  idle refresh imports its Claude Code sessions as written by you, and a
+  machine that runs agents would have imported their runs too, often with
+  web pages or other people's text inside. Text recorded as yours doesn't
+  trigger the rule that makes Ask stop and ask after reading something you
+  didn't write. Sessions a Hearthloom agent ran, and any in an agent's
+  working folder, are now left out; each task's outcome is recorded as
+  before.
 - **Restoring an export can't write outside the home folder.** The check
   caught `..` but not an absolute name such as `files//etc/x`, which
   replaced the home root when joined.
@@ -34,7 +50,33 @@ pin release tags, never a branch.
   (I/O safety). CI now checks `Cargo.lock` against the RustSec database
   when dependencies change and every week.
 
+### Added
+- **One handshake for every ember page: `/assets/ember.js`.** A page loads
+  the node's script instead of carrying its own copy, and gets a client for
+  its storage, files, secrets and sign-in, plus the Dial's window. It
+  believes only the dashboard, always calls the node that served the page,
+  and opens links to other sites in a new tab. Fixes now reach every ember
+  with a Hearthloom release. `hearthloom ember validate` warns about a page
+  that listens for messages itself. The plugin guide is rewritten around
+  it, and a browser test in CI checks it against the senders it must
+  refuse.
+- **A switch for whether a node imports its own machine's files**
+  (Claude Code sessions, Chrome history, Photos, known repos): on the
+  Peering page, or `hearthloom node --imports off`. Useful for a machine
+  that mostly runs agents.
+- **`hearthloom node`** lists your nodes and their roles, and sets this
+  node's name, thinking role and imports switch (`--name`, `--thinking`,
+  `--imports`).
+
 ### Fixed
+- **The cloud node no longer looks offline to your other machines.** A
+  node announced itself only when it synced, and the hub never runs a sync
+  of its own, so the others saw it as last seen at its last restart. That
+  would have misled "auto" thinking and the "waiting for…" card. Every
+  node now announces itself every five minutes.
+- **An ember's sign-in no longer says your browser blocked it when it
+  didn't.** The dashboard opened the sign-in with `noopener`, which always
+  reports a blocked window, so the "blocked" link showed every time.
 - **Placing a downloaded export works on Linux nodes.** Keeping a copy of
   an export the Downloads card found, or moving one across disks, ran
   macOS's `ditto`, which Linux doesn't have. Other systems now copy with

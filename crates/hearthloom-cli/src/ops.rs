@@ -588,6 +588,64 @@ pub async fn export(client: &Client, out: Option<std::path::PathBuf>) -> Result<
     Ok(())
 }
 
+/// `hearthloom node`: list the nodes, or change this one.
+pub async fn node(
+    client: &Client,
+    name: Option<String>,
+    thinking: Option<String>,
+    imports: Option<String>,
+    as_json: bool,
+) -> Result<()> {
+    if name.is_some() || thinking.is_some() || imports.is_some() {
+        client
+            .post(
+                "/v1/nodes",
+                &json!({"name": name, "thinking": thinking, "imports": imports}),
+            )
+            .await?;
+    }
+    let res = client.get("/v1/nodes", &[]).await?;
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&res)?);
+        return Ok(());
+    }
+    let this = res.get("this").and_then(|v| v.as_str()).unwrap_or("");
+    for n in res
+        .get("nodes")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&vec![])
+    {
+        let s = |k: &str| n.get(k).and_then(|v| v.as_str()).unwrap_or("?");
+        let roles = n.get("roles").cloned().unwrap_or_default();
+        let imports = if s("kind") == "cloud" {
+            String::new()
+        } else if roles.get("imports").and_then(|v| v.as_bool()) == Some(false) {
+            " · doesn't import its files".into()
+        } else {
+            " · imports its files".into()
+        };
+        println!(
+            "{}{}  v{} · {} · thinking {} · {} agent(s){} · seen {}",
+            s("name"),
+            if s("node_id") == this {
+                " (this machine)"
+            } else {
+                ""
+            },
+            s("version"),
+            s("kind"),
+            roles
+                .get("thinking")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
+            roles.get("agents").and_then(|v| v.as_u64()).unwrap_or(0),
+            imports,
+            s("last_seen"),
+        );
+    }
+    Ok(())
+}
+
 pub async fn sync(client: &Client, now: bool, full: bool) -> Result<()> {
     if now {
         let res = client
@@ -769,6 +827,9 @@ pub fn ember_validate(dir: &std::path::Path) -> Result<()> {
                 }
             }
         }
+    }
+    for warning in hearthloom_daemon::plugins::ui_handshake_warnings(dir) {
+        println!("  ⚠ {warning}");
     }
     Ok(())
 }

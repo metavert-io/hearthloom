@@ -188,6 +188,21 @@ enum Cmd {
     },
     /// One screen: version, record size, vault, thinking, peer.
     Status,
+    /// Your nodes (this machine, the cloud, any others) and their roles;
+    /// with flags, change THIS node: its name, whether it does the paid
+    /// thinking, whether it imports its own machine's files.
+    Node {
+        /// What to call this node ("Mac mini").
+        #[arg(long)]
+        name: Option<String>,
+        /// on | off | auto (one live auto node thinks at a time).
+        #[arg(long)]
+        thinking: Option<String>,
+        /// on | off: import this machine's Claude Code sessions, Chrome
+        /// history, Photos and known repos (agents' runs never are).
+        #[arg(long)]
+        imports: Option<String>,
+    },
     /// Peer sync: status, or `--now` to force a cycle.
     Sync {
         /// Run a sync cycle right now.
@@ -1136,6 +1151,14 @@ async fn main() -> Result<()> {
         Cmd::Export { out } => {
             let client = Client::with_url(home, url.clone())?;
             ops::export(&client, out).await?;
+        }
+        Cmd::Node {
+            name,
+            thinking,
+            imports,
+        } => {
+            let client = Client::with_url(home, url.clone())?;
+            ops::node(&client, name, thinking, imports, as_json).await?;
         }
         Cmd::Sync { now, full } => {
             let client = Client::with_url(home, url.clone())?;

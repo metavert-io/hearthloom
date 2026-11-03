@@ -288,6 +288,10 @@ async function paintNodes(el) {
     return mins < 2 ? "just now" : mins < 120 ? `${mins} min ago` : `${Math.round(mins / 60)} h ago`;
   };
   const thinkers = d.nodes.filter((n) => n.roles?.thinking === "on").length;
+  const meNode = d.nodes.find((n) => n.node_id === d.this);
+  // A computer's own files: its Claude Code sessions, Chrome history,
+  // Photos and known repos (agents' runs are always left out).
+  const importsOff = meNode?.roles?.imports === false;
   el.innerHTML = `
     ${d.nodes.map((n) => {
       const me = n.node_id === d.this;
@@ -297,12 +301,17 @@ async function paintNodes(el) {
         <span class="meta">${n.kind === "cloud" ? "always-on (cloud)" : "computer"} · v${esc(n.version || "?")}
           · ${esc(THINKING[n.roles?.thinking] || "")}${n.roles?.thinking === "auto" && n.node_id === d.thinking_holder ? " (its turn now)" : ""}
           · ${n.roles?.agents ? `${n.roles.agents} agent${n.roles.agents === 1 ? "" : "s"}` : "no agents"}
+          ${n.kind === "cloud" ? "" : `· ${n.roles?.imports === false ? "doesn't import its own files" : "imports its own files"}`}
           · <span${quiet ? ' style="color:var(--accent)"' : ""}>seen ${esc(ago(n.last_seen))}</span></span></div>`;
     }).join("") || `<p class="meta">Only this machine so far.</p>`}
     <div class="searchbar" style="flex-wrap:wrap; margin-top:var(--s3)">
       <span class="meta">This machine</span>
       <select id="node-thinking">${Object.entries(THINKING).map(([k, v]) =>
-        `<option value="${k}" ${d.nodes.find((n) => n.node_id === d.this)?.roles?.thinking === k ? "selected" : ""}>${esc(v)}</option>`).join("")}</select>
+        `<option value="${k}" ${meNode?.roles?.thinking === k ? "selected" : ""}>${esc(v)}</option>`).join("")}</select>
+      ${meNode?.kind === "cloud" ? "" : `<select id="node-imports" title="Claude Code sessions, Chrome history, Photos and known repos on this computer. Your agents' own runs are never imported.">
+        <option value="on" ${importsOff ? "" : "selected"}>imports this computer's own files</option>
+        <option value="off" ${importsOff ? "selected" : ""}>doesn't import this computer's files</option>
+      </select>`}
       <span class="meta" id="node-note">${thinkers > 1 ? `${thinkers} machines all do the thinking — that pays for it ${thinkers} times; one is enough.` : ""}</span>
     </div>`;
   el.querySelector("#node-thinking").onchange = async (e) => {
@@ -311,6 +320,12 @@ async function paintNodes(el) {
     }
     paintNodes(el);
   };
+  el.querySelector("#node-imports")?.addEventListener("change", async (e) => {
+    try { await apiPost("/v1/nodes", { imports: e.target.value }); } catch (err) {
+      el.querySelector("#node-note").textContent = `✗ ${err.message}`; return;
+    }
+    paintNodes(el);
+  });
 }
 
 export async function mount(view, helpers) {

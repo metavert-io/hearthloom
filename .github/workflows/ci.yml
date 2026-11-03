@@ -1,7 +1,8 @@
 # The build checks from CLAUDE.md — formatting, build, clippy (warnings are
 # errors), tests — on Linux (how a hosted node runs) and macOS (how a laptop
-# node runs). CodeQL (default setup) and the RustSec audit (audit.yml) run
-# separately.
+# node runs), plus the ember handshake in a real browser
+# (tests/ember-handshake). CodeQL (default setup) and the RustSec audit
+# (audit.yml) run separately.
 name: CI
 
 on:
@@ -45,3 +46,22 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
+
+  ember-handshake:
+    name: Ember handshake (browser)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: tests/ember-handshake
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Install
+        run: npm ci && npx playwright install --with-deps chromium
+      - name: Test
+        run: node test.mjs

@@ -579,7 +579,10 @@ and `/brain`, with the `friend` scope.
 - **Plugins ("embers")**: sidecar processes with scoped tokens behind a
   default-deny route ceiling. Their storage is mediated by the daemon,
   and their UI runs in sandboxed iframes, never in the dashboard origin.
-  A registry distributes signed packages. On a Mac launchd runs their
+  One handshake serves every ember: the node's `/assets/ember.js` in the
+  page and `/assets/ember-shell.js` in the dashboard, which hands the
+  page its token once per load; ember pages open only inside the
+  dashboard. A registry distributes signed packages. On a Mac launchd runs their
   programs; elsewhere (hosted nodes) the daemon supervises them. An
   ember can publish files under `/.well-known/`, keep sealed secrets
   (never exported or mirrored), and borrow the node's address for an

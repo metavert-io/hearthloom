@@ -25,6 +25,12 @@ pub mod store;
 pub mod time;
 
 pub use ingest::{one_line, EdgeAssertion, EntityRef, EpisodeDraft, IngestBatch, IngestReport};
+
+/// The opening words of every task Hearthloom hands an agent harness (daemon
+/// `agents::preamble`). Local importers use them to recognise an agent's run
+/// and leave it out: an agent's transcript is not the owner's words (its
+/// outcome lands as an `agent_task` episode instead).
+pub const AGENT_PREAMBLE_MARK: &str = "You are acting for the owner of a Hearthloom record";
 pub use paths::Home;
 pub use store::{Actor, Store};
 pub use time::{EventTime, TimeUncertainty};

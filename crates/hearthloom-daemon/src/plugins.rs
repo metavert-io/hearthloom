@@ -338,6 +338,53 @@ pub fn manifest_path(dir: &Path) -> Option<PathBuf> {
 }
 
 /// Parse + validate a package directory's manifest.
+/// Pages under `ui/` that listen for window messages themselves instead of
+/// loading /assets/ember.js, the handshake every ember page shares (it
+/// checks who is talking: the dashboard, never a sibling frame, an opener or
+/// a site framing the page). `hearthloom ember validate` warns about each.
+pub fn ui_handshake_warnings(dir: &Path) -> Vec<String> {
+    const LISTENERS: [&str; 4] = [
+        "addEventListener(\"message\"",
+        "addEventListener('message'",
+        "addEventListener(`message`",
+        "onmessage=",
+    ];
+    let mut out = Vec::new();
+    let mut stack = vec![dir.join("ui")];
+    while let Some(folder) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("html" | "htm" | "js" | "mjs")
+            ) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+            if LISTENERS.iter().any(|l| compact.contains(l)) {
+                out.push(format!(
+                    "{} listens for window messages itself: load /assets/ember.js instead \
+                     (it checks who is talking), or accept a message only when \
+                     ev.source === window.parent && ev.origin === location.origin",
+                    path.strip_prefix(dir).unwrap_or(&path).display()
+                ));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 pub fn load_manifest(dir: &Path) -> Result<Manifest> {
     let path =
         manifest_path(dir).ok_or_else(|| anyhow!("no hearthember.json in {}", dir.display()))?;
@@ -1236,6 +1283,36 @@ pub fn runner_tick(state: &AppState) {
         if !running {
             let _ = sidecar_start(state, &manifest);
         }
+    }
+}
+
+#[cfg(test)]
+mod handshake_warning_tests {
+    #[test]
+    fn test_pages_with_their_own_message_listener_are_flagged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ui = tmp.path().join("ui");
+        std::fs::create_dir_all(ui.join("js")).unwrap();
+        std::fs::write(
+            ui.join("index.html"),
+            "<script src=\"/assets/ember.js\"></script><script>window.hearth.then(() => {});</script>",
+        )
+        .unwrap();
+        std::fs::write(
+            ui.join("js/old.js"),
+            "addEventListener( 'message', (ev) => {});",
+        )
+        .unwrap();
+        std::fs::write(
+            ui.join("legacy.html"),
+            "<script>window.onmessage = (e) => {}</script>",
+        )
+        .unwrap();
+        std::fs::write(ui.join("notes.txt"), "addEventListener(\"message\"").unwrap();
+        let warnings = super::ui_handshake_warnings(tmp.path());
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].starts_with("ui/js/old.js"));
+        assert!(warnings[1].starts_with("ui/legacy.html"));
     }
 }
 

@@ -955,6 +955,31 @@ mod key_ceiling_tests {
     }
 
     #[test]
+    fn test_ember_pages_never_open_as_their_own_tab() {
+        // frame-ancestors keeps other sites from framing an ember page; this
+        // keeps one from opening it in a window it holds and messaging it.
+        let dest = |d: Option<&str>| {
+            let mut h = axum::http::HeaderMap::new();
+            if let Some(d) = d {
+                h.insert("sec-fetch-dest", d.parse().unwrap());
+            }
+            super::ember_page_top_level(&h)
+        };
+        assert!(dest(Some("document")));
+        // the dashboard's frame, its reachability probe, a page's own
+        // scripts and styles, and clients that send no fetch metadata
+        for ok in [
+            Some("iframe"),
+            Some("empty"),
+            Some("script"),
+            Some("style"),
+            None,
+        ] {
+            assert!(!dest(ok), "{ok:?}");
+        }
+    }
+
+    #[test]
     fn test_ordinary_keys_reach_only_their_scope() {
         // read: the record, nothing that manages the node.
         assert!(may(&["read"], "GET", "/v1/search"));
@@ -9457,9 +9482,11 @@ struct NodesSetBody {
     name: Option<String>,
     #[serde(default)]
     thinking: Option<String>,
+    #[serde(default)]
+    imports: Option<String>,
 }
 
-/// This node's name and thinking role.
+/// This node's name, thinking role and whether it imports its own files.
 async fn nodes_set(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthInfo>,
@@ -9484,10 +9511,18 @@ async fn nodes_set(
         }
         state.store.set_consolidation_state("node.thinking", mode)?;
     }
+    if let Some(mode) = body.imports.as_deref() {
+        if !["on", "off"].contains(&mode) {
+            return Err(bad_request("imports must be on or off"));
+        }
+        state.store.set_consolidation_state("node.imports", mode)?;
+    }
     crate::agents::publish_self(&state);
-    Ok(Json(
-        json!({"node_id": crate::agents::node_id(&state), "thinking_here": crate::agents::thinking_here(&state)}),
-    ))
+    Ok(Json(json!({
+        "node_id": crate::agents::node_id(&state),
+        "thinking_here": crate::agents::thinking_here(&state),
+        "imports_here": crate::agents::imports_here(&state),
+    })))
 }
 
 fn agents_vault_open(state: &AppState) -> Result<(), ApiError> {
@@ -12575,9 +12610,24 @@ async fn plugin_ui_token(
 }
 
 /// Serve a plugin's static UI assets (pkg/ui/…) into its sandbox.
+/// Is this a browser opening an ember page as a page of its own (a tab, or a
+/// window another site opened and can message), not as the dashboard's
+/// frame, its fetch probe or a page's subresource?
+fn ember_page_top_level(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("sec-fetch-dest")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|d| d == "document")
+}
+
+const EMBER_TOP_LEVEL_NOTE: &str = "<!doctype html><meta charset=\"utf-8\"><title>Hearthloom</title>\
+<p style=\"font:16px system-ui;margin:2em\">This page belongs to an ember. It opens inside Hearthloom's \
+dashboard, not on its own.</p>";
+
 async fn plugin_ui_asset(
     State(state): State<AppState>,
     Path((name, rest)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     let not_found = || (StatusCode::NOT_FOUND, "no such plugin asset").into_response();
@@ -12587,6 +12637,15 @@ async fn plugin_ui_asset(
     let enabled = matches!(state.store.plugin(&name), Ok(Some(row)) if row.enabled);
     if !enabled {
         return not_found();
+    }
+    // Ember pages render only inside the dashboard's frame.
+    if ember_page_top_level(&headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            EMBER_TOP_LEVEL_NOTE,
+        )
+            .into_response();
     }
     let path = crate::plugins::plugin_dir(&state, &name)
         .join("pkg/ui")

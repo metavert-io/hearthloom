@@ -1,6 +1,8 @@
 // Hearthloom dashboard — hash-routed, dependency-free (three.js is the
 // one vendored library, loaded only on the constellation view).
 
+import { handOver, openLinks, openExternal } from "/assets/ember-shell.js";
+
 const API = "";
 const SOURCE_HUES = {
   git: "var(--hue-git)",
@@ -677,21 +679,26 @@ async function renderPluginPage(arg) {
     let url = null;
     try { url = (await api(`/v1/plugins/${encodeURIComponent(name)}/oauth`)).authorize_url; } catch { /* none pending */ }
     if (!url || !/^https:\/\//.test(url)) return;
-    const win = window.open(url, "_blank", "noopener");
-    if (!win) {
-      // blocked: offer the same address as a plain link above the frame
-      let bar = document.getElementById("plugin-oauth-bar");
-      if (!bar) {
-        bar = document.createElement("p");
-        bar.id = "plugin-oauth-bar";
-        bar.className = "meta";
-        frame.before(bar);
-      }
-      bar.innerHTML = `Your browser blocked the sign-in window. <a href="${esc(url)}" target="_blank" rel="noopener">Open the sign-in page →</a>`;
-    }
+    if (!openExternal(url)) linkBar(url, "Your browser blocked the sign-in window.", "Open the sign-in page →");
   };
   window.addEventListener("message", onOAuth);
   window.addEventListener("hashchange", () => window.removeEventListener("message", onOAuth), { once: true });
+  // A blocked tab: offer the same address as a plain link above the frame.
+  const linkBar = (url, why, label) => {
+    let bar = document.getElementById("plugin-oauth-bar");
+    if (!bar) {
+      bar = document.createElement("p");
+      bar.id = "plugin-oauth-bar";
+      bar.className = "meta";
+      frame.before(bar);
+    }
+    bar.innerHTML = `${esc(why)} <a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(label)}</a>`;
+  };
+  // Links in the page to other sites open in a new tab (ember.js asks).
+  const stopLinks = openLinks(frame, {
+    onBlocked: (url) => linkBar(url, "Your browser blocked the new tab.", "Open the link →"),
+  });
+  window.addEventListener("hashchange", stopLinks, { once: true });
 
   // 1 · Wait until the page can actually be served. Right after a daemon
   // restart (or while it is busy) the request fails; loading the frame
@@ -729,25 +736,14 @@ async function renderPluginPage(arg) {
   // 3 · Only NOW point the frame at the page, with the load listener
   // already attached. (It used to be attached after the token await — a
   // page that finished loading first never got its handshake and sat on
-  // "loading…" forever.)
-  frame.addEventListener("load", () => {
-    const palette = {};
-    const styles = getComputedStyle(document.documentElement);
-    for (const v of ["--bg", "--ink", "--ink-faint", "--accent", "--card", "--line",
-      "--chart-1", "--chart-2", "--chart-3", "--chart-4",
-      "--chart-5", "--chart-6", "--chart-7", "--chart-8", "--chart-heat"]) {
-      palette[v] = styles.getPropertyValue(v).trim();
-    }
-    frame.contentWindow.postMessage(
-      { type: "hearthloom", token, base: location.origin, palette },
-      "*" // sandboxed frames have an opaque origin; "*" is the only address
-    );
-    if (wantsDial) {
-      frame.contentWindow.postMessage({ type: "hearthloom-timespan", ...span }, "*");
-    }
-    // Older embers never report a height — don't hold the spinner on them.
-    setTimeout(show, 1500);
+  // "loading…" forever.) The handshake goes out once, on this first load:
+  // never to whatever the frame shows later (ember-shell.js).
+  handOver(frame, {
+    token,
+    then: wantsDial ? [{ type: "hearthloom-timespan", ...span }] : [],
   });
+  // Older embers never report a height — don't hold the spinner on them.
+  frame.addEventListener("load", () => setTimeout(show, 1500), { once: true });
   frame.src = src;
   // The ember asked for time scoping: mount the REAL Dial in the shell
   // (never inside the sandbox) and stream the window in.

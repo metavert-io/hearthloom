@@ -2669,6 +2669,10 @@ fn first_trkpt(gpx: &str) -> Option<(f64, f64)> {
 /// Re-run the local adapters over known sources. Returns per-source new
 /// episode counts (Null when skipped because a refresh ran recently).
 async fn refresh_local_sources(state: &AppState, actor: &Actor) -> anyhow::Result<Value> {
+    // A node can be told not to import its own machine's files (Peering).
+    if !crate::agents::imports_here(state) {
+        return Ok(Value::Null);
+    }
     // At most once per REFRESH_EVERY, tracked via the mutations log.
     if let Some(ts) = state.store.latest_mutation_ts("sources_refreshed")? {
         if let Ok(then) = chrono::DateTime::parse_from_rfc3339(&ts) {
@@ -2682,6 +2686,7 @@ async fn refresh_local_sources(state: &AppState, actor: &Actor) -> anyhow::Resul
     let store = state.store.clone();
     let home = state.home.clone();
     let repos = state.store.known_repo_paths()?;
+    let agent_dirs = crate::agents::agent_workdirs(state);
     let summary = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
         let mut per_source = serde_json::Map::new();
         let mut apply = |name: &str,
@@ -2722,11 +2727,15 @@ async fn refresh_local_sources(state: &AppState, actor: &Actor) -> anyhow::Resul
             }
         }
         if let Ok(homedir) = std::env::var("HOME") {
+            // An agent's sessions are not the owner's words: those in this
+            // node's agent folders (and any opening with the agent preamble)
+            // stay out — the agent_task episode records the outcome.
             apply(
                 "claude-code",
-                hearthloom_adapters::claude_code::ingest(
+                hearthloom_adapters::claude_code::ingest_except(
                     &std::path::Path::new(&homedir).join(".claude/projects"),
                     None,
+                    &agent_dirs,
                 ),
             )?;
         }
