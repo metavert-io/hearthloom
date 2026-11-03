@@ -124,9 +124,22 @@ Every episode carries:
   same row.
 - `event_time` with timezone offset and an uncertainty level, plus
   `ingest_time`. The two clocks are the basis of the bi-temporal model.
-- `trust`: `self` (the user's own activity), `imported` (other people's
-  writing, such as inbound mail), or `agent` (something Hearthloom or an
-  agent wrote).
+- `trust`: `self` (the user's own words and activity), `imported`
+  (other people's writing, such as inbound mail, message threads, web
+  page titles, chat assistants' replies, calendar invitations, scans), or
+  `agent` (something Hearthloom or an agent wrote). Since v61 a `self`
+  claim from a source others write lands as `imported`
+  (`store/provenance.rs::trust_for`, applied in `apply_batch`).
+- **An origin** (v61, `episode_origin`): who first wrote it (an import,
+  the user, an agent's key, the phone), on which of the user's nodes and
+  when, who let it in when someone else proposed it, the agent task that
+  produced it, and the route it took between the user's nodes to reach
+  this one. Recorded on arrival, inside the ingest transaction; a synced
+  episode's origin travels beside it on the episodes leg and each node
+  adds itself to the route. Episodes from before v61 answer from the row
+  itself: a local write names its writer, a synced one only the node
+  that sent it. Shown as "How it got here" on every memory, by
+  `hearthloom provenance <id>`, and to Ask through `read_episode`.
 - `scope`: `work`, `personal`, `family`, `health` or `private`.
 - `derivation`: `observed` (absorbed from a data flow), `declared` (the
   human stated it) or `inferred` (Hearthloom concluded it, citing
@@ -503,7 +516,12 @@ Three rules sit above the lock state:
 
 ### Trust in content
 
-Agent-proposed memories go to `quarantine` and wait for the user.
+Agent-proposed memories go to `quarantine` and wait for the user; once
+let in, their origin names the agent that proposed them, the user who
+accepted, and the agent's task. An agent task records everything outside
+the user's words it read (`agent_tasks.inputs`) and everything it wrote
+(`outputs`); the first outside read taints it, and every later action
+waits for the user (the taint rule).
 Promoted content from untrusted origins is quarantined first.
 Credential-shaped tokens are redacted from everything Ask shows a model.
 
@@ -523,6 +541,9 @@ private data, under `/v1/sync/*` with the `peer` scope.
 - **Deletes travel only through the journal.** A delete tombstone in
   `op_journal` is replayed on the peer, and the mirror refuses to
   resurrect a row older than a local tombstone.
+- **Provenance rides the episodes leg**: each episode's origin is sent
+  beside it (a pull page's `origins`, a push body's `origins`), only a
+  `peer` key's are believed, and each node adds itself to the route.
 - **Legs by kind**: episodes, the operational mirror, the journal,
   extraction verdicts, photos, locations, device state, contacts,
   sharing posture, plugin data, telemetry and the usage ledger.
@@ -663,7 +684,13 @@ are decided but not built:
 
 - Derived episodes (digests, chapters, self-model propositions) are
   minted with trust `agent` regardless of what they summarised. Nothing
-  carries the lowest input trust forward.
+  carries the lowest input trust forward (their recorded inputs are shown
+  under "How it got here").
+- Git commits stay `self` whoever wrote them: telling the user's commits
+  from a collaborator's needs an author check against the claimed
+  identities. Episodes that reached a node by sync before v61 have no
+  origin beyond the node that sent them; the origin node knows, but no
+  leg back-fills it.
 - Ask's conversation is one growing string, so only the system prompt
   caches.
 - The Ask eval's retraction cases are templates until the owner supplies

@@ -46,6 +46,23 @@ impl Store {
     /// Apply a batch of episode drafts. Raw content is written under the
     /// home's raw dir before the row lands; idempotent on re-runs.
     pub fn apply_batch(&self, home: &Home, batch: &IngestBatch) -> Result<IngestReport> {
+        self.apply_batch_from(home, batch, &[])
+    }
+
+    /// `apply_batch` with the sender's provenance for synced drafts
+    /// (`Origin`s keyed by source + source_ref; see store/provenance.rs).
+    /// Every newly landed episode gets its origin recorded in the same
+    /// transaction, and its trust passes `trust_for`.
+    pub fn apply_batch_from(
+        &self,
+        home: &Home,
+        batch: &IngestBatch,
+        origins: &[super::provenance::Origin],
+    ) -> Result<IngestReport> {
+        let origins: std::collections::HashMap<(&str, &str), &super::provenance::Origin> = origins
+            .iter()
+            .map(|o| ((o.source.as_str(), o.source_ref.as_str()), o))
+            .collect();
         let actor = Actor {
             actor: batch.actor.clone(),
             session_id: batch.session_id.clone(),
@@ -113,6 +130,8 @@ impl Store {
                 .unwrap_or_else(|| now_utc()[..10].to_string());
             let content_ref = home.write_raw(&episode_id, &date, &draft.body)?;
 
+            // text others wrote never lands as the owner's own (v61)
+            let trust = super::provenance::trust_for(&draft.source, &draft.trust);
             let row = EpisodeRow {
                 id: episode_id.clone(),
                 source: draft.source.clone(),
@@ -124,12 +143,11 @@ impl Store {
                 tz_offset_minutes: draft.event_time.tz_offset_minutes,
                 time_uncertainty: draft.event_time.uncertainty.as_str().to_string(),
                 ingest_time: now_utc(),
-                trust: draft.trust.clone(),
+                trust: trust.clone(),
                 scope: scope.clone(),
                 content_ref: Some(content_ref),
                 content_hash: ids::content_hash(draft.body.as_bytes()),
-                derivation: super::episodes::derivation_for(&draft.source, &draft.trust)
-                    .to_string(),
+                derivation: super::episodes::derivation_for(&draft.source, &trust).to_string(),
             };
 
             if !insert_episode(&tx, &row, actor.session_id.as_deref(), &draft.body)? {
@@ -137,6 +155,14 @@ impl Store {
                 continue;
             }
             report.episodes_new += 1;
+            super::provenance::record_arrival(
+                &tx,
+                &episode_id,
+                &actor,
+                origins
+                    .get(&(draft.source.as_str(), draft.source_ref.as_str()))
+                    .copied(),
+            )?;
             // THE SUPERSESSION PATTERN (v47, CLAUDE.md): an episode whose
             // source_ref carries a revision suffix (`<base>#r<n>`) marks
             // every prior revision of the same base superseded — a pure

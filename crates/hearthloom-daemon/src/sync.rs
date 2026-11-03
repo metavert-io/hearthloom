@@ -479,10 +479,14 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
             session_id: None,
             episodes: page.episodes,
         };
+        // the batch, plus where each episode came from (v61; an older
+        // hub ignores the extra field)
+        let mut body = serde_json::to_value(&batch)?;
+        body["origins"] = serde_json::to_value(&page.origins)?;
         let res = client
             .post(format!("{url}/v1/ingest"))
             .bearer_auth(&key)
-            .json(&batch)
+            .json(&body)
             .send()
             .await
             .context("pushing to peer")?;
@@ -542,13 +546,18 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
             .get("next_cursor")
             .and_then(|c| c.as_i64())
             .ok_or_else(|| anyhow!("peer export had no cursor"))?;
-        let report = state.store.apply_batch(
+        // where each came from, when the peer says (v61)
+        let origins: Vec<hearthloom_core::store::Origin> =
+            serde_json::from_value(page.get("origins").cloned().unwrap_or(json!([])))
+                .unwrap_or_default();
+        let report = state.store.apply_batch_from(
             &state.home,
             &IngestBatch {
                 actor: format!("peer:{name}"),
                 session_id: None,
                 episodes,
             },
+            &origins,
         )?;
         pulled_new += report.episodes_new;
         pulled_existing += report.episodes_existing;

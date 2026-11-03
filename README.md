@@ -422,6 +422,26 @@ filtered fallback.
   of it back. Retirements travel to your other nodes, and anything that
   arrives later from a retired source lands retired.
 
+### How it got here — provenance (0.5.78)
+- **Every memory says where it came from.** Expand any memory (Day view,
+  Memories) and "How it got here" names who first wrote it — an import,
+  you, your phone, an agent — on which of your nodes and when, who let
+  it in when someone else proposed it, and the route it took between
+  your nodes (MacBook → Cloud → Mac mini). `hearthloom provenance <id>`
+  shows the same; Ask sees it when it reads a memory, so "where did this
+  come from?" has an answer.
+- **Agents leave a trail.** When an agent's task produced a memory, the
+  task is named, with everything outside your own words it read (pages,
+  searches, other tools, other people's writing in your record) and what
+  it wrote. A summary lists what it summarised.
+- **Other people's words are never filed as yours.** Message threads,
+  browsing history, screen captures, chat assistants' replies, coding
+  sessions, calendar invitations, scans and media titles are kept as
+  *imported*, so reading them counts as reading something you didn't
+  write (Ask and agents then ask before acting).
+- Memories that reached a node from another one before 0.5.78 say only
+  which node sent them.
+
 ### Materialized and virtualized sources
 Today all ten adapters **materialize**: data is cloned into the episode log
 you own. Alongside them, **virtualized** sources stay at origin and are

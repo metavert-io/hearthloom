@@ -869,6 +869,103 @@ mod write_actor_tests {
 }
 
 #[cfg(test)]
+mod ingest_origin_tests {
+    use super::*;
+    use hearthloom_core::store::ApiKeyClaims;
+
+    fn state() -> (AppState, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::paths::Home::at(tmp.path());
+        home.init().unwrap();
+        let state = AppState {
+            store: std::sync::Arc::new(
+                hearthloom_core::store::Store::open(&home.db_path()).unwrap(),
+            ),
+            home,
+            embedder: None,
+            llm: None,
+            auth_locked: Default::default(),
+            bus: Default::default(),
+            killswitch: Default::default(),
+            running: Default::default(),
+        };
+        (state, tmp)
+    }
+
+    fn key(scopes: &[&str]) -> AuthInfo {
+        AuthInfo(Some(ApiKeyClaims {
+            id: "ak_1".into(),
+            name: "attic".into(),
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            grants: None,
+        }))
+    }
+
+    fn body(source_ref: &str) -> IngestBody {
+        let draft = hearthloom_core::EpisodeDraft {
+            source: "desk".into(),
+            source_ref: source_ref.into(),
+            kind: "task".into(),
+            title: "t".into(),
+            body: "b".into(),
+            event_time: hearthloom_core::EventTime::parse_rfc3339(
+                "2026-11-01T00:00:00Z",
+                hearthloom_core::TimeUncertainty::Exact,
+            )
+            .unwrap(),
+            trust: "self".into(),
+            scope: Some("personal".into()),
+            entities: vec![],
+            edges: vec![],
+        };
+        serde_json::from_value(json!({
+            "actor": "adapter:script",
+            "episodes": [draft],
+            "origins": [{"source": "desk", "source_ref": source_ref, "writer": "human:dashboard",
+                         "node": "nd_elsewhere", "route": [{"node": "nd_elsewhere"}]}],
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_only_one_of_the_owners_nodes_may_say_where_an_episode_came_from() {
+        let (state, _tmp) = state();
+        let origin = |r: &str| {
+            state
+                .store
+                .episode_origin(&hearthloom_core::ids::episode_id("desk", r))
+                .unwrap()
+                .unwrap()
+        };
+        // the owner's own key is not a node: what it claims is dropped
+        let _ = ingest(
+            State(state.clone()),
+            HeaderMap::new(),
+            axum::Extension(key(&["admin"])),
+            Json(body("a")),
+        )
+        .await
+        .map_err(|e| e.1)
+        .unwrap();
+        assert_eq!(origin("a").writer.as_deref(), Some("adapter:script"));
+        assert_ne!(origin("a").node.as_deref(), Some("nd_elsewhere"));
+        // a node: kept, and this one is added to the route
+        let _ = ingest(
+            State(state.clone()),
+            HeaderMap::new(),
+            axum::Extension(key(&["peer"])),
+            Json(body("b")),
+        )
+        .await
+        .map_err(|e| e.1)
+        .unwrap();
+        assert_eq!(origin("b").writer.as_deref(), Some("human:dashboard"));
+        assert_eq!(origin("b").node.as_deref(), Some("nd_elsewhere"));
+        assert_eq!(origin("b").route.len(), 2);
+    }
+}
+
+#[cfg(test)]
 mod key_ceiling_tests {
     use super::{key_route_allowed, KEY_ROUTES};
 
@@ -2004,6 +2101,8 @@ async fn episode(
         };
         let mut value = serde_json::to_value(row).unwrap();
         value["body"] = json!(body);
+        // how it got here (v61) — the owner's view only: it names nodes and agents
+        value["provenance"] = crate::provenance::describe(&state, &id).unwrap_or(Value::Null);
         if let Some(state_) = superseded {
             match state_.strip_prefix(hearthloom_core::store::RETIRED_PREFIX) {
                 Some(rid) => value["retired_by"] = json!(rid),
@@ -2230,7 +2329,17 @@ async fn resolve_quarantine(
                 }],
             };
             state.store.apply_batch(&state.home, &batch)?;
-            episode_id = Some(hearthloom_core::ids::episode_id(&source, &source_ref));
+            let landed = hearthloom_core::ids::episode_id(&source, &source_ref);
+            // provenance: the proposer wrote it, the owner let it in, and
+            // an agent's task (if one proposed it) is named (v61)
+            let task = state.store.agent_task_that_wrote(&entry.id).ok().flatten();
+            let _ = state.store.set_origin_writer(
+                &landed,
+                &entry.actor,
+                Some(&actor.actor),
+                task.as_deref(),
+            );
+            episode_id = Some(landed);
         }
     }
     Ok(Json(json!({
@@ -2240,12 +2349,26 @@ async fn resolve_quarantine(
     })))
 }
 
+/// `/v1/ingest`'s body: a batch, plus — from one of the owner's own nodes
+/// only — where each synced episode came from (provenance, v61).
+#[derive(Deserialize)]
+struct IngestBody {
+    #[serde(flatten)]
+    batch: IngestBatch,
+    #[serde(default)]
+    origins: Vec<hearthloom_core::store::Origin>,
+}
+
 async fn ingest(
     State(state): State<AppState>,
     headers: HeaderMap,
     axum::Extension(auth): axum::Extension<AuthInfo>,
-    Json(mut batch): Json<IngestBatch>,
+    Json(body): Json<IngestBody>,
 ) -> Result<Json<Value>, ApiError> {
+    let IngestBody {
+        mut batch,
+        mut origins,
+    } = body;
     let _claims = claims(&headers);
     if batch.actor.trim().is_empty() {
         return Err(bad_request("actor is required on every write"));
@@ -2255,6 +2378,11 @@ async fn ingest(
     // sender can't claim to be someone else.
     if let Some(claims) = &auth.0 {
         let peer = claims.scopes.iter().any(|s| s == "peer");
+        if !peer {
+            // only the owner's own nodes say where an episode came from;
+            // anyone else would be choosing its provenance
+            origins.clear();
+        }
         if peer {
             batch.actor = format!("peer:{}", claims.name);
         } else if let Some(plugin) = crate::plugins::plugin_for_claims(&state, claims) {
@@ -2285,7 +2413,12 @@ async fn ingest(
             }
         }
     }
-    let report = state.store.apply_batch(&state.home, &batch)?;
+    if auth.0.is_none() {
+        origins.clear(); // a keyless caller is a local tool, never a node
+    }
+    let report = state
+        .store
+        .apply_batch_from(&state.home, &batch, &origins)?;
     Ok(Json(serde_json::to_value(report).unwrap()))
 }
 
@@ -4921,6 +5054,7 @@ async fn sync_episodes(
     .map_err(|e| anyhow::anyhow!("export task: {e}"))??;
     Ok(Json(json!({
         "episodes": page.episodes,
+        "origins": page.origins,
         "next_cursor": page.next_cursor,
         "drained": page.drained,
         "head": state.store.sync_head()?,

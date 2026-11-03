@@ -249,6 +249,13 @@ pub struct AgentTaskRow {
     pub actions: i64,
     pub created_at: String,
     pub updated_at: String,
+    /// Everything outside the owner's own words the task read (v61):
+    /// `[{what, tool, at}]`, oldest first. `tainted` keeps the first.
+    #[serde(default)]
+    pub inputs: Value,
+    /// Everything it wrote: `[{kind, id, at}]` (a proposal, a note…).
+    #[serde(default)]
+    pub outputs: Value,
 }
 
 /// Task lifecycle. `proposed` waits for the user's go (ask-first);
@@ -280,7 +287,7 @@ fn row_to_agent(row: &rusqlite::Row) -> rusqlite::Result<AgentRow> {
 const AGENT_COLS: &str =
     "id, name, harness, config, secret_name, key_id, enabled, created_at, updated_at";
 const TASK_COLS: &str = "id, ask_id, agent_id, request, brief, classes, tainted, sensitive, status,
-     result, error, node, actions, created_at, updated_at";
+     result, error, node, actions, created_at, updated_at, inputs, outputs";
 
 fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<AgentTaskRow> {
     Ok(AgentTaskRow {
@@ -299,6 +306,8 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<AgentTaskRow> {
         actions: row.get(12)?,
         created_at: row.get(13)?,
         updated_at: row.get(14)?,
+        inputs: serde_json::from_str(&row.get::<_, String>(15)?).unwrap_or_else(|_| json!([])),
+        outputs: serde_json::from_str(&row.get::<_, String>(16)?).unwrap_or_else(|_| json!([])),
     })
 }
 
@@ -669,6 +678,51 @@ impl Store {
              WHERE id = ?1 AND (tainted IS NULL OR tainted = '')",
             rusqlite::params![id, why, now_utc()],
         )? > 0)
+    }
+
+    /// Note one more outside thing a task read (`inputs`, capped at 200).
+    pub fn add_agent_task_input(&self, id: &str, what: &str, tool: &str) -> Result<()> {
+        self.append_task_log(
+            id,
+            "inputs",
+            &json!({"what": what, "tool": tool, "at": now_utc()}),
+        )
+    }
+
+    /// Note something a task wrote (`outputs`, capped at 200).
+    pub fn add_agent_task_output(&self, id: &str, kind: &str, written: &str) -> Result<()> {
+        self.append_task_log(
+            id,
+            "outputs",
+            &json!({"kind": kind, "id": written, "at": now_utc()}),
+        )
+    }
+
+    fn append_task_log(&self, id: &str, column: &str, entry: &Value) -> Result<()> {
+        debug_assert!(column == "inputs" || column == "outputs");
+        let conn = self.lock();
+        conn.execute(
+            &format!(
+                "UPDATE agent_tasks SET {column} = json_insert({column}, '$[#]', json(?2)),
+                     updated_at = ?3
+                 WHERE id = ?1 AND json_array_length({column}) < 200"
+            ),
+            rusqlite::params![id, entry.to_string(), now_utc()],
+        )?;
+        Ok(())
+    }
+
+    /// The task whose outputs include this id (a proposal, a note), if any.
+    pub fn agent_task_that_wrote(&self, written: &str) -> Result<Option<String>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT t.id FROM agent_tasks t, json_each(t.outputs) o
+             WHERE json_extract(o.value, '$.id') = ?1 LIMIT 1",
+            [written],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     /// The ids of the tasks an agent is running right now.
@@ -1078,6 +1132,8 @@ impl Store {
                     "updated_at",
                     "started_at",
                     "finished_at",
+                    "inputs",
+                    "outputs",
                 ],
             ),
             (

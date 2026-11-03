@@ -87,12 +87,11 @@ static KICK: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 /// This node's stable id (minted once, never synced).
 pub fn node_id(state: &AppState) -> String {
-    if let Ok(Some(id)) = state.store.consolidation_state("node.id") {
-        return id;
-    }
-    let id = format!("nd_{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
-    let _ = state.store.set_consolidation_state("node.id", &id);
-    id
+    // one source of truth: provenance records the same id (store/provenance.rs)
+    state
+        .store
+        .this_node_id()
+        .unwrap_or_else(|_| "nd_unknown".into())
 }
 
 /// What people call this node ("MacBook", "Mac mini", "Cloud").
@@ -744,6 +743,8 @@ pub async fn tool_permission(
     if allowed {
         if let Some(why) = outside_content(tool, input) {
             let _ = state.store.taint_agent_task(task_id, &why);
+            // provenance: every outside read, not just the first (v61)
+            let _ = state.store.add_agent_task_input(task_id, &why, tool);
         }
     }
     (allowed, reason)
@@ -857,7 +858,32 @@ pub fn taint_from_record_read(state: &AppState, key_id: &str, tool: &str, result
     if let Some(why) = why {
         for task in tasks {
             let _ = state.store.taint_agent_task(&task, &why);
+            let _ =
+                state
+                    .store
+                    .add_agent_task_input(&task, &why, &format!("mcp__hearthloom__{tool}"));
         }
+    }
+}
+
+/// Note what an agent's key wrote on the tasks its agent is running (a
+/// proposal, a committed note or task), so provenance can name the task.
+pub fn record_agent_output(state: &AppState, key_id: &str, kind: &str, written: &str) {
+    let Some(agent) = state
+        .store
+        .agents()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|a| a.key_id.as_deref() == Some(key_id))
+    else {
+        return;
+    };
+    for task in state
+        .store
+        .running_agent_tasks(&agent.id)
+        .unwrap_or_default()
+    {
+        let _ = state.store.add_agent_task_output(&task, kind, written);
     }
 }
 
@@ -1021,6 +1047,10 @@ fn record_outcome(state: &AppState, agent: &AgentRow, task: &AgentTaskRow, ok: b
             session_id: None,
             episodes: vec![draft],
         },
+    );
+    let _ = state.store.set_origin_task(
+        &hearthloom_core::ids::episode_id("agent", &format!("task:{}", task.id)),
+        &task.id,
     );
     let title = if task.sensitive {
         format!("{} finished a task", agent.name)
@@ -1497,6 +1527,13 @@ mod tests {
         assert!(tainted(&state)
             .unwrap()
             .contains("https://example.com/page"));
+        let inputs = state.store.agent_task(&task.id).unwrap().unwrap().inputs;
+        assert_eq!(
+            inputs.as_array().unwrap().len(),
+            1,
+            "every outside read is kept (v61)"
+        );
+        assert_eq!(inputs[0]["tool"], "WebFetch");
 
         // from now on even a read waits for the owner
         let (st, id) = (state.clone(), task.id.clone());
@@ -1612,6 +1649,21 @@ mod tests {
             &json!({"results": [{"id": id_of("theirs")}]}),
         );
         assert!(tainted().unwrap().contains("imported content"));
+
+        // what the agent's key writes is noted on its task (provenance)
+        record_agent_output(&state, "key_desk", "proposal", "qr_1");
+        record_agent_output(&state, "key_other", "proposal", "qr_2");
+        assert_eq!(
+            state
+                .store
+                .agent_task_that_wrote("qr_1")
+                .unwrap()
+                .as_deref(),
+            Some(task.id.as_str())
+        );
+        assert!(state.store.agent_task_that_wrote("qr_2").unwrap().is_none());
+        let inputs = state.store.agent_task(&task.id).unwrap().unwrap().inputs;
+        assert_eq!(inputs[0]["tool"], "mcp__hearthloom__search");
     }
 
     #[test]

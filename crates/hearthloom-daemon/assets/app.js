@@ -199,6 +199,45 @@ async function bindCharts(root, charts, askId) {
   });
 }
 
+/* ————— how it got here (provenance, 0.5.78) ————— */
+function originWhen(at) {
+  if (!at) return "";
+  const d = new Date(at);
+  return isNaN(d) ? "" : ` · ${d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}`;
+}
+function originNode(n) {
+  const name = n?.name || n?.id || "an unknown node";
+  return n?.this ? `${esc(name)} (this one)` : esc(name);
+}
+function provenanceHtml(p) {
+  if (!p) return "";
+  const lines = [];
+  const where = p.node?.id ? ` on ${originNode(p.node)}` : "";
+  lines.push(`<div><b>Written by ${esc(p.writer_label || "someone")}</b>${where}${originWhen(p.at)}</div>`);
+  if (p.accepted_by_label) lines.push(`<div>Let in by ${esc(p.accepted_by_label)}</div>`);
+  const route = p.route || [];
+  if (route.length > 1) {
+    lines.push(`<div class="origin-route">Came via ${route.map((h) => originNode(h.node)).join(" → ")}</div>`);
+  }
+  if (p.recorded === false) {
+    lines.push(`<div class="origin-route">It arrived before Hearthloom kept track of where things came from.</div>`);
+  }
+  if (p.task) {
+    const read = p.task.read || [], wrote = p.task.wrote || [];
+    lines.push(`<div>From a task by <b>${esc(p.task.agent || "an agent")}</b>: ${esc(p.task.request || "")}</div>`);
+    if (read.length) {
+      lines.push(`<details><summary>it read ${read.length} thing${read.length === 1 ? "" : "s"} you didn't write</summary>
+        <ul>${read.map((r) => `<li>${esc(r.what)}</li>`).join("")}</ul></details>`);
+    }
+    if (wrote.length) lines.push(`<div class="origin-route">It wrote ${wrote.length} thing${wrote.length === 1 ? "" : "s"}.</div>`);
+  }
+  if (p.summary_of?.length) {
+    lines.push(`<details><summary>summarises ${p.summary_of.length} memor${p.summary_of.length === 1 ? "y" : "ies"}</summary>
+      <ul>${p.summary_of.map((e) => `<li>${esc(e.title || e.id)} <span class="meta">${esc(e.source)}</span></li>`).join("")}</ul></details>`);
+  }
+  return `<div class="episode-origin" aria-label="How it got here">${lines.join("")}</div>`;
+}
+
 /* ————— expandable episode cards ————— */
 const bodyCache = new Map();
 async function toggleEpisode(card, id) {
@@ -219,6 +258,7 @@ async function toggleEpisode(card, id) {
         <span class="mono">${esc(id)}</span>
         ${lifecycleControls(episode, id)}
       </div>
+      ${provenanceHtml(episode.provenance)}
       <div class="md">${md(episode.body || "(no content)")}</div>`;
     wireLifecycle(panel, episode, id, () => { bodyCache.delete(id); card.classList.add("retired-card"); });
   } catch (err) {
@@ -3576,6 +3616,7 @@ async function toggleBrowseEpisode(tr, id, colspan) {
         <span class="mono">${esc(id)}</span>
         ${lifecycleControls(episode, id)}
       </div>
+      ${provenanceHtml(episode.provenance)}
       <div class="md">${md(episode.body || "(no content)")}</div>`;
     wireLifecycle(holder, episode, id, () => { bodyCache.delete(id); tr.classList.add("retired-row"); holder.remove(); });
   } catch (err) {

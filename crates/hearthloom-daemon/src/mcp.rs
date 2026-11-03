@@ -121,6 +121,17 @@ fn call_tool(
     {
         crate::agents::taint_from_record_read(state, &claims.id, name, value);
     }
+    // ...and what it wrote is noted on its task, for provenance (v61).
+    if let (Ok(value), Some(claims), "propose_memory") = (&outcome, auth.0.as_ref(), name) {
+        let committed_kind = value["kind"].as_str().unwrap_or("note");
+        for (list, kind) in [("committed", committed_kind), ("quarantined", "proposal")] {
+            for item in value[list].as_array().into_iter().flatten() {
+                if let Some(id) = item.as_str().or_else(|| item["id"].as_str()) {
+                    crate::agents::record_agent_output(state, &claims.id, kind, id);
+                }
+            }
+        }
+    }
 
     // Tool-level failures are isError results, not protocol errors.
     Ok(match outcome {

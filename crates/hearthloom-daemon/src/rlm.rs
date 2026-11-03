@@ -534,13 +534,19 @@ fn run_tool(state: &AppState, tool: &str, args: &Value) -> Result<String> {
                 .episode(id)?
                 .ok_or_else(|| anyhow!("no episode {id}"))?;
             let body = state.store.episode_body(id)?.unwrap_or_default();
+            // where it came from (v61): Hearthloom's own words, one line,
+            // so "who wrote this / how did it get here?" can be answered
+            let origin = crate::provenance::describe(state, id)
+                .map(|view| format!("origin: {}\n", crate::provenance::one_line(&view)))
+                .unwrap_or_default();
             Ok(preview(format!(
-                "{} | {} | {}/{} | scope {}\n{}",
+                "{} | {} | {}/{} | scope {}\n{}{}",
                 episode.id,
                 episode.event_time.as_deref().unwrap_or("?"),
                 episode.source,
                 episode.kind,
                 episode.scope,
+                origin,
                 body
             )))
         }

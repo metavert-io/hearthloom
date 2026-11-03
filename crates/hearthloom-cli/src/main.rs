@@ -133,6 +133,9 @@ enum Cmd {
     },
     /// Ring the dashboard bell (for scripts and cron jobs).
     Notify { title: String, body: Option<String> },
+    /// How a memory got here: who wrote it, on which of your nodes, the
+    /// route it took, and the agent task (what it read) when an agent did.
+    Provenance { id: String },
     /// Hybrid peer sync: pairing status, cursors, last outcome.
     Peer {
         #[command(subcommand)]
@@ -919,6 +922,10 @@ async fn main() -> Result<()> {
                 result["lines"],
                 result["bytes"]
             );
+        }
+        Cmd::Provenance { id } => {
+            let client = Client::with_url(home, url.clone())?;
+            ops::provenance(&client, &id, as_json).await?;
         }
         Cmd::Peer { cmd } => {
             let client = Client::with_url(home, url.clone())?;

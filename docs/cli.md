@@ -249,6 +249,21 @@ hearthloom notify "backup finished" "23GB to the NAS"
 Posts a notification (for scripts and cron jobs). The origin is stamped
 from your key — scripts can't impersonate the system.
 
+### `provenance` — how a memory got here
+
+```
+hearthloom provenance ep_0123456789abcdef
+hearthloom --json provenance ep_0123456789abcdef
+```
+
+Who first wrote it (an import, you, an agent's key, your phone), on which
+of your nodes and when, who let it in when someone else proposed it, and
+the route it took between your nodes to reach this one. When an agent's
+task produced it, the task is named with everything outside it read and
+what it wrote; for a summary, what it summarises. Memories that arrived
+from another node before 0.5.78 say only which node sent them. The same
+view is under "How it got here" on every memory in the dashboard.
+
 ### `peer` — pairing
 
 ```

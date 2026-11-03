@@ -589,6 +589,88 @@ pub async fn export(client: &Client, out: Option<std::path::PathBuf>) -> Result<
 }
 
 /// `hearthloom node`: list the nodes, or change this one.
+/// `hearthloom provenance <id>` — how a memory got here (v61): the
+/// owner's detail view of it carries the provenance the dashboard shows.
+pub async fn provenance(client: &Client, id: &str, as_json: bool) -> Result<()> {
+    let memory = client.get(&format!("/v1/episode/{id}"), &[]).await?;
+    let view = &memory["provenance"];
+    if view.is_null() {
+        bail!("no provenance shown for {id} — it is in the owner's view only (`hearthloom auth login`)");
+    }
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(view)?);
+        return Ok(());
+    }
+    let s = |v: &Value| v.as_str().unwrap_or("").to_string();
+    let node = |n: &Value| {
+        let name = n["name"]
+            .as_str()
+            .or(n["id"].as_str())
+            .unwrap_or("an unknown node");
+        if n["this"] == true {
+            format!("{name} (this node)")
+        } else {
+            name.to_string()
+        }
+    };
+    let when = |v: &Value| {
+        v.as_str()
+            .map(|t| format!(" at {}", t[..t.len().min(16)].replace('T', " ")))
+            .unwrap_or_default()
+    };
+    println!(
+        "{} — {}/{} · trust {}",
+        s(&memory["title"]),
+        s(&memory["source"]),
+        s(&memory["kind"]),
+        s(&memory["trust"])
+    );
+    let on = if view["node"]["id"].is_null() {
+        String::new()
+    } else {
+        format!(" on {}", node(&view["node"]))
+    };
+    println!(
+        "written by {}{on}{}",
+        s(&view["writer_label"]),
+        when(&view["at"])
+    );
+    if let Some(by) = view["accepted_by_label"].as_str() {
+        println!("let in by {by}");
+    }
+    let route = view["route"].as_array().cloned().unwrap_or_default();
+    if route.len() > 1 {
+        println!("route:");
+        for hop in &route {
+            println!("  → {}{}", node(&hop["node"]), when(&hop["at"]));
+        }
+    }
+    if view["recorded"] == false {
+        println!("(it arrived before Hearthloom kept track of where things came from)");
+    }
+    if let Some(task) = view["task"].as_object() {
+        let t = |k: &str| task.get(k).cloned().unwrap_or(Value::Null);
+        println!(
+            "from a task by {}: {}",
+            t("agent").as_str().unwrap_or("an agent"),
+            s(&t("request"))
+        );
+        for read in t("read").as_array().into_iter().flatten() {
+            println!("  read: {}", s(&read["what"]));
+        }
+        for wrote in t("wrote").as_array().into_iter().flatten() {
+            println!("  wrote: {} {}", s(&wrote["kind"]), s(&wrote["id"]));
+        }
+    }
+    if let Some(inputs) = view["summary_of"].as_array() {
+        println!("summarises {} memories, e.g.:", inputs.len());
+        for input in inputs.iter().take(5) {
+            println!("  {} ({})", s(&input["title"]), s(&input["source"]));
+        }
+    }
+    Ok(())
+}
+
 /// `hearthloom peer pair <address>` — what the wizard's "I already run
 /// another node" does. The key comes from stdin (prompted without echo on
 /// a terminal), never argv, where shell history and `ps` would keep it.

@@ -32,6 +32,7 @@ mod network_out;
 mod notion;
 mod peerkey;
 pub mod plugins;
+mod provenance;
 mod provisioner;
 pub mod registry_client;
 mod retire;

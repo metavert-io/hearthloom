@@ -25,6 +25,7 @@ pub const TABLE_CLASSES: &[(&str, TableClass)] = &[
     ("entities", TableClass::Exported),
     ("entity_attributes", TableClass::Exported),
     ("episode_entities", TableClass::Exported),
+    ("episode_origin", TableClass::Exported),
     ("edges", TableClass::Exported),
     ("edge_provenance", TableClass::Exported),
     ("merges", TableClass::Exported),

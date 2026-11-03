@@ -92,7 +92,11 @@ workspace with `npm i playwright`) — screenshot + pageerror check.
 ## Layout
 
 - `crates/hearthloom-core` — schema (migrations via `PRAGMA user_version`,
-  **currently v60**: v60 the movement layer (`movement_observation`
+  **currently v61**: v61 provenance (`episode_origin` — where each
+  episode first entered one of the owner's nodes and the route it took;
+  `agent_tasks.inputs`/`outputs`; and the one-time relabel of others'
+  words from `self` to `imported` — see the PROVENANCE invariant), v60
+  the movement layer (`movement_observation`
   with `subject` me|vehicle:<ember>:<id>, `vehicle_profile` +
   `trip_attribution` synced LWW via /v1/sync/vehicles, movements via
   /v1/sync/movements, node-local `trip_day`; daemon trips.rs decides
@@ -643,6 +647,21 @@ the design log 2026-07-14.
 
 ## Invariants to preserve when changing code
 
+- **PROVENANCE IS RECORDED ON ARRIVAL, NEVER REWRITTEN (v61, 0.5.78 —
+  design log 2026-11-03).** `apply_batch_from` records every newly landed
+  episode's origin in the same transaction (`store/provenance.rs::
+  record_arrival`, INSERT OR IGNORE: first arrival wins). A synced
+  episode's origin travels BESIDE it (pull page `origins`, push body
+  `origins`, keyed by source + source_ref) — never inside EpisodeDraft,
+  and only a `peer` key's are believed (`http.rs::ingest` clears the rest:
+  anyone else would be choosing an episode's provenance). A new path that
+  inserts episodes without `apply_batch*` skips provenance; a new sync
+  path that applies a peer's episodes must pass its `origins`. Trust is
+  decided at the same door: `trust_for` turns a `self` claim from a
+  source others write (`OTHERS_WORDS_SOURCES`) into `imported` — add a
+  new such importer's source there, never trust its `self`. Owner-only
+  views: the provenance names nodes and agents (`/v1/episode/{id}`'s
+  owner branch, the CLI, Ask's `read_episode` line).
 - **RETIREMENT IS SUPERSESSION BY NOTHING (v59, D.12 — design log
   2026-10-17).** A retired episode is marked `superseded_by =
   'retired:<retirement id>'` (core `store/retire.rs`), so EVERY reader that

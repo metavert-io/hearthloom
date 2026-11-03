@@ -117,6 +117,8 @@ mod tests {
             actions: 0,
             created_at: String::new(),
             updated_at: String::new(),
+            inputs: serde_json::json!([]),
+            outputs: serde_json::json!([]),
         };
         let body = hook_body(
             &agent,

@@ -1064,6 +1064,17 @@ a.mention {
   margin-bottom: var(--s3);
 }
 .episode-body .md { font-size: var(--step-0); color: var(--ink); max-width: 76ch; }
+/* How it got here (provenance, 0.5.78): plain lines under the card's meta */
+.episode-origin {
+  margin: 0 0 var(--s3); padding: var(--s2) var(--s3);
+  border-left: 2px solid var(--line); color: var(--ink-mute);
+  font-size: var(--step--1); line-height: 1.5; max-width: 76ch;
+}
+.episode-origin b { color: var(--ink); font-weight: 600; }
+.episode-origin .origin-route { color: var(--ink-faint); }
+.episode-origin details { margin-top: var(--s1); }
+.episode-origin summary { cursor: pointer; color: var(--ink-faint); }
+.episode-origin ul { margin: var(--s1) 0 0; padding-left: 1.2em; }
 .md p { margin: 0 0 var(--s2); }
 .md h3, .md h4, .md h5, .md h6 {
   font: 600 var(--step-1)/1.3 var(--font-display);

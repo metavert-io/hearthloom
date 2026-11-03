@@ -150,6 +150,9 @@ fn journaled_table(table: &str) -> Option<&'static str> {
 #[derive(Debug)]
 pub struct SyncPage {
     pub episodes: Vec<EpisodeDraft>,
+    /// Where each episode came from (v61), sent beside the drafts so the
+    /// receiver can record it; an older receiver ignores the field.
+    pub origins: Vec<super::provenance::Origin>,
     pub next_cursor: i64,
     /// True when there was nothing past `after`.
     pub drained: bool,
@@ -236,9 +239,13 @@ impl Store {
         // entity refs per episode — a second short lock, then file reads
         // happen with no lock held at all.
         let mut episodes = Vec::with_capacity(rows.len());
+        let mut origins = Vec::with_capacity(rows.len());
         let mut next_cursor = after;
         for row in rows {
             next_cursor = row.rowid;
+            if let Some(origin) = super::provenance::origin_on(&self.lock(), &row.id)? {
+                origins.push(origin);
+            }
             let entities: Vec<EntityRef> = {
                 let conn = self.lock();
                 let mut stmt = conn.prepare(
@@ -283,6 +290,7 @@ impl Store {
         Ok(SyncPage {
             drained: episodes.is_empty(),
             episodes,
+            origins,
             next_cursor,
         })
     }

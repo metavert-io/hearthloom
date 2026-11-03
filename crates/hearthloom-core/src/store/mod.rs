@@ -38,6 +38,7 @@ mod photo;
 mod plugins;
 mod privacy;
 mod projects;
+mod provenance;
 mod quarantine;
 mod recall;
 mod relationships;
@@ -94,6 +95,7 @@ pub use opportunities::OpportunityRow;
 pub use photo::{keys_hash as photo_keys_hash, PhotoPointIn, StoredPhotoPoint};
 pub use plugins::PluginRow;
 pub use privacy::PrivacyRule;
+pub use provenance::{others_words, trust_for, Hop, Origin, OTHERS_WORDS_SOURCES};
 pub use quarantine::{outside_proposal, QuarantineEntry, PROPOSAL_KINDS};
 pub use recall::DayView;
 pub use relationships::{DirectoryRow, RelationshipRow, RELATIONSHIP_KINDS};
@@ -309,7 +311,7 @@ impl Drop for ReadScopeGuard {
     }
 }
 
-const SCHEMA_VERSION: i64 = 60;
+const SCHEMA_VERSION: i64 = 61;
 
 const SCHEMA_V1: &str = "
     -- L2: append-only ground truth. Raw content lives on disk at
@@ -2091,6 +2093,36 @@ impl Store {
                 "synced_at",
                 "updated_at",
                 "",
+            ))?;
+        }
+        if version < 61 {
+            // v61: PROVENANCE (0.5.78, design log 2026-11-03). Where each
+            // episode first entered one of the owner's nodes and the route
+            // it took to this one (store/provenance.rs) — it rides the
+            // episodes leg, never its own. An agent task keeps everything
+            // outside it read (`inputs`) and everything it wrote
+            // (`outputs`). And text others wrote stops being the owner's
+            // words: their `self` rows become `imported` (the same rule
+            // `apply_batch` applies to every arrival from now on).
+            conn.execute_batch(&format!(
+                "CREATE TABLE episode_origin (
+                     episode_id TEXT PRIMARY KEY,
+                     writer TEXT,
+                     session TEXT,
+                     node TEXT,
+                     at TEXT,
+                     task TEXT,
+                     accepted_by TEXT,
+                     route TEXT NOT NULL DEFAULT '[]',
+                     recorded_at TEXT NOT NULL
+                 );
+                 CREATE INDEX idx_episode_origin_task ON episode_origin(task)
+                     WHERE task IS NOT NULL;
+                 ALTER TABLE agent_tasks ADD COLUMN inputs TEXT NOT NULL DEFAULT '[]';
+                 ALTER TABLE agent_tasks ADD COLUMN outputs TEXT NOT NULL DEFAULT '[]';
+                 UPDATE episodes SET trust = 'imported'
+                     WHERE {}; /* all-episodes: a relabel covers retired rows too */",
+                provenance::others_words_sql()
             ))?;
         }
         if version < SCHEMA_VERSION {

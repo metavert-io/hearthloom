@@ -110,6 +110,8 @@ mod tests {
             actions: 0,
             created_at: String::new(),
             updated_at: String::new(),
+            inputs: serde_json::json!([]),
+            outputs: serde_json::json!([]),
         };
         let body = request_body(&agent, &task);
         assert_eq!(body["model"], "hermes-agent");
