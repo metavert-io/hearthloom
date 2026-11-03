@@ -8,6 +8,44 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.76 — 2026-11-03
+
+Six rough edges found while setting up a third node, an always-on Mac
+that only runs agents.
+
+### Fixed
+- **An agent's working folder may start with `~`.** `~/agents/desk-hand`
+  was taken as a relative path that never exists, so the agent refused
+  every task. A leading `~` now means your home folder: when the agent is
+  saved (the card then shows the full path), when it runs, when it's
+  tested, and when Hearthloom decides which Claude Code sessions are the
+  agent's rather than yours.
+- **"Test the connection" tests what the form shows.** It used to check
+  the saved settings, so testing a folder before pressing save reported
+  a good folder as missing.
+
+### Changed
+- **Adding an agent asks for its folder (or address) right away.** The add
+  box asked only for a name, and the folder came later under "set up…".
+  It now asks for both, a path typed into the name box is taken as the
+  folder, and a folder that doesn't exist yet is flagged as soon as you
+  add or save.
+- **Setup asks "one hearth or two?" first.** Pairing came near the end of
+  the welcome steps, after the AI provider, search, mail and phone steps.
+  It is now asked right after creating the login, and choosing "I already
+  run another node" folds away the steps that node already covers
+  (thinking, live mail, the phone). "Show them anyway" brings them back.
+- **Ask on a node with no AI provider says where to ask instead.** It
+  showed "deep query needs an LLM provider (provider.llm in config)" and
+  recorded a failed question. It now names your nodes that can answer,
+  links your paired node when it has a web address, and records nothing.
+
+### Added
+- **`hearthloom peer pair <address>` and `hearthloom peer unpair`.** Pairing
+  needed the dashboard. The key is read from stdin (prompted without echo
+  at a terminal), never taken as an argument. `unpair` also retires this
+  node's key on the other node when it answers.
+
 ## 0.5.75 — 2026-11-03
 
 ### Fixed
