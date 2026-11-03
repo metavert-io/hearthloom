@@ -492,7 +492,10 @@ Three rules sit above the lock state:
   on every API path, and a node with no login answers keyless calls only
   at its dashboard address — loopback, or the host of
   `HEARTHLOOM_DASHBOARD_URL` — so a web page can't act as the owner and
-  DNS rebinding finds nothing.
+  DNS rebinding finds nothing. The one exception is the sign-in, which
+  accepts a hosting provisioner's issuer token from another site (its
+  "Open" button is a form POST from its own site); a password from
+  another site is still refused.
 - **Provisioner control plane**: an HMAC-authenticated channel above all
   tokens, used by the hosting service, with a killswitch. Export and
   vault access always survive the killswitch so a user can take their

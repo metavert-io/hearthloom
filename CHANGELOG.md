@@ -8,6 +8,20 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.75 — 2026-11-03
+
+### Fixed
+- **Signing in to a hosted node from Hearthlaunch works again.**
+  Hearthlaunch's "Open" signs you in with a form POST from its own site,
+  carrying a short-lived token signed with the node's secret. Since
+  0.5.71 the node refused every request from another site that carried
+  no API key, and that included this sign-in, so the page showed `{"error":"a
+  request from another site needs an API key"}`. A hosted node has no
+  password you know, so this sign-in was the only way into its dashboard.
+  The sign-in now accepts the issuer's token from another site. It still
+  refuses a password posted from another site, and every other API path
+  still needs a key.
+
 ## 0.5.74 — 2026-11-02
 
 ### Security

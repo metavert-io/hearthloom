@@ -1047,8 +1047,11 @@ mod key_ceiling_tests {
 
 #[cfg(test)]
 mod browser_rule_tests {
-    use super::{dashboard_host_ok, foreign_browser_request, is_static_path};
-    use axum::http::HeaderMap;
+    use super::{
+        dashboard_host_ok, foreign_browser_request, foreign_sign_in_refused, is_sign_in,
+        is_static_path,
+    };
+    use axum::http::{HeaderMap, Method};
 
     fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();
@@ -1094,6 +1097,30 @@ mod browser_rule_tests {
             ("origin", "null"),
             ("host", "127.0.0.1:43278")
         ])));
+    }
+
+    /// A provisioner's "Open" (a form POST from its site to the node on a
+    /// subdomain of it: same-site) was refused from 0.5.71 to 0.5.74, and
+    /// a hosted node had no other way in.
+    #[test]
+    fn test_the_issuer_hand_over_signs_in_from_another_site() {
+        let launch = headers(&[("sec-fetch-site", "same-site")]);
+        let elsewhere = headers(&[("sec-fetch-site", "cross-site")]);
+        let dashboard = headers(&[("sec-fetch-site", "same-origin")]);
+        // only the sign-in gets past the middleware...
+        assert!(is_sign_in(&Method::POST, "/v1/auth/login"));
+        assert!(!is_sign_in(&Method::GET, "/v1/auth/login"));
+        assert!(!is_sign_in(&Method::POST, "/v1/auth/login/"));
+        assert!(!is_sign_in(&Method::POST, "/v1/auth/bootstrap"));
+        assert!(!is_sign_in(&Method::POST, "/v1/keys"));
+        // ...and from another site it takes only the issuer's token
+        assert!(!foreign_sign_in_refused(&launch, Some("payload.sig")));
+        assert!(!foreign_sign_in_refused(&elsewhere, Some("payload.sig")));
+        assert!(foreign_sign_in_refused(&launch, None));
+        assert!(foreign_sign_in_refused(&elsewhere, None));
+        // the dashboard's own password sign-in is untouched
+        assert!(!foreign_sign_in_refused(&dashboard, None));
+        assert!(!foreign_sign_in_refused(&HeaderMap::new(), None));
     }
 
     #[test]
@@ -1298,6 +1325,22 @@ fn foreign_browser_request(headers: &axum::http::HeaderMap) -> bool {
     origin.split_once("://").map(|(_, authority)| authority) != Some(host)
 }
 
+/// THE BROWSER RULE's one exception (0.5.75). Hearthlaunch's "Open" signs
+/// the owner in with a top-level form POST from its own site, carrying an
+/// issuer token signed with this node's secret: a credential of its own,
+/// not a ridden cookie. A hosted node has no other way in (its password is
+/// discarded at provisioning), and 0.5.71–0.5.74 refused that POST. The
+/// middleware lets a foreign sign-in through; `foreign_sign_in_refused`
+/// then admits only the issuer's token, because a password posted by a
+/// page elsewhere would sign the browser in as whoever chose it.
+fn is_sign_in(method: &axum::http::Method, path: &str) -> bool {
+    method == axum::http::Method::POST && path == "/v1/auth/login"
+}
+
+fn foreign_sign_in_refused(headers: &axum::http::HeaderMap, issuer_token: Option<&str>) -> bool {
+    issuer_token.is_none() && foreign_browser_request(headers)
+}
+
 /// The host name of a `host[:port]` authority (IPv6 in brackets).
 fn host_name(authority: &str) -> &str {
     match authority.strip_prefix('[') {
@@ -1389,7 +1432,9 @@ async fn auth_middleware(
         // the vault); with a session it would ride the cookie. Callers
         // that hold a key (plugin frames, other apps) are unaffected.
         if !is_static_path(&path) {
-            if foreign_browser_request(req.headers()) {
+            // The sign-in is the one path another site may reach (see
+            // `is_sign_in`); auth_login admits only the issuer's token.
+            if foreign_browser_request(req.headers()) && !is_sign_in(req.method(), &path) {
                 return ApiError(
                     StatusCode::FORBIDDEN,
                     "a request from another site needs an API key".into(),
@@ -3599,6 +3644,12 @@ async fn auth_login(
     } else {
         serde_json::from_str(&raw).map_err(|_| bad_request("malformed JSON body"))?
     };
+    if foreign_sign_in_refused(&headers, body.issuer_token.as_deref()) {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "a sign-in from another site needs the issuer's token".into(),
+        ));
+    }
     let token = if let Some(issued) = body.issuer_token.as_deref() {
         let subject = verify_issuer_token(issued)
             .map_err(|e| ApiError(StatusCode::UNAUTHORIZED, e.to_string()))?;

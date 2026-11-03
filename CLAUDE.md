@@ -878,7 +878,12 @@ the design log 2026-07-14.
   the host of `HEARTHLOOM_DASHBOARD_URL` (DNS rebinding; the installer
   asks for that address). On a no-login node a keyless request IS the owner: never
   widen `cors_bearer` or exempt an API path from
-  `foreign_browser_request`.
+  `foreign_browser_request`. The ONE exception (0.5.75) is the sign-in:
+  hearthlaunch's "Open" is a form POST from its own site carrying an
+  issuer token, so `POST /v1/auth/login` passes the middleware
+  (`is_sign_in`) and `auth_login` admits only that token from another
+  site (`foreign_sign_in_refused`; a foreign password would be login
+  CSRF). 0.5.71–0.5.74 refused it, and a hosted node has no other way in.
 - **FRIEND GROUPS (v54): A UNION OF GRANTS, NEVER A CROSS-PRODUCT.**
   Every friend-surface read starts from `Store::access(friend)`
   (store/groups.rs → `FriendAccess`): the direct grant plus one grant per
