@@ -1249,6 +1249,18 @@ fn conversation_preamble(context: &[ThreadTurn]) -> String {
 }
 
 /// Every `ep_…` id (the 16-hex form `ids::episode_id` mints) in a text.
+/// Whether any episode an output mentions isn't the user's own words
+/// (trust != 'self': imported mail and exports, and Hearthloom's own
+/// digests of them — a summary launders its inputs' origin). Fails
+/// CLOSED: content whose origin can't be checked counts as not theirs.
+pub(crate) fn untrusted_episodes(state: &AppState, text: &str) -> Option<String> {
+    // not read_query: that one refuses under an area-limited key (agents)
+    match state.store.first_untrusted_episode(&episode_ids_in(text)) {
+        Ok(found) => found.map(|id| format!("imported content ({id})")),
+        Err(_) => Some("content whose origin could not be checked".into()),
+    }
+}
+
 fn episode_ids_in(text: &str) -> Vec<String> {
     let bytes = text.as_bytes();
     let mut ids = BTreeSet::new();
@@ -1295,10 +1307,15 @@ fn names_friend(user_text: &str, friend: &str) -> bool {
 /// over a context an attacker may have written into.
 #[derive(Default)]
 struct Flow {
-    /// Set once content the user didn't author has been read.
+    /// Set once content the user didn't author has been read from the
+    /// record (or a mount): after it, no friend handle may run.
     untrusted: Option<String>,
     /// Friends whose brains have already answered in this ask.
     friends_read: BTreeSet<String>,
+    /// Set once a friend's brain has answered: another person wrote it.
+    /// The ask is tainted (a hand-off asks first, later turns inherit it);
+    /// further calls to that same friend stay allowed (0.5.77).
+    friend_taint: Option<String>,
 }
 
 impl Flow {
@@ -1306,6 +1323,10 @@ impl Flow {
         if FRIEND_TOOLS.contains(&tool) {
             if let Some(friend) = args.get("friend").and_then(|f| f.as_str()) {
                 self.friends_read.insert(friend.to_string());
+                if self.friend_taint.is_none() {
+                    self.friend_taint =
+                        Some(format!("{friend}'s Hearthloom (another person wrote it)"));
+                }
             }
             return;
         }
@@ -1339,37 +1360,17 @@ impl Flow {
                 self.untrusted = Some("notes (they can be imported or written by an agent)".into());
             }
             _ => {
-                // Anything that isn't trust='self' counts: imported mail
-                // and exports, and Hearthloom's own digests of them (a
-                // summary launders its inputs' origin).
-                let ids = episode_ids_in(result);
-                if ids.is_empty() {
-                    return;
-                }
-                let list = ids
-                    .iter()
-                    .take(200)
-                    .map(|id| format!("'{id}'"))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let sql = format!(
-                    "SELECT id FROM episodes /* all-episodes: a retired untrusted memory still taints */
-                     WHERE id IN ({list}) AND trust != 'self' LIMIT 1"
-                );
-                match state.store.read_query(&sql, 1) {
-                    Ok((_, rows)) => {
-                        if let Some(id) = rows.first().and_then(|r| r[0].as_str()) {
-                            self.untrusted = Some(format!("imported content ({id})"));
-                        }
-                    }
-                    // Fail CLOSED: content whose origin can't be checked
-                    // counts as content the user didn't write.
-                    Err(_) => {
-                        self.untrusted = Some("content whose origin could not be checked".into());
-                    }
+                if let Some(why) = untrusted_episodes(state, result) {
+                    self.untrusted = Some(why);
                 }
             }
         }
+    }
+
+    /// Why this ask counts as tainted, if it does: content from the record
+    /// the user didn't write first, else a friend's.
+    fn tainted(&self) -> Option<String> {
+        self.untrusted.clone().or_else(|| self.friend_taint.clone())
     }
 
     /// Why a friend handle may NOT run right now, if it may not.
@@ -1914,7 +1915,7 @@ pub async fn run_query(
             let (answer, citations, dropped_citations) =
                 finalize(&action, &[&conversation, &brain], &mut transcript);
             return Ok(QueryOutcome {
-                tainted: flow.untrusted.clone(),
+                tainted: flow.tainted(),
                 delegate: action
                     .get("delegate")
                     .filter(|d| {
@@ -2079,7 +2080,7 @@ pub async fn run_query(
     let (answer, citations, dropped_citations) =
         finalize(&action, &[&conversation, &brain], &mut transcript);
     Ok(QueryOutcome {
-        tainted: flow.untrusted.clone(),
+        tainted: flow.tainted(),
         delegate: action
             .get("delegate")
             .filter(|d| {
@@ -2624,6 +2625,30 @@ mod tests {
         assert!(
             outcome.tainted.is_some(),
             "the taint is passed on to the next turn"
+        );
+    }
+
+    #[test]
+    fn test_a_friend_read_taints_the_ask_but_not_a_second_call_to_that_friend() {
+        let (state, _llm, _id, _tmp) = scripted_state(&[]);
+        let question = "ask ada and grace what they think";
+        let mut flow = Flow::default();
+        flow.note(&state, "nsearch", &json!({"friend": "ada"}), "ada's notes");
+        assert!(flow.tainted().unwrap().contains("ada's Hearthloom"));
+        assert!(
+            flow.outbound_block(question, "ada").is_none(),
+            "the same friend again"
+        );
+        assert!(
+            flow.outbound_block(question, "grace").is_some(),
+            "never on to another friend"
+        );
+        // content the user didn't write from the record still closes every friend call
+        flow.note(&state, "sql", &json!({}), "title\nsome subject line");
+        assert!(flow.outbound_block(question, "ada").is_some());
+        assert!(
+            flow.tainted().unwrap().contains("raw query"),
+            "the record's reason is reported first"
         );
     }
 

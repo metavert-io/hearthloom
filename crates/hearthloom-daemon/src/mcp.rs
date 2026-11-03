@@ -114,6 +114,13 @@ fn call_tool(
         "propose_memory" => tool_propose_memory(state, auth, &args),
         other => return Err(format!("unknown tool: {other}")),
     };
+    // An agent's key reading words the owner didn't write taints the
+    // agent's running task, as reading them taints an ask (0.5.77).
+    if let (Ok(value), Some(claims), "search" | "traverse" | "recall") =
+        (&outcome, auth.0.as_ref(), name)
+    {
+        crate::agents::taint_from_record_read(state, &claims.id, name, value);
+    }
 
     // Tool-level failures are isError results, not protocol errors.
     Ok(match outcome {

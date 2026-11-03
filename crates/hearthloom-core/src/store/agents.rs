@@ -658,6 +658,29 @@ impl Store {
     }
 
     /// Count one more action against the task's limit; returns the count.
+    /// Mark a task as having read content the owner didn't write, part-way
+    /// through its run. The first reason stays (later approvals quote it);
+    /// an already tainted task is left as it is. True when this call
+    /// tainted it. The stamp moves so the change reaches the other nodes.
+    pub fn taint_agent_task(&self, id: &str, why: &str) -> Result<bool> {
+        let conn = self.lock();
+        Ok(conn.execute(
+            "UPDATE agent_tasks SET tainted = ?2, updated_at = ?3
+             WHERE id = ?1 AND (tainted IS NULL OR tainted = '')",
+            rusqlite::params![id, why, now_utc()],
+        )? > 0)
+    }
+
+    /// The ids of the tasks an agent is running right now.
+    pub fn running_agent_tasks(&self, agent_id: &str) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let mut stmt =
+            conn.prepare("SELECT id FROM agent_tasks WHERE agent_id = ?1 AND status = 'running'")?;
+        let rows = stmt.query_map([agent_id], |r| r.get(0))?;
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn bump_agent_task_actions(&self, id: &str) -> Result<i64> {
         let conn = self.lock();
         conn.execute(

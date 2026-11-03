@@ -182,6 +182,29 @@ pub struct EpisodeComposition {
 }
 
 impl Store {
+    /// The first of these episodes whose words aren't the owner's
+    /// (`trust != 'self'`), if any. A provenance check over ids the caller
+    /// has already been shown, so it ignores the vault and area filters:
+    /// it reveals no content, only that one of them came from outside.
+    pub fn first_untrusted_episode(&self, ids: &[String]) -> Result<Option<String>> {
+        if ids.is_empty() {
+            return Ok(None);
+        }
+        let ids: Vec<&String> = ids.iter().take(500).collect();
+        let marks = vec!["?"; ids.len()].join(",");
+        let conn = self.lock();
+        conn.query_row(
+            &format!(
+                "SELECT id FROM episodes /* all-episodes: a retired untrusted memory still taints */
+                 WHERE id IN ({marks}) AND trust != 'self' LIMIT 1"
+            ),
+            rusqlite::params_from_iter(ids),
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     /// Episodes awaiting idle-time scope classification: coarse
     /// account-level labels that an LLM can refine per episode. Currently
     /// the AI-conversation sources (one account, mixed contexts).

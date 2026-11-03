@@ -559,6 +559,23 @@ fn notify_approval(state: &AppState, approval_id: &str, sensitive: bool, summary
     crate::bus::touch(state, "notification.created");
 }
 
+/// What a dispatch is judged on. Claude Code routes every tool call back
+/// here, so the model's own `needs` is enough; inside Hermes and OpenClaw
+/// Hearthloom sees few or none of the actions, so their dispatch is judged
+/// on everything the harness can do as well (0.5.77) — the model's claim
+/// must not make a task look smaller than what it could do.
+pub fn dispatch_classes(agent: &AgentRow, claimed: &[String]) -> Vec<String> {
+    let mut classes = claimed.to_vec();
+    if let Some(h) = harness(&agent.harness).filter(|h| h.depth != "full") {
+        for class in h.good_for {
+            if !classes.iter().any(|c| c == class) {
+                classes.push(class.to_string());
+            }
+        }
+    }
+    classes
+}
+
 /// Ask's hand-off: create the task and let governance decide its fate.
 #[allow(clippy::too_many_arguments)]
 pub fn propose(
@@ -588,7 +605,17 @@ pub fn propose(
         return task_card(state, &task); // guidance, nothing dispatched
     };
     let policy = state.store.effective_policy(Some(&agent.id))?;
-    let mut decision = decide_all(&policy, &task.classes, tainted);
+    let judged = dispatch_classes(&agent, &task.classes);
+    let mut decision = decide_all(&policy, &judged, tainted);
+    if judged.len() > task.classes.len() {
+        if let Decision::Ask(reason) = &decision {
+            let label = harness(&agent.harness).map_or(agent.harness.as_str(), |h| h.label);
+            decision = Decision::Ask(format!(
+                "{reason} — {label} can do more than this task says it needs, and Hearthloom \
+                 can't see what it does inside, so the send is judged on everything it can do"
+            ));
+        }
+    }
     if decision == Decision::Auto
         && state.store.agent_tasks_started_today()? >= policy.tasks_per_day as i64
     {
@@ -602,7 +629,7 @@ pub fn propose(
         agent.name,
         request.chars().take(160).collect::<String>()
     );
-    let detail = json!({"classes": task.classes, "tainted": tainted, "agent": agent.name});
+    let detail = json!({"classes": task.classes, "judged_on": judged, "tainted": tainted, "agent": agent.name});
     match decision {
         Decision::Never(reason) => {
             state.store.add_approval(
@@ -704,12 +731,137 @@ pub fn cancel(state: &AppState, task_id: &str, by: &str) -> Result<AgentTaskRow>
 /// answer follows policy; "ask" waits (up to 15 minutes) for the owner.
 /// A tainted task asks before EVERY tool, reads and record writes
 /// included — `decide`'s taint rule, whatever `classify_tool` says.
+/// A tool it lets run that brings in outside content (a web page, another
+/// tool's results, a friend's Hearthloom) taints the task from the next
+/// tool on (0.5.77: the taint used to be fixed when the task was made).
 pub async fn tool_permission(
     state: &AppState,
     task_id: &str,
     tool: &str,
     input: &Value,
 ) -> (bool, String) {
+    let (allowed, reason) = decide_tool(state, task_id, tool, input).await;
+    if allowed {
+        if let Some(why) = outside_content(tool, input) {
+            let _ = state.store.taint_agent_task(task_id, &why);
+        }
+    }
+    (allowed, reason)
+}
+
+/// What a tool the agent was allowed to run brings in that the owner
+/// didn't write, if anything. Hearthloom's own record tools are judged by
+/// what they return instead (`taint_from_record_read`).
+pub fn outside_content(tool: &str, input: &Value) -> Option<String> {
+    let clip = |s: &str| s.chars().take(160).collect::<String>();
+    match tool {
+        "WebFetch" => Some(match input["url"].as_str() {
+            Some(url) => format!("a web page ({})", clip(url)),
+            None => "a web page".into(),
+        }),
+        "WebSearch" => Some("web search results".into()),
+        "Bash" => input["command"]
+            .as_str()
+            .filter(|c| reaches_network(c))
+            .map(|c| {
+                format!(
+                    "the output of a network command ({})",
+                    clip(c.lines().next().unwrap_or(""))
+                )
+            }),
+        t if t.starts_with("mcp__hearthloom__") || t.starts_with("mcp__hearthloom_gov__") => None,
+        t if t.starts_with("mcp__") => Some(format!("results from another tool ({t})")),
+        t => match classify_tool(t) {
+            "web" => Some(format!("a web page ({t})")),
+            "friends" => Some(format!("another person's Hearthloom ({t})")),
+            _ => None,
+        },
+    }
+}
+
+/// Whether a shell command fetches from the network. A heuristic that errs
+/// toward yes (a URL anywhere in the command counts): a false yes only
+/// means the owner is asked a little sooner.
+fn reaches_network(command: &str) -> bool {
+    let words: Vec<String> = command
+        .split(|c: char| !(c.is_ascii_alphanumeric() || "-_./".contains(c)))
+        .filter(|w| !w.is_empty())
+        .map(|w| w.rsplit('/').next().unwrap_or(w).to_ascii_lowercase())
+        .collect();
+    words.iter().enumerate().any(|(i, w)| {
+        matches!(
+            w.as_str(),
+            "curl"
+                | "wget"
+                | "ssh"
+                | "scp"
+                | "sftp"
+                | "rsync"
+                | "nc"
+                | "ncat"
+                | "telnet"
+                | "ftp"
+                | "http"
+                | "https"
+                | "xh"
+                | "aria2c"
+                | "gh"
+        ) || (w == "git"
+            && words.get(i + 1).is_some_and(|next| {
+                matches!(
+                    next.as_str(),
+                    "clone" | "pull" | "fetch" | "ls-remote" | "submodule"
+                )
+            }))
+    })
+}
+
+/// An agent reading the record through Hearthloom's MCP: when what came
+/// back includes words the owner didn't write, its running tasks are
+/// tainted — the rule Ask applies to itself (rlm.rs `Flow::note`).
+pub fn taint_from_record_read(state: &AppState, key_id: &str, tool: &str, result: &Value) {
+    let Some(agent) = state
+        .store
+        .agents()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|a| a.key_id.as_deref() == Some(key_id))
+    else {
+        return;
+    };
+    let tasks = state
+        .store
+        .running_agent_tasks(&agent.id)
+        .unwrap_or_default();
+    if tasks.is_empty() {
+        return;
+    }
+    let why = if tool == "traverse" {
+        // graph names carry no episode id: check them against their evidence
+        let ids: Vec<String> = result["hops"]
+            .as_array()
+            .map(|hops| {
+                hops.iter()
+                    .flat_map(|h| [&h["from"]["id"], &h["to"]["id"]])
+                    .filter_map(|id| id.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        match state.store.entity_names_unverified(&ids) {
+            Ok(None) => None,
+            _ => Some("names in the knowledge graph that others can choose".to_string()),
+        }
+    } else {
+        crate::rlm::untrusted_episodes(state, &result.to_string())
+    };
+    if let Some(why) = why {
+        for task in tasks {
+            let _ = state.store.taint_agent_task(&task, &why);
+        }
+    }
+}
+
+async fn decide_tool(state: &AppState, task_id: &str, tool: &str, input: &Value) -> (bool, String) {
     let task = match state.store.agent_task(task_id) {
         Ok(Some(t)) if t.status == "running" => t,
         _ => return (false, "that task is no longer running".into()),
@@ -1241,6 +1393,225 @@ mod tests {
         assert_eq!(g["preset"], "cautious");
         assert_eq!(g["recommended"], "hermes");
         assert_eq!(guidance(&c(&["files"]), true)["recommended"], "claude_code");
+    }
+
+    #[test]
+    fn test_what_counts_as_outside_content() {
+        let none = json!({});
+        assert!(outside_content("WebSearch", &none).is_some());
+        assert!(outside_content("mcp__gmail__read_message", &none).is_some());
+        assert!(
+            outside_content("browser_navigate", &none).is_some(),
+            "a web tool by any name"
+        );
+        assert!(
+            outside_content("mcp__hearthloom__search", &none).is_none(),
+            "judged by what it returns"
+        );
+        assert!(outside_content("Read", &none).is_none());
+        let fetch = outside_content("WebFetch", &json!({"url": "https://example.com/a"})).unwrap();
+        assert!(fetch.contains("https://example.com/a"), "{fetch}");
+        for command in [
+            "curl -s https://example.com",
+            "cd repo && /usr/bin/wget example.com/x",
+            "git clone https://github.com/example/x",
+            "gh api repos/example/x",
+            "ssh box uptime",
+        ] {
+            assert!(
+                outside_content("Bash", &json!({"command": command})).is_some(),
+                "{command}"
+            );
+        }
+        for command in [
+            "ls -la && cargo test",
+            "git status",
+            "grep -r curling notes/",
+        ] {
+            assert!(
+                outside_content("Bash", &json!({"command": command})).is_none(),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_harness_hearthloom_cant_see_inside_is_judged_on_all_it_can_do() {
+        let claimed = vec!["read".to_string()];
+        assert_eq!(
+            dispatch_classes(&agent("c", "claude_code", true), &claimed),
+            claimed
+        );
+        for harness in ["hermes", "openclaw"] {
+            let judged = dispatch_classes(&agent("x", harness, true), &claimed);
+            for class in ["read", "communicate", "schedule", "web", "files"] {
+                assert!(judged.iter().any(|c| c == class), "{harness}: {class}");
+            }
+            let delegate = hearthloom_core::store::Policy::preset("delegate").unwrap();
+            assert_eq!(decide_all(&delegate, &claimed, None), Decision::Auto);
+            assert!(
+                matches!(decide_all(&delegate, &judged, None), Decision::Ask(_)),
+                "{harness}: files asks in every preset, so the send does"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_an_outside_read_taints_the_task_from_the_next_tool_on() {
+        let (state, _tmp) = state();
+        let me = Actor::new("human:test");
+        let agent = all_auto(&state, &me);
+        let task = state
+            .store
+            .create_agent_task(
+                &me,
+                None,
+                Some(&agent.id),
+                "look it up",
+                "Look…",
+                &["read".into(), "web".into()],
+                None,
+                false,
+            )
+            .unwrap();
+        state
+            .store
+            .set_agent_task_status(&me, &task.id, "running", None, None, None)
+            .unwrap();
+        let tainted = |state: &AppState| state.store.agent_task(&task.id).unwrap().unwrap().tainted;
+
+        assert!(
+            tool_permission(&state, &task.id, "Read", &json!({"file_path": "/tmp/x"}))
+                .await
+                .0
+        );
+        assert!(
+            tainted(&state).is_none(),
+            "the owner's own files leave it clean"
+        );
+        let url = json!({"url": "https://example.com/page"});
+        assert!(
+            tool_permission(&state, &task.id, "WebFetch", &url).await.0,
+            "web is automatic here"
+        );
+        assert!(tainted(&state)
+            .unwrap()
+            .contains("https://example.com/page"));
+
+        // from now on even a read waits for the owner
+        let (st, id) = (state.clone(), task.id.clone());
+        let wait = tokio::spawn(async move { tool_permission(&st, &id, "Read", &json!({})).await });
+        let mut pending = Vec::new();
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            pending = state.store.pending_approvals(false).unwrap();
+            if !pending.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0]["detail"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("a web page"));
+        decide_approval(
+            &state,
+            pending[0]["id"].as_str().unwrap(),
+            false,
+            "human:test",
+        )
+        .unwrap();
+        assert!(!wait.await.unwrap().0);
+    }
+
+    #[test]
+    fn test_an_agent_reading_someone_elses_words_through_mcp_taints_its_task() {
+        let (state, _tmp) = state();
+        let me = Actor::new("human:test");
+        let agent = all_auto(&state, &me);
+        state
+            .store
+            .set_agent_credentials(&agent.id, Some("key_desk"), None)
+            .unwrap();
+        let task = state
+            .store
+            .create_agent_task(
+                &me,
+                None,
+                Some(&agent.id),
+                "sum up",
+                "Sum…",
+                &["read".into()],
+                None,
+                false,
+            )
+            .unwrap();
+        state
+            .store
+            .set_agent_task_status(&me, &task.id, "running", None, None, None)
+            .unwrap();
+        let draft = |source_ref: &str, trust: &str| hearthloom_core::EpisodeDraft {
+            source: "mbox".into(),
+            source_ref: source_ref.into(),
+            kind: "email".into(),
+            title: format!("mail {source_ref}"),
+            body: "body".into(),
+            event_time: hearthloom_core::EventTime::parse_rfc3339(
+                "2026-07-01T00:00:00Z",
+                hearthloom_core::TimeUncertainty::Exact,
+            )
+            .unwrap(),
+            trust: trust.into(),
+            scope: Some("personal".into()),
+            entities: vec![],
+            edges: vec![],
+        };
+        state
+            .store
+            .apply_batch(
+                &state.home,
+                &hearthloom_core::IngestBatch {
+                    actor: "adapter:test".into(),
+                    session_id: None,
+                    episodes: vec![draft("mine", "self"), draft("theirs", "imported")],
+                },
+            )
+            .unwrap();
+        let id_of = |source_ref: &str| {
+            state
+                .store
+                .read_query(
+                    &format!("SELECT id FROM episodes WHERE source_ref = '{source_ref}'"),
+                    1,
+                )
+                .unwrap()
+                .1[0][0]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let tainted = || state.store.agent_task(&task.id).unwrap().unwrap().tainted;
+
+        let own = json!({"results": [{"id": id_of("mine")}]});
+        taint_from_record_read(&state, "key_desk", "search", &own);
+        assert!(tainted().is_none(), "the owner's own words");
+        taint_from_record_read(
+            &state,
+            "key_other",
+            "search",
+            &json!({"results": [{"id": id_of("theirs")}]}),
+        );
+        assert!(
+            tainted().is_none(),
+            "another key's read is not this agent's"
+        );
+        taint_from_record_read(
+            &state,
+            "key_desk",
+            "search",
+            &json!({"results": [{"id": id_of("theirs")}]}),
+        );
+        assert!(tainted().unwrap().contains("imported content"));
     }
 
     #[test]

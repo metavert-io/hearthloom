@@ -768,7 +768,20 @@ the design log 2026-07-14.
   unknown classes and an empty list are `other`; THE TAINT RULE: after a
   task has read content the user didn't write, EVERY action asks, whatever
   its class, mode or preset — `never` still wins, and only the owner's
-  `taint_guard` switch turns the rule off). Per-tool governance
+  `taint_guard` switch turns the rule off). A task's taint is NOT fixed
+  when it is made (0.5.77): `tool_permission` taints it after any allowed
+  tool `outside_content` names (WebFetch, WebSearch, a non-Hearthloom MCP
+  tool, a web or friends tool, a network shell command), and an agent's
+  key reading the record through `/mcp` taints its running tasks when the
+  result holds someone else's words (`taint_from_record_read`, the same
+  check as Ask's `untrusted_episodes` — via
+  `Store::first_untrusted_episode`, never `read_query`, which refuses
+  under an agent key's area filter and would fail closed on every read).
+  A new tool that brings in outside content goes in `outside_content`.
+  Dispatch to a harness Hearthloom can't see inside (depth partial or
+  dispatch-only: Hermes, OpenClaw) is judged on the model's `needs` PLUS
+  everything the harness can do (`dispatch_classes`); never on the claim
+  alone. Per-tool governance
   (`agents/mod.rs::tool_permission`, the Hermes hook, `/mcp/governance`)
   goes through the same `decide`. Never add a path where Ask, an
   agent, or a harness acts without going through `decide`. Default policy
@@ -785,8 +798,11 @@ the design log 2026-07-14.
   Claude Code allow-rules can't skip governance. The Ask card arrives as
   a `task` SSE event BEFORE `answer` (the panel closes on `answer`).
 - **Ask's outbound guard (0.5.67, hardened 0.5.71):** taint is recorded
-  per ask (`ask_log.tainted`) and inherited by later turns; `sql` and
-  note hits taint, and so does `traverse` unless every name it shows is
+  per ask (`ask_log.tainted`) and inherited by later turns; a friend's
+  answer taints the ask too (0.5.77, `Flow::friend_taint` — another person
+  wrote it) but, unlike record content, doesn't close the gate to that
+  same friend (`outbound_block` checks `untrusted`, the record's taint);
+  `sql` and note hits taint, and so does `traverse` unless every name it shows is
   the user's own (`Store::entity_names_unverified`, fails closed); the
   check fails CLOSED. An ACTING reply (a `delegate`, a friend call) is
   taken only when the whole reply is one JSON object
