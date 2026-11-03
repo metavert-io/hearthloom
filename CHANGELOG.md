@@ -8,6 +8,14 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.79 — 2026-11-03
+
+### Fixed
+- **A memory from before origins were kept now says so plainly.** "How it
+  got here", `hearthloom provenance` and Ask said "written by not known";
+  they now say who first wrote it isn't known, and which of your nodes it
+  came through. (0.5.78 reached only one node before this.)
+
 ## 0.5.78 — 2026-11-03
 
 Schema **v61**. Update every node in the same release: the origin of
