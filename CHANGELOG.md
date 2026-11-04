@@ -8,6 +8,15 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+### Fixed
+- **Connecting Gmail takes effect at once.** The watch noticed a new
+  connection only on its once-a-minute check, and said "not connected"
+  meanwhile; it now starts within a second, and shows "starting" until it
+  does.
+- **A failed Gmail connect is logged with Gmail's reason** (never the
+  password), in the activity log and the daemon log, so it can be
+  diagnosed without anyone pasting the error.
+
 ## 0.5.81 — 2026-11-03
 
 ### Added

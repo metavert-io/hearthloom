@@ -3141,6 +3141,16 @@ async fn gmail_save(
     .await
     .map_err(anyhow::Error::from)?
     .map_err(|e| {
+        // Gmail's reason, never the password — so a failed connect can be
+        // diagnosed from the log
+        crate::monitor::log(
+            &state,
+            "warn",
+            "gmail_connect_failed",
+            &format!("Gmail sign-in for {user} failed: {e:#}"),
+            None,
+        );
+        tracing::warn!("gmail connect for {user} failed: {e:#}");
         bad_request(format!(
             "Gmail sign-in failed: {e:#}. Check the address, and that this is an app password \
          (myaccount.google.com/apppasswords), not your account password."

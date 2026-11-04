@@ -138,11 +138,15 @@ pub fn status_json(state: &AppState) -> Value {
         .unwrap_or_else(|p| p.into_inner())
         .clone()
         .unwrap_or_default();
+    // the loop's last label can be a gate it has just left behind
+    let gated = ["not connected", "off"].contains(&status.state.as_str())
+        || status.state.starts_with("paused")
+        || status.state.starts_with("stopped");
     json!({
         "enabled": enabled(state),
         "every_minutes": every_minutes(state),
         "state": blocked(state).map(String::from).unwrap_or_else(|| {
-            if status.state.is_empty() { "starting".into() } else { status.state.clone() }
+            if status.state.is_empty() || gated { "starting".into() } else { status.state.clone() }
         }),
         "since": status.since,
         "last_check": status.last_check,
@@ -163,7 +167,11 @@ pub async fn run_loop(state: AppState) {
             if let Some(feed) = session.take() {
                 let _ = tokio::task::spawn_blocking(move || feed.logout()).await;
             }
-            tokio::time::sleep(GATE_RECHECK).await;
+            // a connect or a settings change wakes this at once
+            let until = Instant::now() + GATE_RECHECK;
+            while Instant::now() < until && !RECHECK.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
             continue;
         }
 
