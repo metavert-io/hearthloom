@@ -8,6 +8,24 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+### Added
+- **Claude accounts for agents.** Say how much of your Claude account's
+  5-hour and weekly limits agents may use (in the Claude Code agent's
+  setup, or `hearthloom agents accounts`); a task that would go past it
+  waits, says why, and starts when the window resets. With more than one
+  subscription, "add an extra account to pool…" adds another (signed in
+  through Claude Code's own sign-in; Hearthloom never sees it), and agents
+  can move on to the next account at a limit, in your order — off until
+  you turn it on. A run that runs out part-way starts again by itself if
+  it had only looked at things, and stops and says so if it had changed
+  something. An optional fallback to this node's API key (billed) is off
+  by default. Agent runs now appear in the usage ledger (☰ → Spend), at no
+  cost when a subscription paid for them.
+
+### Fixed
+- A Claude Code run that ended without a result was reported as finished;
+  it now counts as failed.
+
 ## 0.5.84 — 2026-11-04
 
 ### Security

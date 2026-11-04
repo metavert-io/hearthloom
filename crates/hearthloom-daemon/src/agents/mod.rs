@@ -20,6 +20,7 @@
 //! The Agents page and every task card say which.
 
 pub mod claude_code;
+pub mod claude_pool;
 pub mod hermes;
 pub mod openclaw;
 
@@ -1080,19 +1081,44 @@ fn record_outcome(state: &AppState, agent: &AgentRow, task: &AgentTaskRow, ok: b
 async fn run_one(state: AppState, agent: AgentRow, task: AgentTaskRow) {
     let actor = Actor::new(format!("agent:{}", agent.name));
     let node = node_name(&state);
+    // Claude Code runs on an account of the pool; when none can take it,
+    // the task waits in the queue (the loop asks again every 10 seconds)
+    let seat = if agent.harness == "claude_code" {
+        match claude_pool::pick(&state, agent.config["model"].as_str()) {
+            Ok(seat) => Some(seat),
+            Err(waiting) => {
+                note_waiting(&state, &actor, &task, &waiting);
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    // a waiting note goes once the task runs
+    let clear = task
+        .error
+        .as_deref()
+        .is_some_and(|e| e.starts_with("waiting"));
     if state
         .store
-        .set_agent_task_status(&actor, &task.id, "running", None, None, Some(&node))
+        .set_agent_task_status(
+            &actor,
+            &task.id,
+            "running",
+            None,
+            clear.then_some(""),
+            Some(&node),
+        )
         .is_err()
     {
         return;
     }
     let token = issue_token(&task.id);
-    let outcome = match agent.harness.as_str() {
-        "claude_code" => claude_code::run(&state, &agent, &task, &token).await,
-        "hermes" => hermes::run(&state, &agent, &task).await,
-        "openclaw" => openclaw::run(&state, &agent, &task, &token).await,
-        other => Err(anyhow!("no bridge for {other:?} yet")),
+    let outcome = match (agent.harness.as_str(), &seat) {
+        ("claude_code", Some(seat)) => claude_code::run(&state, &agent, &task, &token, seat).await,
+        ("hermes", _) => hermes::run(&state, &agent, &task).await,
+        ("openclaw", _) => openclaw::run(&state, &agent, &task, &token).await,
+        (other, _) => Err(anyhow!("no bridge for {other:?} yet")),
     };
     // OpenClaw reports back later; its task stays running until then.
     if agent.harness == "openclaw" && outcome.is_ok() {
@@ -1103,6 +1129,53 @@ async fn run_one(state: AppState, agent: AgentRow, task: AgentTaskRow) {
     if matches!(state.store.agent_task(&task.id), Ok(Some(t)) if t.status != "running") {
         return;
     }
+    // Out of Claude usage part-way: a run that had only looked starts
+    // again from the top (on the next account, or once this one frees);
+    // one that had changed something stops and says so — starting again
+    // could do it twice.
+    let outcome = match outcome {
+        Err(err) => match err.downcast::<claude_code::LimitHit>() {
+            Ok(hit) if !hit.did_something => {
+                let note = format!(
+                    "waiting: restarting — {} reached its usage limit before it changed anything",
+                    claude_pool::Seat {
+                        account: Some(hit.account.clone()),
+                        config_dir: None,
+                        api_key: None,
+                    }
+                    .label()
+                );
+                let _ = state.store.set_agent_task_status(
+                    &actor,
+                    &task.id,
+                    "queued",
+                    None,
+                    Some(&note),
+                    None,
+                );
+                KICK.notify_one();
+                crate::bus::touch(&state, "operational.changed");
+                return;
+            }
+            Ok(hit) => Err(anyhow!(
+                "{} reached its usage limit part-way through, after it had started changing \
+                 things, so it stopped there. Nothing was undone. To finish, ask again (say \
+                 what's already done); {}.",
+                claude_pool::Seat {
+                    account: Some(hit.account.clone()),
+                    config_dir: None,
+                    api_key: None,
+                }
+                .label(),
+                match claude_pool::pick(&state, agent.config["model"].as_str()) {
+                    Ok(seat) => format!("it would run on {} now", seat.label()),
+                    Err(_) => format!("that account frees at {}", claude_pool::when(hit.until)),
+                }
+            )),
+            Err(err) => Err(err),
+        },
+        ok => ok,
+    };
     let (status, result, error) = match &outcome {
         Ok(text) => ("done", Some(text.as_str()), None),
         Err(err) => ("failed", None, Some(format!("{err:#}"))),
@@ -1121,6 +1194,29 @@ async fn run_one(state: AppState, agent: AgentRow, task: AgentTaskRow) {
             .map(String::clone)
             .unwrap_or_else(|e| format!("{e:#}")),
     );
+}
+
+/// A task that can't start yet says why (in its `error`, while queued) —
+/// written only when the reason changes: every write syncs. The owner
+/// hears once per wait, not once per task.
+fn note_waiting(state: &AppState, actor: &Actor, task: &AgentTaskRow, why: &str) {
+    if task.error.as_deref() == Some(why) {
+        return;
+    }
+    let _ = state
+        .store
+        .set_agent_task_status(actor, &task.id, &task.status, None, Some(why), None);
+    let _ = state.store.notify(
+        &Actor::new("system:governance"),
+        "system:governance",
+        "info",
+        "An agent task is waiting for Claude",
+        why.trim_start_matches("waiting: "),
+        Some(("#/agents", Some("see it"))),
+        Some(&format!("claude-wait:{why}")),
+    );
+    crate::bus::touch(state, "notification.created");
+    crate::bus::touch(state, "operational.changed");
 }
 
 /// An OpenClaw (or other) agent reporting its result for a task.
@@ -1354,6 +1450,158 @@ pub fn mint_agent_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pool from the runner's side: a task waits (and says why) while
+    /// the only account it may use is out; with switching on it runs on
+    /// the next; a run that ran out after only looking goes back in the
+    /// queue for a fresh start.
+    #[tokio::test]
+    async fn test_the_runner_waits_switches_and_restarts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::paths::Home::at(tmp.path());
+        home.init().unwrap();
+        let state = AppState {
+            store: std::sync::Arc::new(
+                hearthloom_core::store::Store::open(&home.db_path()).unwrap(),
+            ),
+            home,
+            embedder: None,
+            llm: None,
+            auth_locked: Default::default(),
+            bus: Default::default(),
+            killswitch: Default::default(),
+            running: Default::default(),
+        };
+        let actor = Actor::new("human:test");
+        let script = |name: &str, body: &str| {
+            let path = tmp.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let ok = script(
+            "ok.sh",
+            concat!(
+                "cat <<EOF\n",
+                r#"{"type":"result","subtype":"success","is_error":false,"result":"ran on ${CLAUDE_CONFIG_DIR:-usual}"}"#,
+                "\nEOF"
+            ),
+        );
+        let out = script(
+            "out.sh",
+            concat!(
+                "echo '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Grep\"}]}}'\n",
+                "cat <<'EOF'\n",
+                r#"{"type":"result","subtype":"success","is_error":true,"result":"You've hit your weekly limit · resets Mon 12:00am"}"#,
+                "\nEOF\nexit 1"
+            ),
+        );
+        let workdir = tmp.path().join("work");
+        std::fs::create_dir_all(&workdir).unwrap();
+        let save = |claude: &std::path::Path| {
+            state
+                .store
+                .save_agent(
+                    &actor,
+                    None,
+                    &hearthloom_core::store::AgentIn {
+                        name: format!("Hand {}", uuid::Uuid::new_v4().simple()),
+                        harness: "claude_code".into(),
+                        config: json!({"workdir": workdir, "claude_path": claude}),
+                        enabled: Some(true),
+                    },
+                )
+                .unwrap()
+        };
+        let queue = |agent: &AgentRow| {
+            let task = state
+                .store
+                .create_agent_task(
+                    &actor,
+                    None,
+                    Some(&agent.id),
+                    "do it",
+                    "do it",
+                    &[],
+                    None,
+                    false,
+                )
+                .unwrap();
+            state
+                .store
+                .set_agent_task_status(&actor, &task.id, "queued", None, None, None)
+                .unwrap()
+        };
+        let later = chrono::Utc::now().timestamp() + 3600;
+        claude_pool::update_reading(&state, claude_pool::MAIN, |r| {
+            r.exhausted_until = Some(later)
+        });
+
+        // the usual account is out and switching is off: the task waits
+        let agent = save(&ok);
+        let task = queue(&agent);
+        run_one(state.clone(), agent.clone(), task.clone()).await;
+        let t = state.store.agent_task(&task.id).unwrap().unwrap();
+        assert_eq!(t.status, "queued");
+        assert!(
+            t.error
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("waiting: your Claude account is at its limit"),
+            "{:?}",
+            t.error
+        );
+
+        // a second account and switching on: it runs there
+        let added = claude_pool::mutate(&state, &json!({"op": "add", "label": "work"}))
+            .await
+            .unwrap();
+        let id = added["added"].as_str().unwrap().to_string();
+        claude_pool::mutate(&state, &json!({"op": "settings", "switching": true}))
+            .await
+            .unwrap();
+        let t = state.store.agent_task(&task.id).unwrap().unwrap();
+        run_one(state.clone(), agent.clone(), t).await;
+        let t = state.store.agent_task(&task.id).unwrap().unwrap();
+        assert_eq!(t.status, "done", "{:?}", t.error);
+        assert!(
+            t.result
+                .as_deref()
+                .unwrap_or("")
+                .contains(&format!("claude-accounts/{id}")),
+            "{:?}",
+            t.result
+        );
+        assert_eq!(t.error.as_deref(), Some(""), "the waiting note went");
+
+        // it runs out after only looking: back in the queue to start again
+        let agent = save(&out);
+        let task = queue(&agent);
+        run_one(state.clone(), agent.clone(), task.clone()).await;
+        let t = state.store.agent_task(&task.id).unwrap().unwrap();
+        assert_eq!(t.status, "queued");
+        assert!(
+            t.error
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("waiting: restarting"),
+            "{:?}",
+            t.error
+        );
+        assert!(claude_pool::reading(&state, &id).exhausted_until.is_some());
+        // …and with both accounts out, it waits
+        run_one(state.clone(), agent.clone(), t).await;
+        let t = state.store.agent_task(&task.id).unwrap().unwrap();
+        assert!(
+            t.error
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("waiting: every Claude account"),
+            "{:?}",
+            t.error
+        );
+    }
 
     fn agent(name: &str, harness: &str, enabled: bool) -> AgentRow {
         AgentRow {

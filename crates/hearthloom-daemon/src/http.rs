@@ -9875,8 +9875,20 @@ async fn agents_view(
             "node": node, "depth": crate::agents::harness(&a.harness).map(|h| h.depth)})
         })
         .collect();
+    // the Claude accounts this machine's Claude Code agents run on
+    let claude_pool = if state
+        .store
+        .agents()?
+        .iter()
+        .any(|a| a.harness == "claude_code")
+    {
+        Some(crate::agents::claude_pool::view(&state, false).await)
+    } else {
+        None
+    };
     Ok(Json(json!({
         "locked": false,
+        "claude_pool": claude_pool,
         "node": {"id": here, "name": crate::agents::node_name(&state)},
         "peer": state.store.peer()?.map(|(name, _)| json!({"name": name})),
         "elsewhere": elsewhere,
@@ -9904,6 +9916,9 @@ struct AgentsMutateBody {
     token: Option<String>,
     #[serde(default)]
     name: Option<String>,
+    /// a change to the Claude account pool: {"op": …} (agents/claude_pool.rs)
+    #[serde(default)]
+    pool: Option<Value>,
 }
 
 /// This node's paired peer: (name, url, key) — or a clear refusal.
@@ -9992,6 +10007,10 @@ async fn agents_mutate(
                 }
             }
             json!({"test": agents_test(&agent).await})
+        }
+        "pool" => {
+            let change = body.pool.as_ref().ok_or_else(|| bad_request("which change to the Claude account pool?"))?;
+            crate::agents::claude_pool::mutate(&state, change).await.map_err(refuse)?
         }
         "rename_node" => {
             let name = body.name.as_deref().map(str::trim).filter(|n| !n.is_empty() && n.chars().count() <= 40)

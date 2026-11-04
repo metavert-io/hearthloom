@@ -80,6 +80,10 @@ mod tests {
                 "agents/claude_code.rs",
                 include_str!("agents/claude_code.rs"),
             ),
+            (
+                "agents/claude_pool.rs",
+                include_str!("agents/claude_pool.rs"),
+            ),
         ] {
             let starts = src.matches("Command::new(").count();
             let clears = src.matches(".env_clear()").count();

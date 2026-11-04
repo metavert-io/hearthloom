@@ -67,6 +67,12 @@ pub const DIR_CLASSES: &[(&str, DirClass)] = &[
     ),
     ("exports", DirClass::Excluded("the export output itself")),
     (
+        "claude-accounts",
+        DirClass::Excluded(
+            "extra Claude Code sign-ins for the agent pool — logins (a credentials file on Linux) never export; sign in again",
+        ),
+    ),
+    (
         "BRAIN.md",
         DirClass::Excluded("derived — regenerates from the store"),
     ),

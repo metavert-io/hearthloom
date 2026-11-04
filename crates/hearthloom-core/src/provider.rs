@@ -169,6 +169,11 @@ pub struct ModelPricing {
 /// Ledger model ids for models that run on this machine start with this.
 pub const LOCAL_MODEL_PREFIX: &str = "local:";
 
+/// Ledger model ids for runs a Claude subscription pays for (a Claude
+/// Code agent run on the owner's own plan) start with this: tokens are
+/// recorded, the cost is zero — the plan's limits, not money, bound them.
+pub const SUBSCRIPTION_MODEL_PREFIX: &str = "subscription:";
+
 /// Built-in price table, matched by substring (dated/custom ids land on
 /// the family); specific generations are matched BEFORE their family so
 /// a cheaper successor never prices at the older rate. Anthropic figures
@@ -194,7 +199,7 @@ pub fn pricing_for(model: &str) -> Option<ModelPricing> {
     // A model that runs on this machine (ledger model ids `local:<name>`,
     // e.g. the embedder) is free — priced at zero, which is different
     // from "no price on file".
-    if m.starts_with(LOCAL_MODEL_PREFIX) {
+    if m.starts_with(LOCAL_MODEL_PREFIX) || m.starts_with(SUBSCRIPTION_MODEL_PREFIX) {
         return Some(p(0.0, 0.0));
     }
     if m.contains("fable-5-1") || m.contains("mythos-5-1") {
@@ -1340,6 +1345,9 @@ mod tests {
         assert_eq!(opus.input, 5.0);
         assert_eq!(opus.output, 25.0);
         assert!(pricing_for("claude-haiku-4-5-20251001").is_some());
+        // A subscription pays for an agent's run: tokens, no cost.
+        let plan = pricing_for("subscription:claude-sonnet-5-5").unwrap();
+        assert_eq!((plan.input, plan.output, plan.cache_read), (0.0, 0.0, 0.0));
         // On-machine models are free, not unpriced.
         let local = pricing_for("local:all-MiniLM-L6-v2").unwrap();
         assert_eq!(

@@ -2,6 +2,7 @@
 //! API (spawned on demand); the only in-process work is adapter parsing
 //! and pretty-printing.
 
+mod accounts;
 mod bench;
 mod client;
 mod embers;
@@ -38,6 +39,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Agents: the Claude accounts Claude Code agents run on.
+    Agents {
+        #[command(subcommand)]
+        command: AgentsCmd,
+    },
     /// Sign in to a node and keep a CLI key (keychain-stored).
     Auth {
         #[command(subcommand)]
@@ -299,6 +305,74 @@ enum KeyCmd {
     Revoke {
         id: String,
     },
+}
+
+#[derive(Subcommand)]
+enum AgentsCmd {
+    /// The Claude accounts this machine's Claude Code agents run on: your
+    /// usual sign-in, plus any extra account you pool. Caps keep agents to
+    /// a share of each account's 5-hour and weekly limits.
+    Accounts {
+        #[command(subcommand)]
+        command: Option<AccountsCmd>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AccountsCmd {
+    /// Each account: sign-in, usage, caps (the default).
+    List,
+    /// Add an extra account to pool, then sign it in with `login`.
+    Add { label: String },
+    /// Sign an account in with Claude Code's own sign-in (on this machine;
+    /// `usual` is your usual sign-in).
+    Login { account: String },
+    /// Change an account: caps (percent), on/off, model families, name.
+    Set {
+        account: String,
+        /// Use at most this % of the 5-hour limit.
+        #[arg(long = "cap-5h")]
+        cap_5h: Option<u8>,
+        /// Use at most this % of the weekly limit.
+        #[arg(long = "cap-week")]
+        cap_week: Option<u8>,
+        #[arg(long, conflicts_with = "off")]
+        on: bool,
+        #[arg(long)]
+        off: bool,
+        /// Only for agents on these model families: opus,sonnet,haiku,fable
+        /// (empty string = any).
+        #[arg(long)]
+        models: Option<String>,
+        #[arg(long)]
+        rename: Option<String>,
+    },
+    /// Put an account at a place in the order (1 = tried first).
+    Move {
+        account: String,
+        #[arg(long)]
+        to: usize,
+    },
+    /// Remove an extra account (Claude Code signs it out here).
+    Remove {
+        account: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Re-read an account's sign-in; --usage also reads its usage now
+    /// (a one-word run on that account).
+    Check {
+        account: String,
+        #[arg(long)]
+        usage: bool,
+    },
+    /// Move on to the next account when one is at its limit: on|off.
+    Switching { value: String },
+    /// When no account can run, use this node's Anthropic API key
+    /// (billed): on|off.
+    Fallback { value: String },
+    /// Stop a run that goes past an account's cap: on|off.
+    StopAtCap { value: String },
 }
 
 #[derive(Subcommand)]
@@ -1282,6 +1356,57 @@ async fn main() -> Result<()> {
         Cmd::Upgrade { check } => {
             let client = Client::with_url(home, url.clone())?;
             ops::upgrade(&client, check).await?;
+        }
+        Cmd::Agents {
+            command: AgentsCmd::Accounts { command },
+        } => {
+            use accounts::Op;
+            let op = match command.unwrap_or(AccountsCmd::List) {
+                AccountsCmd::List => Op::List,
+                AccountsCmd::Add { label } => Op::Add(label),
+                AccountsCmd::Login { account } => Op::Login(account),
+                AccountsCmd::Set {
+                    account,
+                    cap_5h,
+                    cap_week,
+                    on,
+                    off,
+                    models,
+                    rename,
+                } => Op::Set {
+                    account,
+                    cap_5h,
+                    cap_week,
+                    enabled: if on {
+                        Some(true)
+                    } else if off {
+                        Some(false)
+                    } else {
+                        None
+                    },
+                    models: models.map(|m| {
+                        m.split(',')
+                            .map(|x| x.trim().to_string())
+                            .filter(|x| !x.is_empty())
+                            .collect()
+                    }),
+                    rename,
+                },
+                AccountsCmd::Move { account, to } => Op::Move(account, to),
+                AccountsCmd::Remove { account, yes } => Op::Remove(account, yes),
+                AccountsCmd::Check { account, usage } => Op::Check(account, usage),
+                AccountsCmd::Switching { value } => {
+                    Op::Setting("switching", accounts::on_off(&value)?)
+                }
+                AccountsCmd::Fallback { value } => {
+                    Op::Setting("api_fallback", accounts::on_off(&value)?)
+                }
+                AccountsCmd::StopAtCap { value } => {
+                    Op::Setting("stop_at_cap", accounts::on_off(&value)?)
+                }
+            };
+            let client = Client::with_url(home, url.clone())?;
+            accounts::run(&client, op, as_json).await?;
         }
         Cmd::Ember { command } => match command {
             EmberCmd::Search {

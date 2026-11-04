@@ -39,7 +39,7 @@ const GOALS = [
 
 let data = null;
 let view = null;
-const ui = { adding: null, openAgent: null, goal: [] };
+const ui = { adding: null, openAgent: null, goal: [], poolAdding: false };
 
 const depthBadge = (depth) => depth && DEPTH[depth]
   ? `<span class="agent-depth" data-depth="${esc(depth)}" title="${esc(DEPTH[depth][1])}">${esc(DEPTH[depth][0])}</span>` : "";
@@ -122,6 +122,76 @@ function paint() {
   wire(body);
 }
 
+/* ————— the Claude account(s) Claude Code agents run on (0.5.85) —————
+   Most people have one subscription: one row, its usage, how much of it
+   agents may use, and a quiet way to add another. Moving on to the next
+   account is offered once there is one, and is off until turned on. */
+const whenAt = (secs) => {
+  const d = new Date(secs * 1000);
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return d.toDateString() === new Date().toDateString() ? time
+    : `${d.toLocaleDateString([], { weekday: "short" })} ${time}`;
+};
+
+function poolSection() {
+  const p = data.claude_pool;
+  if (!p) return "";
+  const many = p.accounts.length > 1;
+  const pct = (w) => (w ? `${Math.round(w.utilization * 100)}%` : "—");
+  const rows = p.accounts.map((a, i) => {
+    const s = a.sign_in || {};
+    const who = a.usual ? (many ? "your usual sign-in" : "your Claude sign-in") : esc(a.label);
+    const signed = s.signed_in
+      ? `${esc(s.email || "signed in")}${s.plan ? ` · ${esc(s.plan)}` : ""}`
+      : a.usual
+        ? esc(s.error || "not signed in — run claude on this machine and sign in")
+        : `not signed in yet — on this machine, run <code>${esc(a.login_command)}</code>`;
+    const w5 = a.windows?.five_hour;
+    const w7 = a.windows?.seven_day;
+    const usage = w5 || w7
+      ? `used: 5 hours ${pct(w5)} · week ${pct(w7)}${w7 ? ` (resets ${esc(whenAt(w7.resets_at))})` : ""}`
+      : "usage not read yet";
+    const held = a.exhausted_until ? ` · out until ${esc(whenAt(a.exhausted_until))}`
+      : a.held_back_until ? ` · resting until ${esc(whenAt(a.held_back_until))}` : "";
+    return `
+    <div class="pool-row" data-account="${esc(a.id)}">
+      <div class="task-row" style="flex-wrap:wrap; align-items:baseline">
+        ${many ? `<span class="meta">${i + 1}.</span>` : ""}<b>${who}</b>
+        <span class="meta">${signed}</span><span class="meta">${usage}${held}</span>
+      </div>
+      <div class="searchbar" style="flex-wrap:wrap; align-items:end">
+        <label class="meta">agents may use up to
+          <input class="pool-cap" data-cap="cap_5h" type="number" min="1" max="100" value="${a.cap_5h}" style="width:4.5em">% of each 5 hours,</label>
+        <label class="meta"><input class="pool-cap" data-cap="cap_7d" type="number" min="1" max="100" value="${a.cap_7d}" style="width:4.5em">% of the week</label>
+        ${many ? `<label class="meta"><input type="checkbox" class="pool-on" ${a.enabled ? "checked" : ""}> on</label>` : ""}
+        <button class="btn btn-quiet pool-save">save</button>
+        <button class="btn btn-quiet pool-check" title="a one-word run on this account, to read its usage now">check usage</button>
+        ${many && i > 0 ? `<button class="btn btn-quiet pool-up" title="use it before the one above">↑</button>` : ""}
+        ${a.usual ? "" : `<button class="btn btn-quiet pool-remove">remove…</button>`}
+      </div>
+    </div>`;
+  }).join("");
+  const capped = p.accounts.some((a) => a.cap_5h < 100 || a.cap_7d < 100);
+  const setting = (key, on, text) => `<label class="meta" style="display:block; margin-top:var(--s1)">
+    <input type="checkbox" class="pool-setting" data-key="${key}" ${on ? "checked" : ""}> ${text}</label>`;
+  return `
+    <div class="meta" style="margin-top:var(--s3)"><b>Claude account</b> — what Claude Code agents on this machine run on</div>
+    ${rows}
+    ${many ? setting("switching", p.switching, "when one account reaches its limit (or the share above), move on to the next, in this order") : ""}
+    ${capped ? setting("stop_at_cap", p.stop_at_cap, "stop a run that goes past the share you set (otherwise it's checked before each run starts)") : ""}
+    ${p.has_api_key ? setting("api_fallback", p.api_fallback, "when no account can run, use this node's Anthropic API key instead (billed to the key)") : ""}
+    <div style="margin-top:var(--s2)">${ui.poolAdding
+      ? `<div class="searchbar" style="flex-wrap:wrap; align-items:end">
+           <label class="meta agent-field">a name for the other account
+             <input id="pool-new-label" placeholder="e.g. work" maxlength="40"></label>
+           <button class="btn" id="pool-add">add</button>
+           <button class="btn btn-quiet" id="pool-add-cancel">cancel</button></div>
+         <p class="meta">Then sign it in on this machine with the command Hearthloom shows. Claude Code keeps the
+           sign-in; Hearthloom never sees it.</p>`
+      : `<button class="linkish" id="pool-add-open">add an extra account to pool…</button>`}</div>
+    <p class="meta pool-note" hidden></p>`;
+}
+
 function agentCard(entry) {
   const a = entry.agent;
   const h = data.catalog.find((c) => c.id === a.harness) || { label: a.harness };
@@ -156,6 +226,7 @@ function agentCard(entry) {
         <button class="btn btn-quiet agent-test">test the connection</button>
       </div>
       <p class="meta agent-status" hidden></p>
+      ${a.harness === "claude_code" ? poolSection() : ""}
       <div class="meta" style="margin-top:var(--s3)"><b>What it can read of your record</b> — its own key: read-only, never
         anything private, and only these areas:</div>
       <div class="searchbar" style="flex-wrap:wrap">
@@ -184,6 +255,63 @@ function agentCard(entry) {
       </div>
     </div>` : ""}
   </div>`;
+}
+
+function wirePool(card, post, note) {
+  const noteEl = card.querySelector(".pool-note");
+  if (!noteEl) return;
+  const change = async (pool, done) => {
+    const res = await post("/v1/agents", { action: "pool", pool }, noteEl);
+    if (!res) return null;
+    data.claude_pool = res.pool;
+    paint();
+    if (done) note(document.querySelector(".pool-note"), done);
+    return res;
+  };
+  card.querySelectorAll(".pool-row").forEach((row) => {
+    const id = row.dataset.account;
+    row.querySelector(".pool-save").onclick = () => {
+      const pool = { op: "set", id };
+      row.querySelectorAll(".pool-cap").forEach((i) => { pool[i.dataset.cap] = Number(i.value); });
+      const on = row.querySelector(".pool-on");
+      if (on) pool.enabled = on.checked;
+      change(pool, "saved");
+    };
+    row.querySelector(".pool-check").onclick = () => {
+      note(noteEl, "checking (a one-word run on this account)…");
+      change({ op: "check", id, usage: true }, "checked");
+    };
+    const up = row.querySelector(".pool-up");
+    if (up) up.onclick = () => {
+      const at = data.claude_pool.accounts.findIndex((a) => a.id === id);
+      change({ op: "move", id, to: at }); // 1-based: one place earlier
+    };
+    const remove = row.querySelector(".pool-remove");
+    if (remove) remove.onclick = async () => {
+      const ok = await confirmDanger({
+        title: "Remove this Claude account from the pool?",
+        body: "Claude Code signs it out on this machine. Agents stop using it; nothing else changes.",
+        action: "remove",
+      });
+      if (ok) change({ op: "remove", id }, "removed");
+    };
+  });
+  card.querySelectorAll(".pool-setting").forEach((box) => {
+    box.onchange = () => change({ op: "settings", [box.dataset.key]: box.checked }, "saved");
+  });
+  const open = card.querySelector("#pool-add-open");
+  if (open) open.onclick = () => { ui.poolAdding = true; paint(); };
+  const cancel = card.querySelector("#pool-add-cancel");
+  if (cancel) cancel.onclick = () => { ui.poolAdding = false; paint(); };
+  const add = card.querySelector("#pool-add");
+  if (add) add.onclick = async () => {
+    const label = card.querySelector("#pool-new-label").value.trim();
+    if (!label) return;
+    ui.poolAdding = false;
+    const res = await change({ op: "add", label });
+    if (res) note(document.querySelector(".pool-note"),
+      `added — now sign it in: on this machine, run  ${res.login_command}`);
+  };
 }
 
 function addAgent() {
@@ -319,6 +447,7 @@ function wire(body) {
       if (res) note(status, res.test.ok ? `✓ reachable${res.test.claude ? ` — ${res.test.claude}` : ""}`
         : `✗ not ready: ${res.test.error || (res.test.workdir_ok === false ? "the working folder doesn't exist" : `answered ${res.test.status ?? "nothing"}`)}`);
     };
+    wirePool(card, post, note);
     card.querySelector(".agent-mint").onclick = async () => {
       const areas = [...card.querySelectorAll(".agent-area:checked")].map((b) => b.value);
       if (!areas.length) { note(status, "choose at least one area, or leave it without record access"); return; }

@@ -4429,7 +4429,7 @@ async function askShowTask(card) {
     const pending = (c.approvals || []).filter((a) => a.status === "pending");
     const statusText = {
       proposed: pending.length ? "waiting for your OK" : (c.agent ? "waiting" : "no agent can do this yet"),
-      queued: "about to start", running: "working on it", done: "done", failed: "couldn't finish",
+      queued: t.error?.startsWith("waiting") ? "waiting" : "about to start", running: "working on it", done: "done", failed: "couldn't finish",
       cancelled: "stopped", refused: "not allowed by your agent settings",
     }[t.status] || t.status;
     node.innerHTML = `
@@ -4439,6 +4439,7 @@ async function askShowTask(card) {
       <details><summary class="meta">what it was asked to do</summary><div class="md">${md(t.brief)}</div></details>
       <div>${(t.classes || []).map((cl) => `<span class="task-tag plain-tag">${esc(ag.CLASS_LABEL[cl] || cl)}</span>`).join(" ")}</div>
       ${t.status === "refused" && t.error ? `<p class="meta">${esc(t.error)}</p>` : ""}
+      ${t.status === "queued" && t.error?.startsWith("waiting") ? `<p class="meta">⏸ ${esc(t.error.replace(/^waiting: /, ""))}</p>` : ""}
       ${c.offline ? `<p class="meta">⏸ waiting for ${esc(c.offline.node)} — it hasn't been seen since
         ${esc(c.offline.since.slice(0, 16).replace("T", " "))}. The task runs when it's back.</p>` : ""}
       ${pending.length ? `<div class="agent-card-approvals">${ag.approvalRows(pending)}</div>` : ""}

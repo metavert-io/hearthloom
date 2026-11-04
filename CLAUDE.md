@@ -873,6 +873,22 @@ the design log 2026-07-14.
   the owner in, and `claude -p` billed an API key it found instead of the
   subscription. A new program started for an agent or an ember does the
   same; `test_agent_and_ember_programs_start_clean` checks the two files.
+- **THE CLAUDE ACCOUNT POOL NEVER TOUCHES A LOGIN (0.5.85,
+  agents/claude_pool.rs).** An extra account is a Claude Code home
+  (`claude-accounts/<id>/`, passed as CLAUDE_CONFIG_DIR, Excluded from
+  export) signed in by `claude auth login` in the owner's terminal; never
+  read, store or forward its token, and never call Anthropic endpoints
+  with it (Claude Code's legal page: apps "may not collect, store, or
+  intermediate" Claude credentials or tokens). Usage readings come
+  only from the run's own `rate_limit_event`s (undocumented: a missing
+  reading is "unknown", never "free"). Switching and the API-key fallback
+  default OFF; the key reaches a run only through the fallback seat
+  (`Seat::env`), and a subscription run whose init event shows any
+  `apiKeySource` but `none` is killed before it spends. A run that hit a
+  limit restarts only when it used nothing outside `LOOK_ONLY` — a run
+  that changed something must not run twice. Waiting reasons live in the
+  queued task's `error` (prefix `waiting`), written only when they change
+  (every write syncs).
 - **AN UPGRADE SETS THE KEPT KEY'S SCOPES (0.5.84).** `install_from_dir`
   keeps an installed ember's key id and secret but sets its scopes to what
   was granted now (`set_api_key_scopes`). Before 0.5.84 the key kept its

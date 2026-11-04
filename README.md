@@ -341,6 +341,22 @@ whatever you set (a switch on the same page turns that off). Each agent reads yo
 read-only key, limited to the life areas you choose; everything it does
 is recorded, and approvals work from anywhere you're signed in.
 
+**Claude accounts.** Claude Code agents run on your usual Claude sign-in
+on that machine. In the Claude Code agent's setup you can say how much of
+the account's 5-hour and weekly limits agents may use (say 70% of the
+week, so some is left for you); a task that would go past it waits and
+starts when the window resets. If you have more than one subscription,
+"add an extra account to pool…" adds another (it signs in through Claude
+Code's own sign-in — Hearthloom never sees it), and you can let agents
+move on to the next account when one reaches its limit, in the order you
+set (off until you turn it on). A run that runs out part-way starts again
+on the next account if it had only looked at things, and stops and tells
+you if it had already changed something. Optionally, when no account can
+run, this node's Anthropic API key takes over, billed to the key (off
+until you turn it on). Usage readings come from Claude Code itself as it
+runs; agent runs appear on ☰ → Spend, at no cost when a subscription
+paid for them.
+
 ### Sharing with other people's Hearthlooms
 
 ☰ → Network connects your record to other people's. What a connection

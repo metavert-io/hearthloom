@@ -85,6 +85,30 @@ for the port, launchd pointing at the wrong binary, CLI/daemon version
 skew, whether credentials reach past the auth door, embedding-model
 presence, WAL bloat, and PATH. Run this first when anything seems off.
 
+### `agents accounts` — the Claude accounts agents run on
+
+```
+hearthloom agents accounts                        # each account: sign-in, usage, caps
+hearthloom agents accounts set usual --cap-week 70  # agents may use 70% of the week
+hearthloom agents accounts add work               # an extra subscription to pool
+hearthloom agents accounts login work             # Claude Code's own sign-in, on this machine
+hearthloom agents accounts switching on           # move on to the next at a limit (default off)
+hearthloom agents accounts move work --to 1       # try it first
+hearthloom agents accounts check work --usage     # read its usage now (a one-word run)
+hearthloom agents accounts set work --models sonnet --off
+hearthloom agents accounts fallback on            # no account can run → the API key (billed)
+hearthloom agents accounts stop-at-cap on         # stop a run that crosses its cap
+hearthloom agents accounts remove work --yes      # Claude Code signs it out here
+```
+
+The pool belongs to the machine the Claude Code agents run on: its
+settings and usage readings stay on that node, and `login` runs there
+(it refuses `--url`). `usual` names your usual sign-in. Caps are
+percentages of Claude's 5-hour and weekly limits; Hearthloom stops five
+points short of a cap below 100%, because a run spends while it runs.
+Everything takes `--json` (the same object the Agents page reads), and
+needs the vault open, like the rest of the agents' setup.
+
 ### `ember` — install, manage, develop
 
 ```
