@@ -87,6 +87,10 @@ presence, WAL bloat, and PATH. Run this first when anything seems off.
 
 ### `source text` — search inside a mail archive's messages
 
+`hearthloom node` lists each node's mail archives under it (message
+count, months, whether the text is searchable). Ask on any node can
+search an archive another node holds; the lookup goes through your hub.
+
 ```
 hearthloom source text gmail-live          # on or off, progress, size now / with text
 hearthloom source text gmail-takeout on    # big archives (over 100,000 messages) wait for this

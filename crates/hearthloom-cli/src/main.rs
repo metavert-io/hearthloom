@@ -1607,8 +1607,12 @@ async fn source_text(
     if let Some(size) = mb(&status["index_bytes"]) {
         println!("  index now: {size}");
     }
-    if let Some(size) = mb(&status["projected_bytes"]) {
-        println!("  with text: about {size} (measured on real mail)");
+    let done = status["progress"]["done"].as_u64();
+    let total = status["progress"]["total"].as_u64();
+    if done.is_none() || done != total {
+        if let Some(size) = mb(&status["projected_bytes"]) {
+            println!("  with text: about {size} more (measured on real mail)");
+        }
     }
     Ok(())
 }

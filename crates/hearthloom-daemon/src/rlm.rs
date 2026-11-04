@@ -761,6 +761,16 @@ fn run_tool(state: &AppState, tool: &str, args: &Value) -> Result<String> {
                 out.get("body").and_then(|b| b.as_str()).unwrap_or("")
             )))
         }
+        "vsearch" | "vfetch" if remote_node(state, args)?.is_some() => {
+            // an archive another of the owner's nodes holds (0.5.88): ask it
+            // through the hub, with this asker's vault state
+            let (id, name) = remote_node(state, args)?.expect("checked");
+            let vault_open = !state.store.vault_status().0;
+            let out = tokio::runtime::Handle::current().block_on(crate::lookups::ask_remote(
+                state, &id, tool, args, vault_open,
+            ))?;
+            Ok(preview(format!("(from {name})\n{out}")))
+        }
         "vsearch" => {
             let source = args
                 .get("source")
@@ -829,6 +839,30 @@ fn run_tool(state: &AppState, tool: &str, args: &Value) -> Result<String> {
         }
         other => Err(anyhow!("unknown tool: {other}")),
     }
+}
+
+/// The other node a vsearch/vfetch names in `node`, if any: (id, name).
+/// This node's own name means here; an unknown or long-silent node is an
+/// error the model can read and report.
+fn remote_node(state: &AppState, args: &Value) -> Result<Option<(String, String)>> {
+    let Some(node) = args
+        .get("node")
+        .and_then(|n| n.as_str())
+        .filter(|n| !n.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let (id, name, seen) = crate::lookups::resolve_node(state, node)
+        .ok_or_else(|| anyhow!("there's no node called {node:?} — use a name from the list"))?;
+    if id == crate::agents::node_id(state) {
+        return Ok(None);
+    }
+    if !crate::lookups::recently_seen(&seen) {
+        return Err(anyhow!(
+            "{name} hasn't been seen lately, so its archives are unavailable right now — say so"
+        ));
+    }
+    Ok(Some((id, name)))
 }
 
 /// Read the model's reply. A reply that is EXACTLY one JSON object

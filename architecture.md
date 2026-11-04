@@ -310,6 +310,14 @@ A source is either copied into the episode log or left where it is.
 A large archive can be both. The Gmail Takeout is materialized for its
 core strata (sent, personal, starred) and virtual for all of it.
 
+A mail archive's sidecar indexes the headers when it is built, and its
+message text and links in the background afterwards (`mbox_text.rs`; big
+archives wait for the owner). Archives are read in place, so every read
+goes through `virtual_source::{search,fetch}_for_viewer`, which applies
+the privacy rules and the caller's vault. Each node lists its archives in
+the node list, and Ask on any node can search an archive another node
+holds (see "Lookups on another node" below).
+
 ## 6. Consolidation: the idle-time mind
 
 `consolidate.rs` runs a cycle shortly after start and every six hours.
@@ -570,6 +578,17 @@ private data, under `/v1/sync/*` with the `peer` scope.
 
 Peering stays simple on purpose. There is no capability negotiation; a
 missing endpoint is detected and skipped.
+
+### Lookups on another node
+
+Spokes dial the hub; nothing dials a spoke. When Ask needs an archive
+another node holds, the lookup goes through the hub (`lookups.rs`): the
+asking node posts it (`/v1/sync/lookup`, peer keys only), the hub hints
+its spokes over the push bus (`lookup.requested`, repeated while
+unclaimed), the holder fetches what is for it, runs it under its own
+privacy rules with the asker's vault state, and posts the answer, which
+the hub hands back. Requests live in the hub's memory for seconds; a node
+that is asleep doesn't answer and Ask says so.
 
 ### Federation: many owners, bounded trust
 

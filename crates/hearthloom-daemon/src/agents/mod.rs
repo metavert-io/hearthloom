@@ -289,6 +289,8 @@ pub fn publish_self(state: &AppState) {
         "imports": imports_here(state),
         // watching a Gmail mailbox (gmail_watch.rs): two nodes doing it shows
         "mail": crate::gmail_watch::watching(state),
+        // the mail archives this node holds, for Ask on any node (0.5.88)
+        "archives": crate::lookups::archives_here(state),
     });
     let _ = state.store.publish_node(
         &node_id(state),

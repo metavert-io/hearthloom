@@ -492,6 +492,15 @@ async fn subscribe_once(state: &AppState, url: &str, key: &str) -> SubscribeOutc
                 let _ = state.store.set_consolidation_state(KEY_BUS_CURSOR, id);
             }
             *state.bus.last_event_ts.lock().unwrap() = Some(hearthloom_core::time::now_utc());
+            // a lookup another node wants from our archives (0.5.88): fetch
+            // and answer it — it isn't a change to sync
+            let topic = serde_json::from_str::<Value>(&msg.data)
+                .ok()
+                .and_then(|v| v["topic"].as_str().map(String::from));
+            if topic.as_deref() == Some(crate::lookups::TOPIC) {
+                tokio::spawn(crate::lookups::serve_pending(state.clone()));
+                continue;
+            }
             // resync and topic hints trigger the SAME pull: one full
             // cycle reconciles everything the hint (or the gap) implies.
             request_early_sync(state);

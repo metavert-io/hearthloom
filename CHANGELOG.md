@@ -8,6 +8,20 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+### Added
+- **Ask searches mail on all your nodes.** Each node lists the mail
+  archives it holds (`hearthloom node` shows them), and Ask on any node
+  can search and read an archive another node holds — the home server's
+  live Gmail archive from the laptop or the hosted node, the laptop's
+  Takeout from the hosted node. The lookup goes through your hub, takes
+  a fraction of a second once the other node has heard about it, and runs
+  under the privacy rules of the node that holds the mail, with your vault
+  as it is where you asked. A node that's asleep doesn't answer, and Ask
+  says so instead of waiting.
+
+### Fixed
+- The mail text pass logged a line for every new message.
+
 ## 0.5.87 — 2026-11-04
 
 ### Added

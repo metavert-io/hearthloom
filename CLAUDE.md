@@ -894,6 +894,14 @@ the design log 2026-07-14.
   starts without 3× the projected size free. Text comes from
   `mail-parser` (decoded MIME), never the adapter's shallow `extract_text`.
   Header hits rank before text hits in `mbox_index::search`.
+- **A LOOKUP ON ANOTHER NODE GOES THROUGH THE HUB AND RUNS UNDER THE
+  HOLDER'S RULES (0.5.88, `lookups.rs`).** Only `vsearch`/`vfetch`, only
+  peer keys (`/v1/sync/lookup*` in KEY_ROUTES under `peer`; embers are
+  denied `/v1/sync`). The holder runs it with `search_with`/`fetch_with`
+  and the asker's `vault_open` — never the raw readers. Requests live in
+  the hub's memory only; the hint carries no content and is repeated
+  while unclaimed (the bus is at-most-once). An unknown node is refused
+  at once. Each node publishes `roles.archives` in the node list.
 - **ASK NEVER ENDS EMPTY (0.5.86).** An "answer" must be non-empty text
   (`answer_text`); out of rounds it is asked twice for one; failing that,
   and on the other dead ends after work was done, `salvage` answers with

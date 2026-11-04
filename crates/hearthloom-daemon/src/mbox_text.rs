@@ -301,7 +301,8 @@ pub async fn run_loop(state: AppState) {
                     set_progress(&mbox, done, total);
                     if now > 0 {
                         busy = true;
-                        if done == total || done % 10_000 < BATCH {
+                        // a backlog's milestones, not every new message
+                        if (done == total && now > 1) || (done % 10_000 < BATCH && now == BATCH) {
                             tracing::info!("mail text {}: {done} of {total} messages", source.name);
                         }
                     }

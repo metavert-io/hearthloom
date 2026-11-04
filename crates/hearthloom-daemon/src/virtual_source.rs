@@ -335,7 +335,19 @@ pub fn search_for_viewer(
     query: &str,
     limit: usize,
 ) -> Result<Vec<VirtualHit>> {
-    if !state.store.vault_status().0 {
+    search_with(state, def, query, limit, state.store.vault_status().0)
+}
+
+/// `search_for_viewer` with the vault state given — for a lookup another
+/// of the owner's nodes asked for (lookups.rs), which carries the asker's.
+pub fn search_with(
+    state: &AppState,
+    def: &VirtualSourceDef,
+    query: &str,
+    limit: usize,
+    locked: bool,
+) -> Result<Vec<VirtualHit>> {
+    if !locked {
         return search(def, query, limit);
     }
     // ask for more than needed: some may be held back
@@ -371,8 +383,19 @@ pub fn fetch_for_viewer(
     path: &str,
     budget: Option<u32>,
 ) -> Result<String> {
+    fetch_with(state, def, path, budget, state.store.vault_status().0)
+}
+
+/// `fetch_for_viewer` with the vault state given (lookups.rs).
+pub fn fetch_with(
+    state: &AppState,
+    def: &VirtualSourceDef,
+    path: &str,
+    budget: Option<u32>,
+    locked: bool,
+) -> Result<String> {
     let text = fetch(def, path, budget)?;
-    if state.store.vault_status().0 && item_private(state, def, path, &text)? {
+    if locked && item_private(state, def, path, &text)? {
         return Err(if def.adapter == "mbox" {
             anyhow!("no message {path:?} in the index")
         } else {
@@ -674,7 +697,8 @@ fn archive_summary_line(s: &crate::mbox_index::Summary) -> String {
 pub fn rlm_prompt_section(state: &AppState) -> Option<String> {
     let mut sources = state.store.list_virtual_sources().ok()?;
     sources.retain(is_enabled); // a disabled integration shouldn't nag the prompt
-    if sources.is_empty() {
+    let elsewhere = crate::lookups::archives_elsewhere(state);
+    if sources.is_empty() && elsewhere.is_empty() {
         return None;
     }
     let mut out = String::from(
@@ -725,15 +749,50 @@ pub fn rlm_prompt_section(state: &AppState) -> Option<String> {
             }
         ));
     }
-    if sources.iter().any(|s| s.adapter == "mbox") {
+    // archives your other nodes hold (0.5.88): reached through the hub
+    if !elsewhere.is_empty() {
+        out.push_str(
+            "Mail archives on your OTHER nodes — add \"node\": \"<node>\" to vsearch/vfetch \
+             (each lookup goes through your hub to that node and takes a few seconds):\n",
+        );
+        for (_, node, seen, archive) in &elsewhere {
+            let summary = crate::mbox_index::Summary {
+                messages: archive["messages"].as_u64().unwrap_or(0) as usize,
+                first: archive["first"].as_str().map(String::from),
+                last: archive["last"].as_str().map(String::from),
+            };
+            let text = match archive["text"].as_str() {
+                Some("on") => "; its message text and links are searchable".to_string(),
+                Some("off") | None => "; headers only (its text isn't indexed there)".to_string(),
+                Some(p) => format!("; message text searchable for {p} so far"),
+            };
+            out.push_str(&format!(
+                "- {} [{}] on node \"{node}\"{}{text}{}\n",
+                archive["name"].as_str().unwrap_or("?"),
+                archive["adapter"].as_str().unwrap_or("mbox"),
+                if summary.messages > 0 {
+                    archive_summary_line(&summary)
+                } else {
+                    String::new()
+                },
+                if crate::lookups::recently_seen(seen) {
+                    ""
+                } else {
+                    " — that node hasn't been seen lately: don't call it; say it's unavailable if it mattered"
+                }
+            ));
+        }
+    }
+    if sources.iter().any(|s| s.adapter == "mbox") || !elsewhere.is_empty() {
         out.push_str(MAIL_GUIDANCE);
     }
     let has_numeric = sources.iter().any(|s| s.adapter == "apple-health");
     out.push_str(
         "Extra READ handles for these:\n\
-         - vsearch {source, query, limit?}   search a virtual source; each hit's path is \
-         fetchable (for mbox mail archives, hits are message ids over from/subject/labels/date)\n\
-         - vfetch {source, path, budget?}    read one result's content (budget = token-fit view)\n",
+         - vsearch {source, query, limit?, node?}   search a virtual source; each hit's path is \
+         fetchable (for mbox mail archives, hits are message ids; see below for what matches)\n\
+         - vfetch {source, path, budget?, node?}    read one result's content (budget = token-fit view)\n\
+         (node: only for an archive listed on another node)\n",
     );
     if has_numeric {
         out.push_str(

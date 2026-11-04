@@ -135,6 +135,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/auth/logout", post(auth_logout))
         .route("/v1/auth/session-from-key", post(auth_session_from_key))
         .route("/v1/sync/episodes", get(sync_episodes))
+        .route("/v1/sync/lookup", post(sync_lookup))
+        .route("/v1/sync/lookup/pending", get(sync_lookup_pending))
+        .route("/v1/sync/lookup/{id}/answer", post(sync_lookup_answer))
         .route(
             "/v1/peer",
             get(peer_status).post(peer_pair).delete(peer_unpair),
@@ -713,6 +716,9 @@ const KEY_ROUTES: &[(&str, &str, &[&str])] = &[
     ("GET", "/v1/bus/stream", &["peer"]),
     ("POST", "/v1/bus/publish", &["peer"]),
     ("GET", "/v1/sync/episodes", &["peer"]),
+    ("POST", "/v1/sync/lookup", &["peer"]),
+    ("GET", "/v1/sync/lookup/pending", &["peer"]),
+    ("POST", "/v1/sync/lookup/{id}/answer", &["peer"]),
     ("GET", "/v1/sync/telemetry", &["peer"]),
     ("POST", "/v1/sync/telemetry", &["peer"]),
     ("GET", "/v1/sync/llm_usage", &["peer"]),
@@ -5186,6 +5192,70 @@ fn default_sync_limit() -> usize {
 /// independent, like /brain): this surface exists precisely for
 /// machines that are not this machine. Private never appears — the
 /// exclusion is hardcoded in store/sync.rs.
+/// A lookup one of the owner's nodes wants from an archive another holds
+/// (lookups.rs). Run here when this node holds it; otherwise queue it for
+/// the spoke that does and wait for its answer.
+async fn sync_lookup(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(lookup): Json<crate::lookups::Lookup>,
+) -> Result<Json<Value>, ApiError> {
+    require_scope(&auth, "peer")?;
+    let known = state
+        .store
+        .nodes()?
+        .iter()
+        .any(|n| n["node_id"].as_str() == Some(lookup.node.as_str()));
+    if !known {
+        return Ok(Json(json!({"error": "there's no such node among yours"})));
+    }
+    let outcome = if lookup.node == crate::agents::node_id(&state) {
+        let st = state.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::lookups::run_here(&st, &lookup.tool, &lookup.args, lookup.vault_open)
+        })
+        .await
+        .map_err(anyhow::Error::from)?
+    } else {
+        crate::lookups::queue_and_wait(&state, lookup).await
+    };
+    Ok(Json(match outcome {
+        Ok(result) => json!({"result": result}),
+        Err(err) => json!({"error": format!("{err:#}")}),
+    }))
+}
+
+#[derive(Deserialize)]
+struct LookupPendingParams {
+    node: String,
+}
+
+async fn sync_lookup_pending(
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Query(params): Query<LookupPendingParams>,
+) -> Result<Json<Value>, ApiError> {
+    require_scope(&auth, "peer")?;
+    Ok(Json(
+        json!({"lookups": crate::lookups::pending_for(&params.node)}),
+    ))
+}
+
+async fn sync_lookup_answer(
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    require_scope(&auth, "peer")?;
+    let outcome = match (body["result"].as_str(), body["error"].as_str()) {
+        (Some(result), _) => Ok(result.to_string()),
+        (_, Some(error)) => Err(error.to_string()),
+        _ => Err("an empty answer".to_string()),
+    };
+    Ok(Json(
+        json!({"accepted": crate::lookups::answer(&id, outcome)}),
+    ))
+}
+
 async fn sync_episodes(
     State(state): State<AppState>,
     Query(params): Query<SyncEpisodesParams>,

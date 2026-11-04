@@ -873,6 +873,33 @@ pub async fn node(
             imports,
             s("last_seen"),
         );
+        // the mail archives it holds, which Ask on any node can search (0.5.88)
+        for a in roles
+            .get("archives")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let messages = a["messages"]
+                .as_u64()
+                .map(|n| format!("{n} messages"))
+                .unwrap_or_else(|| "counting".into());
+            let span = match (a["first"].as_str(), a["last"].as_str()) {
+                (Some(f), Some(l)) => format!(", {f} → {l}"),
+                _ => String::new(),
+            };
+            let text = match a["text"].as_str() {
+                Some("on") => "text searchable".to_string(),
+                Some("off") => "headers only".to_string(),
+                Some("starting") => "text being indexed".to_string(),
+                Some(p) => format!("text {p} indexed"),
+                None => "headers only".to_string(),
+            };
+            println!(
+                "    archive {} — {messages}{span} · {text}",
+                a["name"].as_str().unwrap_or("?")
+            );
+        }
     }
     Ok(())
 }

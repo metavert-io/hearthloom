@@ -25,6 +25,7 @@ mod live_health;
 mod live_ingest;
 mod live_photos;
 pub mod llm;
+mod lookups;
 mod mbox_index;
 mod mbox_text;
 mod mcp;
