@@ -85,6 +85,16 @@ fn mount_of(def: &VirtualSourceDef) -> Result<PathBuf> {
     Ok(PathBuf::from(expand_tilde(mount)))
 }
 
+/// A mail archive's file, when the source is on and its mount answers
+/// (the background text pass reads only those).
+pub fn mbox_path_if_online(def: &VirtualSourceDef) -> Option<PathBuf> {
+    if def.adapter != "mbox" || !is_enabled(def) {
+        return None;
+    }
+    let mount = mount_of(def).ok()?;
+    mount_alive(&mount).then_some(mount)
+}
+
 /// Tilde-expanded PathBuf for callers outside this module (the register
 /// handler's recursion probe).
 pub fn expand_tilde_path(p: &str) -> PathBuf {
@@ -609,18 +619,35 @@ pub fn promote(
 /// The RLM system-prompt fragment describing available virtual sources and
 /// their read handles — None when none are registered (base experience
 /// unchanged; the system stays degraded-but-useful without them).
-/// How Ask should look for things in mail (0.5.86).
+/// How Ask should look for things in mail (0.5.86; message text 0.5.87).
 const MAIL_GUIDANCE: &str = "\
 Finding things in mail: the user's Sent, Primary and Starred mail is ALSO in the record as \
 email episodes, and `search` finds words in their text. Everything else (Updates, Social, \
-Promotions, Forums) is only in the mail archives above, and vsearch over an archive matches \
-sender, recipients, subject, labels and date — NOT the message text. A link, an account or a \
-portal is usually in the text: find candidate messages by sender or subject, then vfetch the \
-few most likely ones and read them. Invitations and notifications come from the SERVICE \
-(noreply@…, a company's name), not from the person who set it up: search subjects such as \
-invited, invitation, shared, secure, portal, access, welcome, account — as well as the \
-person's name. Run independent vsearch calls together in one turn; vfetch only the best \
-candidates.\n";
+Promotions, Forums) is only in the mail archives above. vsearch over an archive matches \
+sender, recipients, subject, labels and date, and also the message text and the web \
+addresses it links to where the archive's line says its text is searchable (such hits end \
+`text: …` with the words that matched). Where the text isn't searchable yet, a link, an \
+account or a portal is found by vfetching the most likely messages and reading them. \
+Invitations and notifications come from the SERVICE (noreply@…, a company's name), not from \
+the person who set it up: search for words like invited, invitation, shared, secure, portal, \
+access, welcome, account, link, login — as well as the person's name. Run independent \
+vsearch calls together in one turn; vfetch only the best candidates.\n";
+
+/// "; its message text and links are searchable" — or how far the
+/// background pass has got (in tens of percent, so the instructions don't
+/// change with every batch).
+fn text_status_line(progress: Option<(usize, usize)>) -> String {
+    match progress {
+        Some((done, total)) if total > 0 && done * 100 >= total * 99 => {
+            "; its message text and links are searchable".into()
+        }
+        Some((done, total)) if total > 0 && done * 10 >= total => format!(
+            "; message text searchable for about {}% so far (headers for all)",
+            done * 10 / total * 10
+        ),
+        _ => "; headers only for now (its text is being indexed)".into(),
+    }
+}
 
 /// " — about 19,500 messages, 2026-08 → 2026-11" (rounded so the
 /// instructions don't change with every new message).
@@ -667,8 +694,19 @@ pub fn rlm_prompt_section(state: &AppState) -> Option<String> {
         let holds = if online && source.adapter == "mbox" {
             mount_of(source)
                 .ok()
-                .and_then(|m| crate::mbox_index::summary(&m))
-                .map(|s| archive_summary_line(&s))
+                .map(|m| {
+                    let summary = crate::mbox_index::summary(&m)
+                        .map(|s| archive_summary_line(&s))
+                        .unwrap_or_default();
+                    format!(
+                        "{summary}{}",
+                        if crate::mbox_text::is_off(&m) {
+                            "; headers only (its text isn't indexed on this node)".to_string()
+                        } else {
+                            text_status_line(crate::mbox_text::progress(&m))
+                        }
+                    )
+                })
                 .unwrap_or_default()
         } else {
             String::new()
@@ -1197,6 +1235,15 @@ mod tests {
             last: None,
         };
         assert_eq!(archive_summary_line(&big), " — about 664,900 messages");
+        assert_eq!(
+            text_status_line(Some((19_544, 19_544))),
+            "; its message text and links are searchable"
+        );
+        assert_eq!(
+            text_status_line(Some((300_000, 664_921))),
+            "; message text searchable for about 40% so far (headers for all)"
+        );
+        assert!(text_status_line(None).contains("headers only"));
         let live = crate::mbox_index::Summary {
             messages: 19_544,
             first: None,

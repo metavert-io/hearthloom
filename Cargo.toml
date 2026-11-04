@@ -13,6 +13,7 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
+mail-parser = { version = "1.0.1", features = ["full_encoding"] }
 hearthloom-core = { path = "crates/hearthloom-core" }
 hearthloom-adapters = { path = "crates/hearthloom-adapters" }
 hearthloom-daemon = { path = "crates/hearthloom-daemon" }

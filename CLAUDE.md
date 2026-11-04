@@ -884,6 +884,16 @@ the design log 2026-07-14.
   not there. Archive search is owner-only (`search_virtual`) and on the
   ember deny list. `test_archive_readers_go_through_the_vault_check` scans
   rlm/http/mcp/network_out for raw calls.
+- **ARCHIVED MAIL TEXT LIVES BESIDE THE HEADER INDEX (0.5.87,
+  `mbox_text.rs`).** `texts_fts(id, body, links)` in the same sidecar,
+  filled by a background pass behind the `text_rowid` meta watermark over
+  `messages.rowid` — never inside `build`/`append_index` (a Takeout
+  rebuild must stay header-fast), and `carry_meta` must keep leaving
+  `text_rowid` behind (a rebuilt file has no texts). Archives over
+  `AUTO_LIMIT` messages need the owner's `mail.text.<source>` = on; none
+  starts without 3× the projected size free. Text comes from
+  `mail-parser` (decoded MIME), never the adapter's shallow `extract_text`.
+  Header hits rank before text hits in `mbox_index::search`.
 - **ASK NEVER ENDS EMPTY (0.5.86).** An "answer" must be non-empty text
   (`answer_text`); out of rounds it is asked twice for one; failing that,
   and on the other dead ends after work was done, `salvage` answers with

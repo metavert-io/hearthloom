@@ -8,6 +8,19 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+### Added
+- **Search inside archived mail.** A mail archive's search now covers
+  each message's text and the web addresses it links to, not only the
+  sender, subject and date — so a link, an account or a portal in an
+  invitation can be found. The text is decoded properly (HTML-only mail,
+  base64, quoted-printable, other charsets) and indexed in the background
+  in small batches; search works on headers meanwhile, and new mail joins
+  as it arrives. Measured on 19,560 messages of live Gmail: 12 seconds,
+  169 MB. Archives over 100,000 messages (a full Takeout) wait for
+  `hearthloom source text <archive> on`, and nothing starts without
+  three times the projected size free on the disk; `off` gives the space
+  back. Ask is told which archives' text it can search.
+
 ## 0.5.86 — 2026-11-04
 
 ### Security

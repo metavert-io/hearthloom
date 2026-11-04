@@ -11,6 +11,7 @@ anyhow = { workspace = true }
 async-stream = "0.3"
 chrono = { workspace = true }
 base64 = { workspace = true }
+mail-parser = { workspace = true }
 hmac = { workspace = true }
 reqwest = { workspace = true }
 sentry = { workspace = true }

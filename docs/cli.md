@@ -85,6 +85,20 @@ for the port, launchd pointing at the wrong binary, CLI/daemon version
 skew, whether credentials reach past the auth door, embedding-model
 presence, WAL bloat, and PATH. Run this first when anything seems off.
 
+### `source text` — search inside a mail archive's messages
+
+```
+hearthloom source text gmail-live          # on or off, progress, size now / with text
+hearthloom source text gmail-takeout on    # big archives (over 100,000 messages) wait for this
+hearthloom source text gmail-takeout off   # stop, and give the space back
+```
+
+A mail archive's index covers sender, recipients, subject, labels and
+date; with text on, it also covers each message's text and the web
+addresses it links to, indexed in the background. About 9 KB per message
+(measured on real Gmail); it won't start without three times that free.
+Per node, `--json` for scripts.
+
 ### `agents accounts` — the Claude accounts agents run on
 
 ```

@@ -518,6 +518,14 @@ enum SourceCmd {
         #[arg(long)]
         budget: Option<u32>,
     },
+    /// A mail archive's text search on this node: status, or on|off. Big
+    /// archives (over 100,000 messages) wait for `on`; off gives the space
+    /// back.
+    Text {
+        name: String,
+        /// on | off
+        value: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1239,6 +1247,12 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Cmd::Source {
+            command: SourceCmd::Text { name, value },
+        } => {
+            let client = Client::with_url(home, url.clone())?;
+            source_text(&client, &name, value, as_json).await?;
+        }
         Cmd::Source { command } => {
             let client = Client::with_url(home, url.clone())?;
             client.ensure_daemon().await?;
@@ -1551,8 +1565,58 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// `hearthloom source text <archive> [on|off]`.
+async fn source_text(
+    client: &Client,
+    name: &str,
+    value: Option<String>,
+    as_json: bool,
+) -> Result<()> {
+    let path = format!("/v1/sources/virtual/{}/text", urlencode(name));
+    let status = match value.as_deref() {
+        None => client.get(&path, &[]).await?,
+        Some("on") => client.post(&path, &json!({"on": true})).await?,
+        Some("off") => client.post(&path, &json!({"on": false})).await?,
+        Some(other) => anyhow::bail!("say on or off (not {other:?})"),
+    };
+    if as_json {
+        println!("{status}");
+        return Ok(());
+    }
+    let mb = |v: &Value| v.as_u64().map(|b| format!("{:.0} MB", b as f64 / 1e6));
+    let messages = status["messages"].as_u64();
+    println!(
+        "{name}: {} messages",
+        messages.map_or("?".into(), |n| n.to_string())
+    );
+    match (status["indexing"].as_bool(), status["progress"].as_object()) {
+        (Some(true), Some(p)) => println!(
+            "  text search: on — {} of {} messages indexed",
+            p["done"], p["total"]
+        ),
+        (Some(true), None) => println!("  text search: on — starting"),
+        _ => println!(
+            "  text search: off{}",
+            if status["setting"].is_null() {
+                " (big archives wait for `on`)"
+            } else {
+                ""
+            }
+        ),
+    }
+    if let Some(size) = mb(&status["index_bytes"]) {
+        println!("  index now: {size}");
+    }
+    if let Some(size) = mb(&status["projected_bytes"]) {
+        println!("  with text: about {size} (measured on real mail)");
+    }
+    Ok(())
+}
+
 async fn handle_source(client: &Client, command: SourceCmd) -> Result<()> {
     match command {
+        // routed in main (it needs --json)
+        SourceCmd::Text { .. } => unreachable!("source text is handled in main"),
         SourceCmd::Register {
             name,
             mount,

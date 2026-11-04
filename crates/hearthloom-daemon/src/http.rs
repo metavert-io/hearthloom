@@ -91,6 +91,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/sources/virtual/{name}/query", get(query_virtual))
         .route("/v1/sources/virtual/{name}/promote", post(promote_virtual))
         .route(
+            "/v1/sources/virtual/{name}/text",
+            get(virtual_text_get).post(virtual_text_set),
+        )
+        .route(
             "/v1/integrations/hearthfs",
             get(integrations_hearthfs_status).post(integrations_hearthfs_set),
         )
@@ -2566,6 +2570,66 @@ async fn search_virtual(
     Ok(Json(
         json!({"source": name, "query": params.q, "hits": hits}),
     ))
+}
+
+/// A mail archive's text search on this node (0.5.87): the owner's
+/// switch, how far the background pass has got, and what it costs.
+async fn virtual_text_get(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "see a mail archive's settings")?;
+    Ok(Json(virtual_text_status(&state, &name)?))
+}
+
+fn virtual_text_status(state: &AppState, name: &str) -> Result<Value, ApiError> {
+    let def = crate::virtual_source::resolve(state, name)?;
+    let mbox = crate::virtual_source::mbox_path_if_online(&def).ok_or_else(|| {
+        bad_request(format!(
+            "{name} isn't a mail archive that's online on this node"
+        ))
+    })?;
+    let messages = crate::mbox_index::summary(&mbox).map(|s| s.messages);
+    Ok(json!({
+        "source": name,
+        "setting": crate::mbox_text::setting(state, name),
+        "auto_limit": crate::mbox_text::AUTO_LIMIT,
+        "indexing": !crate::mbox_text::is_off(&mbox),
+        "progress": crate::mbox_text::progress(&mbox).map(|(done, total)| json!({"done": done, "total": total})),
+        "messages": messages,
+        "projected_bytes": messages.map(|n| n as u64 * crate::mbox_text::BYTES_PER_MESSAGE),
+        "index_bytes": std::fs::metadata(crate::mbox_index::index_path(&mbox)).ok().map(|m| m.len()),
+    }))
+}
+
+#[derive(Deserialize)]
+struct VirtualTextBody {
+    on: bool,
+}
+
+async fn virtual_text_set(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Path(name): Path<String>,
+    Json(body): Json<VirtualTextBody>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "change a mail archive's settings")?;
+    virtual_text_status(&state, &name)?; // exists and is a mail archive
+    crate::mbox_text::set_setting(&state, &name, body.on)?;
+    if !body.on {
+        // the space comes back in the background (a VACUUM of a big index
+        // takes a while); the pass has already stopped for it
+        let def = crate::virtual_source::resolve(&state, &name)?;
+        if let Some(mbox) = crate::virtual_source::mbox_path_if_online(&def) {
+            tokio::task::spawn_blocking(move || {
+                if let Err(err) = crate::mbox_text::clear(&mbox) {
+                    tracing::warn!("mail text: clearing {}: {err:#}", mbox.display());
+                }
+            });
+        }
+    }
+    Ok(Json(virtual_text_status(&state, &name)?))
 }
 
 #[derive(Deserialize)]

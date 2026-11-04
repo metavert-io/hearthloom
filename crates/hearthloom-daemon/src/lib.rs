@@ -26,6 +26,7 @@ mod live_ingest;
 mod live_photos;
 pub mod llm;
 mod mbox_index;
+mod mbox_text;
 mod mcp;
 mod mdvault;
 mod monitor;
@@ -321,6 +322,7 @@ pub async fn run(home: Home) -> Result<()> {
     // The inbox drop folder: exports placed there ingest themselves.
     tokio::spawn(inbox::run_loop(state.clone()));
     tokio::spawn(gmail_watch::run_loop(state.clone()));
+    tokio::spawn(mbox_text::run_loop(state.clone()));
     // Hybrid peer sync: dormant until a peer is paired (Integrations).
     tokio::spawn(sync::run_loop(state.clone()));
     tokio::spawn(agents::run_loop(state.clone()));

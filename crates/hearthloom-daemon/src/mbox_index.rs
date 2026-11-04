@@ -192,7 +192,11 @@ pub fn build(mbox: &Path) -> Result<usize> {
 /// Best-effort copy of non-fingerprint meta from a previous index.
 fn carry_meta(old_index: &Path, conn: &Connection) -> Result<()> {
     let old = Connection::open_with_flags(old_index, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let mut stmt = old.prepare("SELECT key, value FROM meta WHERE key != 'fingerprint'")?;
+    // the text watermark belongs to the old file's texts: a rebuild starts
+    // its text pass from the beginning
+    let mut stmt = old.prepare(
+        "SELECT key, value FROM meta WHERE key != 'fingerprint' AND key != 'text_rowid'",
+    )?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
     for row in rows.flatten() {
         conn.execute(
@@ -396,8 +400,47 @@ pub fn search(mbox: &Path, query: &str, limit: usize) -> Result<Vec<(String, Str
         let labels: String = row.get(4)?;
         Ok((id, format!("{date} | {from} | {subject} | {labels}")))
     })?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
+    let mut hits = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+    // the message text and its links (0.5.87, filled in the background):
+    // after the header hits, with the words that matched
+    let has_text: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'texts_fts')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if has_text && hits.len() < limit {
+        let mut stmt = conn.prepare(
+            "SELECT t.id, m.date, m.from_addr, m.subject, m.labels,
+                    snippet(texts_fts, -1, '«', '»', '…', 14)
+             FROM texts_fts t JOIN messages m ON m.id = t.id
+             WHERE texts_fts MATCH ?1
+             ORDER BY rank LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![fts_query, limit as i64], |row| {
+            let id: String = row.get(0)?;
+            let date: String = row.get(1)?;
+            let from: String = row.get(2)?;
+            let subject: String = row.get(3)?;
+            let labels: String = row.get(4)?;
+            let snippet: String = row.get(5)?;
+            Ok((
+                id,
+                format!("{date} | {from} | {subject} | {labels} | text: {snippet}"),
+            ))
+        })?;
+        for row in rows {
+            let (id, line) = row?;
+            if hits.len() >= limit {
+                break;
+            }
+            if !hits.iter().any(|(seen, _)| seen == &id) {
+                hits.push((id, line));
+            }
+        }
+    }
+    Ok(hits)
 }
 
 /// What an archive holds, for Ask's instructions: how many messages and
@@ -416,8 +459,12 @@ pub struct Summary {
 type Summaries = std::collections::HashMap<PathBuf, (String, Option<Summary>)>;
 static SUMMARIES: std::sync::Mutex<Option<Summaries>> = std::sync::Mutex::new(None);
 
+/// The summary changes only when the archive does (the text pass writes
+/// to the index all the while; keying on the index would recount
+/// hundreds of thousands of dates after every batch).
 fn index_fingerprint(mbox: &Path) -> Option<String> {
-    let meta = std::fs::metadata(index_path(mbox)).ok()?;
+    let _ = std::fs::metadata(index_path(mbox)).ok()?; // no index, no summary
+    let meta = std::fs::metadata(mbox).ok()?;
     let mtime = meta
         .modified()
         .ok()?
