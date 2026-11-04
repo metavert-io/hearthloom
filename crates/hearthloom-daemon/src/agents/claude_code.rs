@@ -149,7 +149,11 @@ pub async fn run(
             .unwrap_or(1800)
             .clamp(60, 86_400),
     );
+    // never the daemon's secrets (an API key there would also be billed
+    // instead of the owner's subscription): see child_env.rs
     let mut child = tokio::process::Command::new(&claude)
+        .env_clear()
+        .envs(crate::child_env::inherited())
         .args(command_args(agent, &prompt, &config_path))
         .current_dir(workdir)
         .stdin(std::process::Stdio::null())

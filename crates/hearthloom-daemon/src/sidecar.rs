@@ -152,7 +152,11 @@ fn supervise(spec: Spec, stop: Arc<AtomicBool>, child: Arc<Mutex<Option<Child>>>
                 .open(&spec.log)?;
             let err = out.try_clone()?;
             let mut cmd = Command::new(&spec.bin);
+            // never the daemon's secrets: an ember gets what launchd would
+            // give it on a Mac, plus its own few variables
             cmd.current_dir(&spec.cwd)
+                .env_clear()
+                .envs(crate::child_env::inherited())
                 .envs(spec.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
                 .stdin(Stdio::null())
                 .stdout(out)

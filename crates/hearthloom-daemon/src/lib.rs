@@ -9,6 +9,7 @@ mod agents;
 pub mod apm;
 mod budget;
 mod bus;
+mod child_env;
 mod consolidate;
 mod dashboard;
 mod downloads;
