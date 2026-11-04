@@ -589,6 +589,100 @@ pub async fn export(client: &Client, out: Option<std::path::PathBuf>) -> Result<
 }
 
 /// `hearthloom node`: list the nodes, or change this one.
+/// `hearthloom gmail connect <address>` — the Integrations card's connect,
+/// from a terminal: the app password comes from stdin (prompted without
+/// echo), never argv; the daemon tests the sign-in before keeping it.
+pub async fn gmail_connect(client: &Client, address: &str) -> Result<()> {
+    use std::io::{IsTerminal, Read};
+    let password = if std::io::stdin().is_terminal() {
+        prompt_secret("Gmail app password (myaccount.google.com/apppasswords)")?
+    } else {
+        let mut value = String::new();
+        std::io::stdin().read_to_string(&mut value)?;
+        value.trim().to_string()
+    };
+    if password.is_empty() {
+        bail!("no app password — type it at the prompt, or pipe it in");
+    }
+    client
+        .post(
+            "/v1/integrations/gmail",
+            &json!({"actor": "human:cli", "user": address.trim(), "password": password}),
+        )
+        .await?;
+    println!(
+        "Gmail connected ({}) — watching for new mail; `hearthloom gmail` shows how it's going",
+        address.trim()
+    );
+    Ok(())
+}
+
+/// `hearthloom gmail status` / `hearthloom gmail watch on|off [--every N]`
+/// — the live mail watch on the targeted node (CLI parity with the
+/// Integrations card).
+pub async fn gmail(
+    client: &Client,
+    watch: Option<bool>,
+    every: Option<u64>,
+    as_json: bool,
+) -> Result<()> {
+    if watch.is_some() || every.is_some() {
+        client
+            .post(
+                "/v1/integrations/gmail",
+                &json!({"actor": "human:cli", "watch": watch, "every_minutes": every}),
+            )
+            .await?;
+    }
+    let status = client.get("/v1/integrations/gmail", &[]).await?;
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
+    let s = |v: &Value| v.as_str().unwrap_or("").to_string();
+    if status["configured"] != true {
+        println!("Gmail isn't connected on this node (Integrations → Gmail in the dashboard)");
+        return Ok(());
+    }
+    let watch = &status["watch"];
+    println!(
+        "Gmail {} — live watch: {}",
+        s(&status["user"]),
+        s(&watch["state"])
+    );
+    println!(
+        "  {} · catches up every {} min",
+        if watch["enabled"] == true {
+            "on"
+        } else {
+            "off"
+        },
+        watch["every_minutes"].as_u64().unwrap_or(0)
+    );
+    if let Some(at) = watch["last_check"].as_str() {
+        println!("  last checked {at}");
+    }
+    if let Some(at) = watch["last_new_mail"].as_str() {
+        println!("  last new mail {at}");
+    }
+    if let Some(err) = watch["last_error"].as_str() {
+        println!("  last error: {err}");
+    }
+    let others: Vec<String> = status["also_watching"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|n| n.as_str().map(String::from))
+        .collect();
+    if !others.is_empty() {
+        println!(
+            "  also watching a mailbox: {} — one node per mailbox is enough; turn the others off",
+            others.join(", ")
+        );
+    }
+    Ok(())
+}
+
 /// `hearthloom provenance <id>` — how a memory got here (v61): the
 /// owner's detail view of it carries the provenance the dashboard shows.
 pub async fn provenance(client: &Client, id: &str, as_json: bool) -> Result<()> {
@@ -755,6 +849,11 @@ pub async fn node(
             " · doesn't import its files".into()
         } else {
             " · imports its files".into()
+        };
+        let imports = if roles.get("mail").and_then(|v| v.as_bool()) == Some(true) {
+            format!("{imports} · watches Gmail")
+        } else {
+            imports
         };
         println!(
             "{}{}  v{} · {} · thinking {} · {} agent(s){} · seen {}",

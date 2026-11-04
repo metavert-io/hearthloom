@@ -280,7 +280,10 @@ Four ways in:
    photos, contacts, calendar, reminders, location, motion, media, scans
    and focus state.
 4. **Live pulls.** `gmail_pull` fetches new mail over IMAP into a rolling
-   archive on the consolidation cadence.
+   archive. Since 0.5.81 the live watch (`gmail_watch.rs`) keeps an IMAP
+   IDLE connection open on the node where Gmail is connected and runs that
+   same pull within seconds of new mail, with a catch-up every few
+   minutes; the consolidation pass stays as its backstop.
 
 Adapters mint entities structurally where the source is unambiguous (a
 sender's address, a calendar attendee, a repository). Anything needing

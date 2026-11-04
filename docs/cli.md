@@ -249,6 +249,26 @@ hearthloom notify "backup finished" "23GB to the NAS"
 Posts a notification (for scripts and cron jobs). The origin is stamped
 from your key — scripts can't impersonate the system.
 
+### `gmail` — the live mail watch
+
+```
+hearthloom gmail connect you@gmail.com           # prompts for the app password
+printf '%s' "$APP_PASSWORD" | hearthloom gmail connect you@gmail.com
+hearthloom gmail                                 # status: watching, last check, last new mail
+hearthloom gmail watch off                       # or on
+hearthloom gmail watch --every 2                 # catch up every 2 minutes (1–60)
+hearthloom gmail disconnect
+```
+
+Connect Gmail on one node, ideally one that's always on (a hosted node or
+a home server). New mail arrives within seconds: the node keeps an IMAP
+IDLE connection open and pulls as soon as Gmail reports a change, plus a
+catch-up at the interval in case a notice was missed. The app password
+comes from stdin and is tested before it's kept. If Gmail refuses the
+sign-in, the watch stops (and says so) until you connect again — it never
+keeps retrying a bad password. `hearthloom node` shows which node watches
+Gmail.
+
 ### `provenance` — how a memory got here
 
 ```

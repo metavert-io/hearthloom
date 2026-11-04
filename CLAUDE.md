@@ -592,7 +592,17 @@ substrate never depends on them (an offline mount degrades to a clear
 error). Big archives can serve BOTH tiers: a Gmail Takeout can be
 Tier-1-materialized for its Core strata (Sent/Personal/Starred, filtered
 ingest) and Tier-2-virtualized for the whole archive (a `gmail-archive`
-source over `~/.hearthloom/archives/`). **Gmail live federation (Tier 3)
+source over `~/.hearthloom/archives/`). **The live watch (0.5.81,
+`gmail_watch.rs`)**: one IMAP IDLE session on All Mail per node with
+Gmail connected, re-issued every minute (so settings, a disconnect or a
+fence are noticed within one), runs `gmail_pull::pull_once` on any change
+and at the catch-up interval (`gmail.watch` on|off, `gmail.watch.every_minutes`
+1–60, node-local). `pull_once` is THE one pull path and is serialized
+(`PULL` mutex) — never add a second puller with its own cursor. A refused
+sign-in STOPS the watch until the credential is saved again (`recheck(true)`):
+retrying a bad Gmail password risks Google locking the account. It pauses
+while the node is fenced and publishes `roles.mail` in the node list.
+**Gmail live federation (Tier 3)
 SHIPPED 2026-08-10** (design log entry same date): the `gmail_pull`
 automation (cycle cadence, silent no-op until `GMAIL_IMAP_USER` +
 `GMAIL_IMAP_PASSWORD` land in `~/.hearthloom/.env`) pulls new mail over

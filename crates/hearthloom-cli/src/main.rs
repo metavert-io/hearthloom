@@ -133,6 +133,12 @@ enum Cmd {
     },
     /// Ring the dashboard bell (for scripts and cron jobs).
     Notify { title: String, body: Option<String> },
+    /// The live Gmail watch on this node: status, or turn it on/off and set
+    /// how often it catches up (new mail arrives within seconds either way).
+    Gmail {
+        #[command(subcommand)]
+        cmd: Option<GmailCmd>,
+    },
     /// How a memory got here: who wrote it, on which of your nodes, the
     /// route it took, and the agent task (what it read) when an agent did.
     Provenance { id: String },
@@ -404,6 +410,28 @@ enum SourceCmd {
         /// Token-fit budget (HearthFS mounts only).
         #[arg(long)]
         budget: Option<u32>,
+    },
+}
+
+#[derive(Subcommand)]
+enum GmailCmd {
+    /// Connect Gmail on this node: the app password is read from stdin
+    /// (prompted without echo at a terminal) and tested before it's kept.
+    Connect {
+        /// The Gmail address, e.g. you@gmail.com
+        address: String,
+    },
+    /// Forget the Gmail sign-in on this node (the archive stays).
+    Disconnect,
+    /// Where the watch stands: on/off, last check, last new mail, errors.
+    Status,
+    /// Turn the live watch on or off, and/or set the catch-up interval.
+    Watch {
+        /// on | off
+        state: Option<String>,
+        /// Catch up every N minutes (1-60) even without a notice from Gmail.
+        #[arg(long)]
+        every: Option<u64>,
     },
 }
 
@@ -922,6 +950,35 @@ async fn main() -> Result<()> {
                 result["lines"],
                 result["bytes"]
             );
+        }
+        Cmd::Gmail { cmd } => {
+            let client = Client::with_url(home, url.clone())?;
+            let (watch, every) = match cmd {
+                Some(GmailCmd::Connect { address }) => {
+                    return ops::gmail_connect(&client, &address).await;
+                }
+                Some(GmailCmd::Disconnect) => {
+                    client
+                        .post(
+                            "/v1/integrations/gmail",
+                            &serde_json::json!({"actor": "human:cli", "disconnect": true}),
+                        )
+                        .await?;
+                    println!("Gmail disconnected on this node — the mail already pulled stays");
+                    return Ok(());
+                }
+                None | Some(GmailCmd::Status) => (None, None),
+                Some(GmailCmd::Watch { state, every }) => {
+                    let watch = match state.as_deref() {
+                        None => None,
+                        Some("on") => Some(true),
+                        Some("off") => Some(false),
+                        Some(other) => anyhow::bail!("watch takes on or off, not {other:?}"),
+                    };
+                    (watch, every)
+                }
+            };
+            ops::gmail(&client, watch, every, as_json).await?;
         }
         Cmd::Provenance { id } => {
             let client = Client::with_url(home, url.clone())?;

@@ -468,11 +468,16 @@ stopped wearing it. More kinds (other brains) will follow the same
 contract.
 
 **Gmail live federation** keeps the mail record current past the last
-Takeout: set `GMAIL_IMAP_USER` and `GMAIL_IMAP_PASSWORD` (a Gmail app
-password — requires 2FA) in `~/.hearthloom/.env` and the `gmail_pull`
-automation pulls new mail over IMAP each consolidation cycle into a
-rolling `archives/gmail-live.mbox` (registered as the `gmail-live`
-virtual source, searchable like the archive). The same Core strata the
+Takeout: connect Gmail with an app password (requires 2FA) on Integrations
+→ Gmail, or `hearthloom gmail connect you@gmail.com` (the password is
+prompted, never an argument), on one of your nodes — ideally one that's
+always on, a hosted node or a home server. New mail arrives **within
+seconds** (an IMAP IDLE watch, with a catch-up every 5 minutes by default;
+`hearthloom gmail watch on|off --every N`, or the card) into a rolling
+`archives/gmail-live.mbox` (registered as the `gmail-live` virtual source,
+searchable like the archive); the six-hourly `gmail_pull` pass is its
+backstop. The node list shows which node watches Gmail, and the card warns
+when two nodes watch a mailbox. The same Core strata the
 Takeout materialized (Sent ∪ Category Personal ∪ Starred) become
 episodes automatically, deduped against the archive by Message-ID.
 First run backfills the last 90 days (`GMAIL_IMAP_BACKFILL_DAYS` to

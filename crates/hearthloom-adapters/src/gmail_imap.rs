@@ -245,6 +245,8 @@ pub fn mbox_record(msg: &PulledMessage) -> Vec<u8> {
 /// spawn_blocking) over TLS to imap.gmail.com:993 with an app password.
 pub struct ImapFeed {
     session: imap::Session<imap::Connection>,
+    /// All Mail is selected for IDLE (`wait_for_change`).
+    idling: bool,
 }
 
 impl ImapFeed {
@@ -253,12 +255,49 @@ impl ImapFeed {
         let session = client
             .login(user, password)
             .map_err(|(e, _)| anyhow!("gmail login failed: {e}"))?;
-        Ok(Self { session })
+        Ok(Self {
+            session,
+            idling: false,
+        })
     }
 
     pub fn logout(mut self) {
         let _ = self.session.logout();
     }
+
+    /// Wait on All Mail with IMAP IDLE (RFC 2177) until the mailbox
+    /// changes — new mail, a flag, a deletion — or `limit` passes. True
+    /// when it changed. The first call selects the mailbox; later calls
+    /// re-issue IDLE on the same session (no new login). Keep `limit`
+    /// well under 29 minutes, where servers may drop an idle client.
+    pub fn wait_for_change(&mut self, limit: std::time::Duration) -> Result<bool> {
+        if !self.idling {
+            self.session.select("[Gmail]/All Mail")?;
+            self.idling = true;
+        }
+        let mut idle = self.session.idle();
+        idle.timeout(limit).keepalive(false);
+        let outcome = idle.wait_while(imap::extensions::idle::stop_on_any)?;
+        Ok(matches!(
+            outcome,
+            imap::extensions::idle::WaitOutcome::MailboxChanged
+        ))
+    }
+}
+
+/// Whether an IMAP error is Gmail refusing the sign-in (a wrong or revoked
+/// app password) rather than a network hiccup: retrying it fast only
+/// risks Google locking the account.
+pub fn is_auth_failure(err: &anyhow::Error) -> bool {
+    let text = format!("{err:#}").to_ascii_lowercase();
+    [
+        "login failed",
+        "authenticationfailed",
+        "invalid credentials",
+        "web login required",
+    ]
+    .iter()
+    .any(|w| text.contains(w))
 }
 
 impl MailFeed for ImapFeed {

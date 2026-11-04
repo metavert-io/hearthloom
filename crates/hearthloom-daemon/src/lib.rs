@@ -15,6 +15,7 @@ mod downloads;
 mod embeddings_dl;
 mod export;
 mod gmail_pull;
+mod gmail_watch;
 mod health_index;
 mod http;
 mod inbox;
@@ -318,6 +319,7 @@ pub async fn run(home: Home) -> Result<()> {
     tokio::spawn(consolidate::run_loop(state.clone()));
     // The inbox drop folder: exports placed there ingest themselves.
     tokio::spawn(inbox::run_loop(state.clone()));
+    tokio::spawn(gmail_watch::run_loop(state.clone()));
     // Hybrid peer sync: dormant until a peer is paired (Integrations).
     tokio::spawn(sync::run_loop(state.clone()));
     tokio::spawn(agents::run_loop(state.clone()));

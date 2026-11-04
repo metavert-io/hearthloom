@@ -120,7 +120,9 @@ pub const AUTOMATIONS: &[Automation] = &[
         detail: "Pulls new mail from Gmail over IMAP into the live \
                  archive (searchable at need); Sent/Personal/Starred \
                  become episodes. Runs only when GMAIL_IMAP_USER and \
-                 GMAIL_IMAP_PASSWORD are configured.",
+                 GMAIL_IMAP_PASSWORD are configured. The live watch \
+                 (Integrations → Gmail) pulls within seconds of new \
+                 mail; this pass is its backstop.",
         default_frequency: "cycle",
         llm: false,
         default_tier: Tier::Low,

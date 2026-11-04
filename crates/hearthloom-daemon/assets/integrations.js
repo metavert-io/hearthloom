@@ -353,6 +353,29 @@ async function paintHearthfs(host) {
 
 /* ————— Google Mail (live pull) ————— */
 
+// The live watch's state, in plain words (gmail_watch.rs status_json).
+function watchLine(w) {
+  if (!w) return "";
+  const when = (t) => {
+    if (!t) return "";
+    const d = new Date(t);
+    return isNaN(d) ? "" : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  };
+  const state = {
+    watching: "● watching — new mail arrives within seconds",
+    "catching up": "● catching up",
+    starting: "◌ starting",
+    off: "◌ the watch is off — new mail arrives with the six-hourly pass",
+    "retrying after an error": "◌ retrying after an error",
+  }[w.state] || `◌ ${w.state}`;
+  const bits = [
+    w.last_check ? `last checked ${esc(when(w.last_check))}` : "",
+    w.last_new_mail ? `last new mail ${esc(when(w.last_new_mail))}` : "",
+  ].filter(Boolean).join(" · ");
+  return `<p class="meta"><b>${esc(state)}</b>${bits ? ` · ${bits}` : ""}${
+    w.last_error ? `<br><span style="color:var(--accent)">${esc(w.last_error)}</span>` : ""}</p>`;
+}
+
 export async function paintGmail(host) {
   const s = await api("/v1/integrations/gmail").catch(() => null);
   if (!s) { host.innerHTML = ""; return; }
@@ -362,15 +385,23 @@ export async function paintGmail(host) {
   host.innerHTML = `
     <div class="card">
       <div class="task-row" style="align-items:baseline"><b>Google Mail (live)</b> ${dot}</div>
-      <p class="meta">Keeps your mail current past the last Takeout: new messages are pulled
-        over IMAP every cycle into a live archive (searchable at need), and mail you wrote,
-        personal mail, and starred mail become episodes — deduped against the Takeout, so
-        connecting after an import never doubles anything.</p>
+      <p class="meta">Keeps your mail current past the last Takeout: new messages arrive within
+        seconds into a live archive (searchable at need), and mail you wrote, personal mail,
+        and starred mail become memories — deduped against the Takeout, so connecting after an
+        import never doubles anything. Connect Gmail on one of your nodes, ideally one that's
+        always on.</p>
       ${s.configured ? `
-        <div class="searchbar" style="flex-wrap:wrap">
-          <button class="btn" id="gm-pull">pull now</button>
+        ${watchLine(s.watch)}
+        ${(s.also_watching || []).length ? `<p class="meta" style="color:var(--accent)">
+          ${esc(s.also_watching.join(", "))} ${s.also_watching.length === 1 ? "is" : "are"} also watching a mailbox.
+          One node per mailbox is enough — turn the watch off on the others.</p>` : ""}
+        <div class="searchbar" style="flex-wrap:wrap; align-items:center">
+          <label class="meta"><input type="checkbox" id="gm-watch" ${s.watch?.enabled !== false ? "checked" : ""}>
+            watch for new mail</label>
+          <label class="meta">catch up every
+            <input id="gm-every" type="number" min="1" max="60" value="${esc(s.watch?.every_minutes ?? 5)}" style="width:4em"> min</label>
+          <button class="btn btn-quiet" id="gm-pull">pull now</button>
           <button class="btn btn-quiet" id="gm-disconnect">disconnect</button>
-          ${s.last_ran_at ? `<span class="meta">last pull: ${esc(s.last_ran_at)}</span>` : ""}
         </div>` : `
         <details class="meta" style="margin:var(--s2) 0" open>
           <summary>you'll need a Google <b>app password</b> (not your account password)</summary>
@@ -402,8 +433,20 @@ export async function paintGmail(host) {
       password: host.querySelector("#gm-pass").value,
     }).catch((e) => ({ error: e.message }));
     if (res?.error) { say(`✗ ${res.error}`); return; }
-    say("✓ connected — first pull starts within the hour (or use pull now)");
+    say("✓ connected — watching for new mail; the first pull starts in a moment");
     paintGmail(host);
+  });
+  const saveWatch = async (payload) => {
+    const res = await apiPost("/v1/integrations/gmail", { actor: ACTOR, ...payload })
+      .catch((e) => ({ error: e.message }));
+    if (res?.error) { say(`✗ ${res.error}`); return; }
+    paintGmail(host);
+  };
+  host.querySelector("#gm-watch")?.addEventListener("change", (e) => saveWatch({ watch: e.target.checked }));
+  host.querySelector("#gm-every")?.addEventListener("change", (e) => {
+    const minutes = Number(e.target.value);
+    if (minutes >= 1 && minutes <= 60) saveWatch({ every_minutes: minutes });
+    else say("✗ catch up every 1 to 60 minutes");
   });
   host.querySelector("#gm-disconnect")?.addEventListener("click", async () => {
     say("disconnecting…");

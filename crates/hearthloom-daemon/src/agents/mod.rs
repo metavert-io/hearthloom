@@ -286,6 +286,8 @@ pub fn publish_self(state: &AppState) {
         "agents": state.store.agents().map(|a| a.iter().filter(|x| x.enabled).count()).unwrap_or(0),
         "llm": state.llm.is_some(),
         "imports": imports_here(state),
+        // watching a Gmail mailbox (gmail_watch.rs): two nodes doing it shows
+        "mail": crate::gmail_watch::watching(state),
     });
     let _ = state.store.publish_node(
         &node_id(state),

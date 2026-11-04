@@ -41,7 +41,7 @@ pub(crate) fn live_mbox_path(state: &AppState) -> PathBuf {
 /// Feature-detect: the pass is a silent no-op until both are set (in
 /// `~/.hearthloom/.env`, sealed or plain — the launchd daemon has no
 /// shell env).
-fn credentials() -> Option<(String, String)> {
+pub(crate) fn credentials() -> Option<(String, String)> {
     let get = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
     Some((get("GMAIL_IMAP_USER")?, get("GMAIL_IMAP_PASSWORD")?))
 }
@@ -68,10 +68,20 @@ fn read_cursor(mbox: &std::path::Path) -> Option<GmailCursor> {
     })
 }
 
+/// One pull at a time per node: the consolidation pass and the live watch
+/// (gmail_watch.rs) both call `pull_once`, and two at once would race on
+/// the cursor and append the same messages twice.
+static PULL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// One incremental pull. Blocking (network + file + store IO) — the
 /// caller runs it whole in `spawn_blocking` (THE PASS CONTRACT).
 /// Returns (messages_fetched, episodes_new, more_pending).
 pub(crate) fn pull_once(state: &AppState) -> Result<(usize, usize, bool)> {
+    let _one_at_a_time = PULL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    pull_once_unserialized(state)
+}
+
+fn pull_once_unserialized(state: &AppState) -> Result<(usize, usize, bool)> {
     let Some((user, password)) = credentials() else {
         tracing::debug!("gmail pull: GMAIL_IMAP_USER/GMAIL_IMAP_PASSWORD not set — skipping");
         return Ok((0, 0, false));

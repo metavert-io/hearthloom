@@ -3019,11 +3019,23 @@ async fn gmail_status(State(state): State<AppState>) -> Result<Json<Value>, ApiE
     let get = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
     let user = get("GMAIL_IMAP_USER");
     let configured = user.is_some() && get("GMAIL_IMAP_PASSWORD").is_some();
+    // the other live nodes watching a mailbox: one mailbox, one puller
+    let me = crate::agents::node_id(&state);
+    let others: Vec<Value> = state
+        .store
+        .nodes()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| n["node_id"].as_str() != Some(me.as_str()) && n["roles"]["mail"] == true)
+        .map(|n| n["name"].clone())
+        .collect();
     Ok(Json(json!({
         "configured": configured,
         "user": user,
         "last_ran_at": state.store.consolidation_state("settings.gmail_pull.last_ran_at")?,
         "live_mbox": crate::gmail_pull::live_mbox_path(&state).exists(),
+        "watch": crate::gmail_watch::status_json(&state),
+        "also_watching": others,
     })))
 }
 
@@ -3036,6 +3048,12 @@ struct GmailSaveBody {
     password: Option<String>,
     #[serde(default)]
     disconnect: bool,
+    /// The live watch on this node (gmail_watch.rs): on/off and how often
+    /// it catches up. Either alone just changes the setting.
+    #[serde(default)]
+    watch: Option<bool>,
+    #[serde(default)]
+    every_minutes: Option<u64>,
 }
 
 /// Validate + persist the Gmail IMAP credential. Test-then-store: a
@@ -3051,12 +3069,37 @@ async fn gmail_save(
     if body.actor.trim().is_empty() {
         return Err(bad_request("actor is required on every write"));
     }
+    if body.watch.is_some() || body.every_minutes.is_some() {
+        if let Some(on) = body.watch {
+            state.store.set_consolidation_state(
+                crate::gmail_watch::KEY_WATCH,
+                if on { "on" } else { "off" },
+            )?;
+        }
+        if let Some(minutes) = body.every_minutes {
+            if !(1..=60).contains(&minutes) {
+                return Err(bad_request("catch up every 1 to 60 minutes"));
+            }
+            state
+                .store
+                .set_consolidation_state(crate::gmail_watch::KEY_EVERY, &minutes.to_string())?;
+        }
+        crate::gmail_watch::recheck(false);
+        crate::agents::publish_self(&state);
+        if body.user.is_none() && body.password.is_none() && !body.disconnect {
+            return Ok(Json(
+                json!({"saved": true, "watch": crate::gmail_watch::status_json(&state)}),
+            ));
+        }
+    }
     if body.disconnect {
         hearthloom_core::secrets::set_env_vars(
             state.home.root(),
             &[("GMAIL_IMAP_USER", ""), ("GMAIL_IMAP_PASSWORD", "")],
         )
         .map_err(|e| bad_request(format!("{e:#}")))?;
+        crate::gmail_watch::recheck(true);
+        crate::agents::publish_self(&state);
         crate::monitor::log(
             &state,
             "info",
@@ -3111,11 +3154,13 @@ async fn gmail_save(
         ],
     )
     .map_err(|e| bad_request(format!("{e:#}")))?;
+    crate::gmail_watch::recheck(true);
+    crate::agents::publish_self(&state);
     crate::monitor::log(
         &state,
         "info",
         "gmail_connected",
-        &format!("Google Mail live pull connected ({user}) — pulling each cycle"),
+        &format!("Google Mail connected ({user}) — new mail is watched live"),
         None,
     );
     Ok(Json(
