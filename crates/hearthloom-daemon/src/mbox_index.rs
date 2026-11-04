@@ -400,6 +400,86 @@ pub fn search(mbox: &Path, query: &str, limit: usize) -> Result<Vec<(String, Str
         .map_err(Into::into)
 }
 
+/// What an archive holds, for Ask's instructions: how many messages and
+/// the months they span. Parsing every date is too slow for the start of a
+/// question (665k in the Takeout), so it is worked out in the background
+/// and kept until the index changes; until then (or if the index can't be
+/// read) this says nothing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Summary {
+    pub messages: usize,
+    /// YYYY-MM of the oldest and newest dated message
+    pub first: Option<String>,
+    pub last: Option<String>,
+}
+
+type Summaries = std::collections::HashMap<PathBuf, (String, Option<Summary>)>;
+static SUMMARIES: std::sync::Mutex<Option<Summaries>> = std::sync::Mutex::new(None);
+
+fn index_fingerprint(mbox: &Path) -> Option<String> {
+    let meta = std::fs::metadata(index_path(mbox)).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some(format!("{}:{mtime}", meta.len()))
+}
+
+pub fn summary(mbox: &Path) -> Option<Summary> {
+    let fingerprint = index_fingerprint(mbox)?;
+    let mut guard = SUMMARIES.lock().unwrap_or_else(|p| p.into_inner());
+    let map = guard.get_or_insert_with(Default::default);
+    let known = map.get(mbox).cloned();
+    if known.as_ref().is_some_and(|(f, _)| f == &fingerprint) {
+        return known.and_then(|(_, s)| s);
+    }
+    // mark it in progress (keeping the last summary meanwhile), then count
+    // off the runtime: a thread of its own, so a slow disk stalls nothing
+    let last = known.and_then(|(_, s)| s);
+    map.insert(mbox.to_path_buf(), (fingerprint.clone(), last.clone()));
+    let path = mbox.to_path_buf();
+    std::thread::spawn(move || {
+        let computed = compute_summary(&path).ok();
+        let mut guard = SUMMARIES.lock().unwrap_or_else(|p| p.into_inner());
+        let map = guard.get_or_insert_with(Default::default);
+        map.insert(path, (fingerprint, computed));
+    });
+    last
+}
+
+pub fn compute_summary(mbox: &Path) -> Result<Summary> {
+    let conn =
+        Connection::open_with_flags(index_path(mbox), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut stmt = conn.prepare("SELECT date FROM messages")?;
+    let mut rows = stmt.query([])?;
+    let (mut messages, mut first, mut last) = (0usize, None::<String>, None::<String>);
+    while let Some(row) = rows.next()? {
+        messages += 1;
+        let date: String = row.get(0)?;
+        let Ok(when) = chrono::DateTime::parse_from_rfc2822(date.trim()) else {
+            continue;
+        };
+        let month = when.format("%Y-%m").to_string();
+        // a bad clock or a spammer's date shouldn't stretch the span
+        if month.as_str() < "1990" || month.as_str() > "2100" {
+            continue;
+        }
+        if first.as_ref().is_none_or(|f| &month < f) {
+            first = Some(month.clone());
+        }
+        if last.as_ref().is_none_or(|l| &month > l) {
+            last = Some(month);
+        }
+    }
+    Ok(Summary {
+        messages,
+        first,
+        last,
+    })
+}
+
 /// Read one message's raw text (headers + body) by its indexed offset.
 pub fn fetch(mbox: &Path, id: &str, cap_chars: usize) -> Result<String> {
     if is_stale(mbox) {

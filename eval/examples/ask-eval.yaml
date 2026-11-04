@@ -54,6 +54,14 @@ questions:
     expect_any: ["seeking", "confirmed", "no confirmed", "none"]
     max_rounds: 3
 
+  # ——— mail: a link lives in a message's text (0.5.86) ———
+  - id: mail-link-in-text
+    question: "Did someone send me a link to a shared account or portal by email? Find the website."
+    # an address, or an honest list of where it looked — never "(no answer)"
+    expect_any: ["http", "www.", "where i looked"]
+    expect_not_contains: ["(no answer)"]
+    max_rounds: 9
+
   # ——— aggregation: SQL over the substrate, with a chart where apt ———
   - id: agg-episodes-by-source
     question: "How many episodes do I have per source? Give the top five."

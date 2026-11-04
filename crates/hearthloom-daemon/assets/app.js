@@ -4564,6 +4564,16 @@ async function askSend() {
     // the meta event pushed this turn's ask id onto the thread
     renderAnswer(data.answer, data.citations, data.rounds,
       askThread[askThread.length - 1]);
+    // it stopped before it was done: one click carries on in this thread
+    // (the answer lists where it looked, so it won't start over)
+    if (data.incomplete) {
+      const more = askAppend(`<div class="ask-a"><button class="btn btn-quiet ask-keep-looking">keep looking</button></div>`);
+      more.querySelector(".ask-keep-looking").onclick = () => {
+        more.remove();
+        askInput.value = "Keep looking — carry on from where you stopped. Skip the searches you already did and try new ones.";
+        askSend();
+      };
+    }
     if (taskCard) askShowTask(taskCard);
     if (keepScroll != null) askLog.scrollTop = keepScroll;
     finish();

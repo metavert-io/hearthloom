@@ -873,6 +873,22 @@ the design log 2026-07-14.
   the owner in, and `claude -p` billed an API key it found instead of the
   subscription. A new program started for an agent or an ember does the
   same; `test_agent_and_ember_programs_start_clean` checks the two files.
+- **A MOUNTED SOURCE IS READ FOR A CALLER ONLY THROUGH
+  `virtual_source::{search,fetch}_for_viewer` (0.5.86 — a fixed privacy
+  hole, don't re-open it).** Archives (mbox) and mounts are read in place
+  and never pass through ingest, so the raw `search`/`fetch` skip the
+  privacy rules and the vault. The `_for_viewer` pair holds back, while the
+  caller's vault is locked, an item a privacy rule matches (mail: the whole
+  message) or whose memory (`mbox` or the source's own name, keyed by the
+  path/Message-ID) is private — silently, and a held-back fetch reads as
+  not there. Archive search is owner-only (`search_virtual`) and on the
+  ember deny list. `test_archive_readers_go_through_the_vault_check` scans
+  rlm/http/mcp/network_out for raw calls.
+- **ASK NEVER ENDS EMPTY (0.5.86).** An "answer" must be non-empty text
+  (`answer_text`); out of rounds it is asked twice for one; failing that,
+  and on the other dead ends after work was done, `salvage` answers with
+  where it looked and marks the outcome `incomplete` (the panel's "keep
+  looking"). Only a provider safety refusal still fails the ask.
 - **THE CLAUDE ACCOUNT POOL NEVER TOUCHES A LOGIN (0.5.85,
   agents/claude_pool.rs).** An extra account is a Claude Code home
   (`claude-accounts/<id>/`, passed as CLAUDE_CONFIG_DIR, Excluded from

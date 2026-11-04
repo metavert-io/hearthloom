@@ -631,7 +631,6 @@ const KEY_ROUTES: &[(&str, &str, &[&str])] = &[
     ("GET", "/v1/browse/identities", &["read"]),
     ("GET", "/v1/browse/edges", &["read"]),
     ("GET", "/v1/browse/sources", &["read"]),
-    ("GET", "/v1/sources/virtual/{name}/search", &["read"]),
     ("GET", "/v1/sources/virtual/{name}/query", &["read"]),
     ("GET", "/v1/health/today", &["read"]),
     ("GET", "/v1/portrait", &["read"]),
@@ -2549,11 +2548,21 @@ struct VirtualSearchQuery {
 /// Search a virtual source without materializing anything.
 async fn search_virtual(
     State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
     Path(name): Path<String>,
     Query(params): Query<VirtualSearchQuery>,
 ) -> Result<Json<Value>, ApiError> {
+    // a mail archive is the owner's whole mailbox: no other key searches
+    // it (0.5.86 — it was open to any `read` key and to embers)
+    require_owner(&auth, "search a mounted source")?;
     let def = crate::virtual_source::resolve(&state, &name)?;
-    let hits = crate::virtual_source::search(&def, &params.q, params.limit.unwrap_or(20).min(100))?;
+    let limit = params.limit.unwrap_or(20).min(100);
+    let q = params.q.clone();
+    let hits = crate::scoped::spawn_blocking(move || {
+        crate::virtual_source::search_for_viewer(&state, &def, &q, limit)
+    })
+    .await
+    .map_err(anyhow::Error::from)??;
     Ok(Json(
         json!({"source": name, "query": params.q, "hits": hits}),
     ))
@@ -9679,6 +9688,7 @@ async fn deep_query(
                 "citations": outcome.citations,
                 "dropped_citations": outcome.dropped_citations,
                 "rounds": outcome.rounds,
+                "incomplete": outcome.incomplete,
                 "transcript": outcome.transcript,
                 "task": outcome.delegate.as_ref().and_then(|d|
                     propose_from_ask(&state, &ask_id, &body.question, d, outcome.tainted.as_deref()).ok()),
@@ -10704,6 +10714,7 @@ async fn deep_query_stream(
                     "answer": outcome.answer,
                     "citations": outcome.citations,
                     "rounds": outcome.rounds,
+                    "incomplete": outcome.incomplete,
                 }));
             }
             Err(err) => {

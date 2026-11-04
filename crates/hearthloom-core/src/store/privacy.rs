@@ -183,6 +183,60 @@ impl Store {
         Ok((rule, relabeled))
     }
 
+    /// Would the privacy rules make this text private? For items read in
+    /// place — a mail archive's messages, a mounted file — that never pass
+    /// through ingest (0.5.86). Every kind matches as text here: an
+    /// entity or place rule names someone a message's headers carry by
+    /// name, and matching more is the safe direction.
+    pub fn privacy_rules_match(&self, text: &str) -> Result<bool> {
+        let rules = {
+            let conn = self.lock();
+            load_rules(&conn)?
+        };
+        if rules.is_empty() {
+            return Ok(false);
+        }
+        let as_terms: Vec<PrivacyRule> = rules
+            .into_iter()
+            .map(|mut r| {
+                if matches!(r.kind.as_str(), "entity" | "place") {
+                    r.kind = "term".into();
+                }
+                r
+            })
+            .collect();
+        Ok(text_matches(&as_terms, text))
+    }
+
+    /// Which of these source refs became a memory that is labelled private
+    /// (by a rule or by hand). An archive message whose memory is private
+    /// is private in the archive too.
+    pub fn private_source_refs(
+        &self,
+        source: &str,
+        refs: &[String],
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut out = std::collections::HashSet::new();
+        let conn = self.lock();
+        for chunk in refs.chunks(400) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT source_ref FROM episodes /* all-episodes: a private label holds even on a replaced memory */
+                 WHERE scope = 'private' AND source = ?1 AND source_ref IN ({marks})"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let params: Vec<&dyn rusqlite::ToSql> =
+                std::iter::once(&source as &dyn rusqlite::ToSql)
+                    .chain(chunk.iter().map(|r| r as &dyn rusqlite::ToSql))
+                    .collect();
+            let rows = stmt.query_map(params.as_slice(), |row| row.get::<_, String>(0))?;
+            for r in rows {
+                out.insert(r?);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn list_privacy_rules(&self) -> Result<Vec<PrivacyRule>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(

@@ -8,6 +8,32 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+### Security
+- **Mail archives honour your privacy rules and the vault.** Mail kept in
+  an archive (the Gmail Takeout, the live Gmail archive) is read in place,
+  and those reads skipped the privacy check: a message a rule makes
+  private — hidden as a memory while the vault is locked — could still be
+  found and read through the archive. Archive searches and reads now leave
+  out a message a rule matches (its text included) or whose memory is
+  marked private, while the vault is locked, and say nothing about what
+  was left out. Searching an archive is now for you only: ordinary keys and
+  embers' keys can no longer search it.
+
+### Fixed
+- **Ask no longer ends with "(no answer)".** When it ran out of lookups
+  and its last reply asked for one more, everything it had found was
+  thrown away. It now asks once more for an answer, and if none comes,
+  says so and lists where it looked.
+
+### Added
+- **"Keep looking"** under an answer Ask didn't finish: it carries on in
+  the same conversation, skipping the searches it already did.
+- Ask is told what each mail archive holds (about how many messages,
+  which months) and how to search mail: which mail is in the record with
+  its full text, that archive search matches sender, subject and date but
+  not the text, and that invitations come from the service, not the
+  person.
+
 ## 0.5.85 — 2026-11-04
 
 ### Added

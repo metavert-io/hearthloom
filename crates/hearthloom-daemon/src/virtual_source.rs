@@ -278,6 +278,100 @@ pub fn search(def: &VirtualSourceDef, query: &str, limit: usize) -> Result<Vec<V
     }
 }
 
+/// The memory sources an item of this source can have become, keyed by
+/// its path: a promoted item keeps the source's own name; a mail archive's
+/// messages are also the `mbox` memories the Gmail pull and the Takeout
+/// ingest made (keyed by the same Message-ID).
+fn materialized_sources(def: &VirtualSourceDef) -> Vec<&str> {
+    if def.adapter == "mbox" {
+        vec!["mbox", def.name.as_str()]
+    } else {
+        vec![def.name.as_str()]
+    }
+}
+
+/// Which of these paths became a memory labelled private.
+fn marked_private(
+    state: &AppState,
+    def: &VirtualSourceDef,
+    paths: &[String],
+) -> Result<std::collections::HashSet<String>> {
+    let mut out = std::collections::HashSet::new();
+    for source in materialized_sources(def) {
+        out.extend(state.store.private_source_refs(source, paths)?);
+    }
+    Ok(out)
+}
+
+/// Is this item private for the vault (0.5.86)? The tests a memory meets:
+/// the memory made from it is labelled private (by a rule or by hand), or
+/// a privacy rule matches its text. Archives are read in place and never
+/// pass through ingest, so until 0.5.86 neither test ran on them: mail a
+/// rule makes private was searchable and readable through the archive
+/// with the vault locked.
+fn item_private(state: &AppState, def: &VirtualSourceDef, path: &str, text: &str) -> Result<bool> {
+    Ok(
+        marked_private(state, def, &[path.to_string()])?.contains(path)
+            || state.store.privacy_rules_match(text)?,
+    )
+}
+
+/// `search`, leaving out what the vault hides from this caller (the
+/// thread's viewer: Ask's, the dashboard's). Nothing says how much was
+/// left out. A mail hit is judged on the whole message, as at ingest.
+pub fn search_for_viewer(
+    state: &AppState,
+    def: &VirtualSourceDef,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<VirtualHit>> {
+    if !state.store.vault_status().0 {
+        return search(def, query, limit);
+    }
+    // ask for more than needed: some may be held back
+    let hits = search(def, query, limit.saturating_mul(2).max(limit))?;
+    let refs: Vec<String> = hits.iter().map(|h| h.path.clone()).collect();
+    let marked = marked_private(state, def, &refs)?;
+    let mut kept = Vec::new();
+    for hit in hits {
+        if kept.len() >= limit {
+            break;
+        }
+        if marked.contains(&hit.path) {
+            continue;
+        }
+        let text = if def.adapter == "mbox" {
+            fetch(def, &hit.path, None).unwrap_or_else(|_| hit.snippet.clone())
+        } else {
+            format!("{}\n{}", hit.path, hit.snippet)
+        };
+        if state.store.privacy_rules_match(&text)? {
+            continue;
+        }
+        kept.push(hit);
+    }
+    Ok(kept)
+}
+
+/// `fetch`, refusing what the vault hides from this caller — with the
+/// same words as an item that isn't there.
+pub fn fetch_for_viewer(
+    state: &AppState,
+    def: &VirtualSourceDef,
+    path: &str,
+    budget: Option<u32>,
+) -> Result<String> {
+    let text = fetch(def, path, budget)?;
+    if state.store.vault_status().0 && item_private(state, def, path, &text)? {
+        return Err(if def.adapter == "mbox" {
+            anyhow!("no message {path:?} in the index")
+        } else {
+            anyhow!("nothing at {path:?}")
+        });
+    }
+    Ok(text)
+}
+
 fn magic_search(mount: &Path, query: &str, limit: usize) -> Result<Vec<VirtualHit>> {
     // HearthFS exposes matches as ONE virtual markdown file at
     // `@search/<query>` (verified against the live mount 2026-07-11 —
@@ -454,7 +548,8 @@ pub fn promote(
     budget: Option<u32>,
 ) -> Result<PromoteOutcome> {
     let def = resolve(state, name)?;
-    let content = fetch(&def, path, budget)?;
+    // a message the vault hides from this caller can't be promoted by it
+    let content = fetch_for_viewer(state, &def, path, budget)?;
     let trust = trust_of(&def);
     let is_mail = def.adapter == "mbox";
     let kind = kind
@@ -514,6 +609,41 @@ pub fn promote(
 /// The RLM system-prompt fragment describing available virtual sources and
 /// their read handles — None when none are registered (base experience
 /// unchanged; the system stays degraded-but-useful without them).
+/// How Ask should look for things in mail (0.5.86).
+const MAIL_GUIDANCE: &str = "\
+Finding things in mail: the user's Sent, Primary and Starred mail is ALSO in the record as \
+email episodes, and `search` finds words in their text. Everything else (Updates, Social, \
+Promotions, Forums) is only in the mail archives above, and vsearch over an archive matches \
+sender, recipients, subject, labels and date — NOT the message text. A link, an account or a \
+portal is usually in the text: find candidate messages by sender or subject, then vfetch the \
+few most likely ones and read them. Invitations and notifications come from the SERVICE \
+(noreply@…, a company's name), not from the person who set it up: search subjects such as \
+invited, invitation, shared, secure, portal, access, welcome, account — as well as the \
+person's name. Run independent vsearch calls together in one turn; vfetch only the best \
+candidates.\n";
+
+/// " — about 19,500 messages, 2026-08 → 2026-11" (rounded so the
+/// instructions don't change with every new message).
+fn archive_summary_line(s: &crate::mbox_index::Summary) -> String {
+    let rounded = |n: usize| -> String {
+        let n = if n >= 1000 { (n + 50) / 100 * 100 } else { n };
+        let digits = n.to_string();
+        let mut out = String::new();
+        for (i, c) in digits.chars().enumerate() {
+            if i > 0 && (digits.len() - i) % 3 == 0 {
+                out.push(',');
+            }
+            out.push(c);
+        }
+        out
+    };
+    let span = match (&s.first, &s.last) {
+        (Some(a), Some(b)) => format!(", {a} → {b}"),
+        _ => String::new(),
+    };
+    format!(" — about {} messages{span}", rounded(s.messages))
+}
+
 pub fn rlm_prompt_section(state: &AppState) -> Option<String> {
     let mut sources = state.store.list_virtual_sources().ok()?;
     sources.retain(is_enabled); // a disabled integration shouldn't nag the prompt
@@ -532,11 +662,23 @@ pub fn rlm_prompt_section(state: &AppState) -> Option<String> {
             .and_then(|m| m.as_str())
             .unwrap_or("?");
         let online = mount_of(source).map(|m| mount_alive(&m)).unwrap_or(false);
+        // what a mail archive holds, so Ask knows which to search (0.5.86);
+        // counts are rounded so the instructions stay the same between asks
+        let holds = if online && source.adapter == "mbox" {
+            mount_of(source)
+                .ok()
+                .and_then(|m| crate::mbox_index::summary(&m))
+                .map(|s| archive_summary_line(&s))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
-            "- {} [{}] at {}{}\n",
+            "- {} [{}] at {}{}{}\n",
             source.name,
             source.adapter,
             mount,
+            holds,
             if online {
                 ""
             } else {
@@ -544,6 +686,9 @@ pub fn rlm_prompt_section(state: &AppState) -> Option<String> {
                  on it; if it would have been relevant, say it is unavailable"
             }
         ));
+    }
+    if sources.iter().any(|s| s.adapter == "mbox") {
+        out.push_str(MAIL_GUIDANCE);
     }
     let has_numeric = sources.iter().any(|s| s.adapter == "apple-health");
     out.push_str(
@@ -901,6 +1046,197 @@ mod tests {
         assert!(err.contains("vault-locked"), "got: {err}");
         state.store.vault_unlock(15);
         assert!(query(&state, "apple-health", "SELECT * FROM daily", 10).is_ok());
+    }
+
+    /// 0.5.86: archive mail meets the vault like a memory does — held back
+    /// while locked when a privacy rule matches it (its text included) or
+    /// when the memory it became is labelled private; all of it with the
+    /// vault open. A held-back message reads as not there.
+    #[test]
+    fn test_archive_mail_honours_privacy_rules_and_the_vault() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mbox = tmp.path().join("archive.mbox");
+        let message = |id: &str, subject: &str, body: &str| {
+            format!(
+                "From a@x Mon Jan 05 10:00:00 2026\nFrom: Ann <ann@x.example>\nSubject: {subject}\n\
+                 Date: Mon, 05 Jan 2026 10:00:00 -0400\nMessage-ID: <{id}>\n\
+                 X-Gmail-Labels: Inbox\n\n{body}\n\n"
+            )
+        };
+        std::fs::write(
+            &mbox,
+            [
+                message(
+                    "sail1@x",
+                    "plans for saturday",
+                    "The regatta is on the 12th.",
+                ),
+                message(
+                    "deal1@x",
+                    "plans for the numbers",
+                    "Draft from the mediation session.",
+                ),
+                message("lunch1@x", "plans for lunch", "Noon at the usual place."),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        crate::mbox_index::build(&mbox).unwrap();
+        let home_tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(home_tmp.path().to_path_buf());
+        home.init().unwrap();
+        let store = Store::open(&home.db_path()).unwrap();
+        let actor = Actor::new("human:test");
+        store
+            .register_virtual_source(
+                &actor,
+                "gmail-archive",
+                "mbox",
+                &json!({"mount": mbox.to_string_lossy(), "trust": "imported"}),
+                &["search".into(), "fetch".into(), "promote".into()],
+            )
+            .unwrap();
+        // a rule over the text, and a memory of one message marked private
+        store.add_privacy_rule(&actor, "term", "mediation").unwrap();
+        let single = tmp.path().join("one.mbox");
+        std::fs::write(
+            &single,
+            message("lunch1@x", "plans for lunch", "Noon at the usual place."),
+        )
+        .unwrap();
+        let drafts = hearthloom_adapters::mbox::ingest(&single, Some("private")).unwrap();
+        store
+            .apply_batch(
+                &home,
+                &hearthloom_core::IngestBatch {
+                    actor: "adapter:mbox".into(),
+                    session_id: None,
+                    episodes: drafts,
+                },
+            )
+            .unwrap();
+        let state = AppState {
+            store: Arc::new(store),
+            home,
+            embedder: None,
+            llm: None,
+            auth_locked: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bus: Default::default(),
+            killswitch: Default::default(),
+            running: Default::default(),
+        };
+        let def = resolve(&state, "gmail-archive").unwrap();
+        let paths = |hits: Vec<VirtualHit>| {
+            let mut p: Vec<String> = hits.into_iter().map(|h| h.path).collect();
+            p.sort();
+            p
+        };
+
+        // locked: only the plain message
+        assert_eq!(
+            paths(search_for_viewer(&state, &def, "plans", 10).unwrap()),
+            ["sail1@x"]
+        );
+        for held in ["deal1@x", "lunch1@x"] {
+            let err = fetch_for_viewer(&state, &def, held, None)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                err,
+                format!("no message {held:?} in the index"),
+                "reads as not there"
+            );
+            assert!(promote(&state, &actor, "gmail-archive", held, None, None, None).is_err());
+        }
+        assert!(fetch_for_viewer(&state, &def, "sail1@x", None)
+            .unwrap()
+            .contains("regatta"));
+
+        // open: all of it
+        state.store.vault_unlock(15);
+        assert_eq!(
+            paths(search_for_viewer(&state, &def, "plans", 10).unwrap()),
+            ["deal1@x", "lunch1@x", "sail1@x"]
+        );
+        assert!(fetch_for_viewer(&state, &def, "deal1@x", None)
+            .unwrap()
+            .contains("mediation"));
+    }
+
+    /// 0.5.86: Ask is told what each mail archive holds (rounded, so its
+    /// instructions don't change with every message) and how mail search
+    /// works.
+    #[test]
+    fn test_ask_is_told_what_a_mail_archive_holds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mbox = tmp.path().join("archive.mbox");
+        std::fs::write(
+            &mbox,
+            "From a@x Mon Jan 05 10:00:00 2026\nFrom: Ann <ann@x.example>\nSubject: one\n\
+             Date: Mon, 05 Jan 2026 10:00:00 -0400\nMessage-ID: <a1@x>\n\nhi\n\n\
+             From b@x Sat Mar 01 10:00:00 2025\nFrom: Bo <bo@x.example>\nSubject: two\n\
+             Date: Sat, 01 Mar 2025 10:00:00 +0000\nMessage-ID: <b1@x>\n\nyo\n\n\
+             From c@x Sat Mar 01 10:00:00 1970\nFrom: Spam <s@x.example>\nSubject: three\n\
+             Date: Thu, 01 Jan 1970 00:00:00 +0000\nMessage-ID: <c1@x>\n\nold clock\n",
+        )
+        .unwrap();
+        crate::mbox_index::build(&mbox).unwrap();
+        let s = crate::mbox_index::compute_summary(&mbox).unwrap();
+        assert_eq!(s.messages, 3);
+        assert_eq!(
+            (s.first.as_deref(), s.last.as_deref()),
+            (Some("2025-03"), Some("2026-01"))
+        );
+        assert_eq!(
+            archive_summary_line(&s),
+            " — about 3 messages, 2025-03 → 2026-01"
+        );
+        let big = crate::mbox_index::Summary {
+            messages: 664_921,
+            first: None,
+            last: None,
+        };
+        assert_eq!(archive_summary_line(&big), " — about 664,900 messages");
+        let live = crate::mbox_index::Summary {
+            messages: 19_544,
+            first: None,
+            last: None,
+        };
+        assert_eq!(archive_summary_line(&live), " — about 19,500 messages");
+        // the background count lands for the next ask
+        let mut seen = None;
+        for _ in 0..50 {
+            seen = crate::mbox_index::summary(&mbox);
+            if seen.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(seen, Some(s));
+    }
+
+    /// The places that read mounted sources for a caller go through the
+    /// vault-aware readers; a new one that calls the raw ones fails here.
+    #[test]
+    fn test_archive_readers_go_through_the_vault_check() {
+        for (file, src) in [
+            ("rlm.rs", include_str!("rlm.rs")),
+            ("http.rs", include_str!("http.rs")),
+            ("mcp.rs", include_str!("mcp.rs")),
+            ("network_out.rs", include_str!("network_out.rs")),
+        ] {
+            for raw in [
+                "virtual_source::search(",
+                "virtual_source::fetch(",
+                "mbox_index::search(",
+                "mbox_index::fetch(",
+            ] {
+                assert!(
+                    !src.contains(raw),
+                    "{file} calls {raw}…) — use search_for_viewer / fetch_for_viewer"
+                );
+            }
+        }
     }
 
     #[test]

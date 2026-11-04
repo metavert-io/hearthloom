@@ -97,6 +97,9 @@ pub struct QueryOutcome {
     pub dropped_citations: Vec<String>,
     pub transcript: Vec<Value>,
     pub rounds: usize,
+    /// It stopped before it was done (out of rounds, or no answer came):
+    /// the panel offers to keep looking (0.5.86).
+    pub incomplete: bool,
 }
 
 fn system_prompt() -> String {
@@ -769,7 +772,7 @@ fn run_tool(state: &AppState, tool: &str, args: &Value) -> Result<String> {
                 .ok_or_else(|| anyhow!("vsearch needs args.query"))?;
             let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(10) as usize;
             let def = crate::virtual_source::resolve(state, source)?;
-            let hits = crate::virtual_source::search(&def, query, limit.min(25))?;
+            let hits = crate::virtual_source::search_for_viewer(state, &def, query, limit.min(25))?;
             let lines: Vec<String> = hits
                 .iter()
                 .map(|h| format!("{} | {}", h.path, h.snippet))
@@ -820,7 +823,9 @@ fn run_tool(state: &AppState, tool: &str, args: &Value) -> Result<String> {
                 .and_then(|b| b.as_u64())
                 .map(|b| b as u32);
             let def = crate::virtual_source::resolve(state, source)?;
-            Ok(preview(crate::virtual_source::fetch(&def, path, budget)?))
+            Ok(preview(crate::virtual_source::fetch_for_viewer(
+                state, &def, path, budget,
+            )?))
         }
         other => Err(anyhow!("unknown tool: {other}")),
     }
@@ -1872,8 +1877,11 @@ pub async fn run_query(
             }
             Stop::Truncated => {
                 retract();
-                return Err(anyhow!(
-                    "the model's reply kept hitting the output cap ({ROUND_TOKENS} tokens)"
+                return Ok(salvage(
+                    transcript,
+                    &flow,
+                    round + 1,
+                    "My replies kept running too long, so I didn't finish an answer.",
                 ));
             }
             Stop::End => {}
@@ -1897,13 +1905,33 @@ pub async fn run_query(
                 );
                 continue;
             }
-            Err(err) => {
+            Err(_) => {
                 retract();
-                return Err(err);
+                return Ok(salvage(
+                    transcript,
+                    &flow,
+                    round + 1,
+                    "I didn't manage to put an answer together this time.",
+                ));
             }
         };
 
-        if action.get("answer").is_some() || action.get("delegate").is_some() {
+        // an "answer" that isn't text (null, an object) is not an answer:
+        // it gets the repair below, never "(no answer)" (0.5.86)
+        let answered = answer_text(&action).is_some() || action.get("delegate").is_some();
+        if !answered && action.get("answer").is_some() && repairs < 2 {
+            retract();
+            repairs += 1;
+            let mut step = llm_meta("repair");
+            step["round"] = json!(round + 1);
+            transcript.push(step);
+            conversation.push_str(
+                "\nYour \"answer\" was not text. Reply again with EXACTLY one JSON object: a tool \
+                 call, or {\"answer\": \"<markdown>\", \"citations\": [...]}.",
+            );
+            continue;
+        }
+        if answered {
             let mut action = action;
             if action.get("answer").is_none() {
                 action["answer"] = json!("I'll hand this to one of your agents.");
@@ -1928,6 +1956,7 @@ pub async fn run_query(
                 dropped_citations,
                 transcript,
                 rounds: round,
+                incomplete: false,
             });
         }
 
@@ -1950,8 +1979,12 @@ pub async fn run_query(
                 conversation.push_str(&not_an_action_hint(&action));
                 continue;
             }
-            return Err(anyhow!(
-                "model returned neither tool nor answer (reply keys: {keys})"
+            // never end empty-handed: say what was searched (0.5.86)
+            return Ok(salvage(
+                transcript,
+                &flow,
+                round + 1,
+                "I didn't manage to put an answer together this time.",
             ));
         }
         for (index, (tool, args, why)) in calls.into_iter().enumerate() {
@@ -2032,68 +2065,171 @@ pub async fn run_query(
         conversation.push_str("\nNext JSON:");
     }
 
-    // Out of rounds: demand a best-effort cited answer.
-    conversation.push_str(
+    // Out of rounds: demand a best-effort cited answer — twice at most —
+    // and never come back empty (0.5.86: a final reply that asked for one
+    // more lookup was shown as "(no answer)", everything found thrown away).
+    let demands = [
         "\nYou are out of tool rounds. Respond NOW with your best {\"answer\", \"citations\"} JSON from the evidence above.",
-    );
-    let (reply, shown) = ask_round(
-        state,
-        llm.as_ref(),
-        ask_id,
-        &system,
-        &conversation,
-        progress.as_ref(),
-    )
-    .await?;
-    let retract = || {
-        if shown {
-            emit(json!({"type": "answer_reset"}));
+        "\nNo more tools can run. Reply with ONLY {\"answer\": \"<markdown>\", \"citations\": [...]}: \
+         what you found, what you couldn't find yet, and where you looked.",
+    ];
+    for (attempt, demand) in demands.iter().enumerate() {
+        conversation.push_str(demand);
+        let (reply, shown) = ask_round(
+            state,
+            llm.as_ref(),
+            ask_id,
+            &system,
+            &conversation,
+            progress.as_ref(),
+        )
+        .await?;
+        let retract = || {
+            if shown {
+                emit(json!({"type": "answer_reset"}));
+            }
+        };
+        transcript.push(json!({
+            "kind": "finish",
+            "round": MAX_ROUNDS + 1 + attempt,
+            "model": reply.model,
+            "llm_ms": reply.ms,
+            "tokens_in": reply.usage.as_ref().map(|u| u.input_tokens),
+            "tokens_out": reply.usage.as_ref().map(|u| u.output_tokens),
+            "cache_read": reply.usage.as_ref().map(|u| u.cache_read_tokens),
+            "cache_write": reply.usage.as_ref().map(|u| u.cache_creation_tokens),
+        }));
+        match reply.stop {
+            Stop::Refused => {
+                retract();
+                return Err(anyhow!(
+                    "the model declined this request (provider safety refusal)"
+                ));
+            }
+            Stop::Truncated => {
+                retract();
+                continue;
+            }
+            Stop::End => {}
         }
-    };
-    transcript.push(json!({
-        "kind": "finish",
-        "round": MAX_ROUNDS + 1,
-        "model": reply.model,
-        "llm_ms": reply.ms,
-        "tokens_in": reply.usage.as_ref().map(|u| u.input_tokens),
-        "tokens_out": reply.usage.as_ref().map(|u| u.output_tokens),
-        "cache_read": reply.usage.as_ref().map(|u| u.cache_read_tokens),
-        "cache_write": reply.usage.as_ref().map(|u| u.cache_creation_tokens),
-    }));
-    match reply.stop {
-        Stop::Refused => {
+        let Ok(action) = parse_model_json(&reply.text) else {
             retract();
-            return Err(anyhow!(
-                "the model declined this request (provider safety refusal)"
-            ));
-        }
-        Stop::Truncated => {
+            continue;
+        };
+        if answer_text(&action).is_none() {
             retract();
-            return Err(anyhow!(
-                "the final answer hit the output cap ({ROUND_TOKENS} tokens) and was cut off"
-            ));
+            continue;
         }
-        Stop::End => {}
+        let (answer, citations, dropped_citations) =
+            finalize(&action, &[&conversation, &brain], &mut transcript);
+        return Ok(QueryOutcome {
+            tainted: flow.tainted(),
+            delegate: action
+                .get("delegate")
+                .filter(|d| {
+                    d.get("task")
+                        .and_then(|t| t.as_str())
+                        .is_some_and(|t| !t.trim().is_empty())
+                })
+                .cloned(),
+            answer,
+            citations,
+            dropped_citations,
+            transcript,
+            rounds: MAX_ROUNDS,
+            incomplete: true,
+        });
     }
-    let action = parse_model_json(&reply.text).inspect_err(|_| retract())?;
-    let (answer, citations, dropped_citations) =
-        finalize(&action, &[&conversation, &brain], &mut transcript);
-    Ok(QueryOutcome {
-        tainted: flow.tainted(),
-        delegate: action
-            .get("delegate")
-            .filter(|d| {
-                d.get("task")
-                    .and_then(|t| t.as_str())
-                    .is_some_and(|t| !t.trim().is_empty())
-            })
-            .cloned(),
-        answer,
-        citations,
-        dropped_citations,
+    Ok(salvage(
         transcript,
-        rounds: MAX_ROUNDS,
-    })
+        &flow,
+        MAX_ROUNDS,
+        "I ran out of steps before I found an answer, so this isn't one yet.",
+    ))
+}
+
+/// A usable final answer: non-empty text.
+fn answer_text(action: &Value) -> Option<&str> {
+    action
+        .get("answer")
+        .and_then(|a| a.as_str())
+        .filter(|a| !a.trim().is_empty())
+}
+
+/// One line of "where I looked" for a lookup the trace recorded.
+fn looked(step: &Value) -> Option<String> {
+    let tool = step["tool"].as_str()?;
+    let a = &step["args"];
+    let quoted = |k: &str| {
+        a[k].as_str()
+            .map(|v| format!("\"{}\"", v.chars().take(80).collect::<String>()))
+    };
+    let mut line = match tool {
+        "search" => format!("searched your record for {}", quoted("query")?),
+        "vsearch" => format!(
+            "searched {} for {}",
+            a["source"].as_str().unwrap_or("a mounted source"),
+            quoted("query")?
+        ),
+        "vfetch" => format!(
+            "opened {} in {}",
+            a["path"].as_str().unwrap_or("an item"),
+            a["source"].as_str().unwrap_or("a mounted source")
+        ),
+        "read_episode" => format!("read memory {}", a["id"].as_str().unwrap_or("?")),
+        "recall" => "looked at a day or a span of time".to_string(),
+        "traverse" => format!(
+            "followed the connections of {}",
+            a["start"].as_str().unwrap_or("someone")
+        ),
+        "sql" | "map" => "queried the record directly".to_string(),
+        "vquery" => format!(
+            "queried {}'s numbers",
+            a["source"].as_str().unwrap_or("a source")
+        ),
+        other => format!("used {other}"),
+    };
+    let result = step["result_preview"].as_str().unwrap_or("");
+    if result.starts_with("TOOL ERROR") {
+        line.push_str(" (it failed)");
+    } else if result.starts_with("no hits") || result.starts_with("(0 rows)") {
+        line.push_str(" — nothing");
+    }
+    Some(line)
+}
+
+/// When no answer came, say so — and what was searched, so a follow-up
+/// ("keep looking") carries on from there instead of starting over.
+fn salvage(transcript: Vec<Value>, flow: &Flow, rounds: usize, why: &str) -> QueryOutcome {
+    let mut lines: Vec<String> = Vec::new();
+    for step in transcript.iter().filter(|s| s["kind"] == "tool") {
+        if let Some(line) = looked(step) {
+            if !lines.contains(&line) {
+                lines.push(line);
+            }
+        }
+    }
+    let mut answer = why.to_string();
+    if !lines.is_empty() {
+        answer.push_str("\n\n**Where I looked**\n");
+        for line in lines.iter().take(24) {
+            answer.push_str(&format!("- {line}\n"));
+        }
+        if lines.len() > 24 {
+            answer.push_str(&format!("- …and {} more\n", lines.len() - 24));
+        }
+    }
+    answer.push_str("\nAsk me to keep looking and I'll carry on from here.");
+    QueryOutcome {
+        tainted: flow.tainted(),
+        delegate: None,
+        answer,
+        citations: vec![],
+        dropped_citations: vec![],
+        transcript,
+        rounds,
+        incomplete: true,
+    }
 }
 
 /// Audit: every deep query lands in the mutations log (no episode writes).
@@ -2481,6 +2617,84 @@ mod tests {
         };
         let id = hearthloom_core::ids::episode_id("git", "abc123");
         (state, llm, id, tmp)
+    }
+
+    /// 0.5.86: out of rounds, a reply that still asks for a lookup is never
+    /// shown as "(no answer)": one more demand, then an honest answer that
+    /// lists where it looked, marked incomplete (the panel's "keep
+    /// looking"). A forced answer counts as incomplete too.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_out_of_rounds_never_ends_empty() {
+        let look =
+            |q: &str| format!(r#"{{"tool": "search", "args": {{"query": "{q}"}}, "why": "look"}}"#);
+        let mut replies: Vec<String> = (0..MAX_ROUNDS)
+            .map(|i| look(&format!("portal {i}")))
+            .collect();
+        replies.push(look("one more"));
+        replies.push(look("and another"));
+        let refs: Vec<&str> = replies.iter().map(String::as_str).collect();
+        let (state, _llm, _id, _tmp) = scripted_state(&refs);
+        let actor = Actor::new("human:test");
+        let ask_id = state
+            .store
+            .ask_start(&actor, "where is the portal?", None)
+            .unwrap();
+        let outcome = run_query(&state, &ask_id, "where is the portal?", &actor, &[], None)
+            .await
+            .unwrap();
+        assert!(outcome.incomplete);
+        assert!(
+            !outcome.answer.contains("(no answer)"),
+            "{}",
+            outcome.answer
+        );
+        assert!(
+            outcome.answer.contains("Where I looked"),
+            "{}",
+            outcome.answer
+        );
+        assert!(
+            outcome
+                .answer
+                .contains(r#"searched your record for "portal 0""#),
+            "{}",
+            outcome.answer
+        );
+
+        // the second demand gets an answer: shown, still marked incomplete
+        let mut replies: Vec<String> = (0..MAX_ROUNDS)
+            .map(|i| look(&format!("portal {i}")))
+            .collect();
+        replies.push(look("one more"));
+        replies.push(
+            r#"{"answer": "I found the invitation but not the link yet.", "citations": []}"#.into(),
+        );
+        let refs: Vec<&str> = replies.iter().map(String::as_str).collect();
+        let (state, _llm, _id, _tmp) = scripted_state(&refs);
+        let ask_id = state
+            .store
+            .ask_start(&actor, "where is the portal?", None)
+            .unwrap();
+        let outcome = run_query(&state, &ask_id, "where is the portal?", &actor, &[], None)
+            .await
+            .unwrap();
+        assert!(outcome.incomplete);
+        assert_eq!(
+            outcome.answer,
+            "I found the invitation but not the link yet."
+        );
+
+        // an "answer" that isn't text is repaired, not shown as "(no answer)"
+        let (state, _llm, _id, _tmp) = scripted_state(&[
+            r#"{"answer": null, "citations": []}"#,
+            r#"{"answer": "Found it.", "citations": []}"#,
+        ]);
+        let ask_id = state.store.ask_start(&actor, "where is it?", None).unwrap();
+        let outcome = run_query(&state, &ask_id, "where is it?", &actor, &[], None)
+            .await
+            .unwrap();
+        assert_eq!(outcome.answer, "Found it.");
+        assert!(!outcome.incomplete);
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -894,6 +894,9 @@ pub fn plugin_route_allowed(path: &str, method: &str, scopes: &[String]) -> bool
             // who drives your car, and the questions about it, are yours
             "/v1/vehicles",
             "/v1/trips",
+            // mounted sources: a mail archive is the whole mailbox, read
+            // in place (0.5.86; the route checks the owner too)
+            "/v1/sources/virtual",
         ];
         return path.starts_with("/v1/") && !DENIED.iter().any(|d| path.starts_with(d));
     }
@@ -1519,6 +1522,10 @@ mod tests {
         assert!(!plugin_route_allowed("/v1/export/start", "GET", &rd));
         assert!(!plugin_route_allowed("/v1/vault", "GET", &rd));
         assert!(!plugin_route_allowed("/v1/keys", "GET", &rd));
+        assert!(
+            !plugin_route_allowed("/v1/sources/virtual/gmail-live/search", "GET", &rd),
+            "an ember never searches the mailbox"
+        );
         assert!(!plugin_route_allowed("/v1/plugins", "GET", &rd));
         assert!(
             !plugin_route_allowed("/v1/query/stream", "GET", &rd),

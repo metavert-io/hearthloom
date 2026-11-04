@@ -564,6 +564,13 @@ mod tests {
     }
 
     #[test]
+    fn test_the_example_ask_suite_parses() {
+        let eval: AskEvalFile =
+            serde_yaml::from_str(include_str!("../../../eval/examples/ask-eval.yaml")).unwrap();
+        assert!(eval.questions.iter().any(|q| q.id == "mail-link-in-text"));
+    }
+
+    #[test]
     fn test_grade_ask() {
         let case = q(
             "{id: a, question: q, expect_contains: [July], expect_any: [lease, rent], \

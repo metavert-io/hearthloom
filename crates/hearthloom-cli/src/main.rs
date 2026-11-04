@@ -1189,6 +1189,11 @@ async fn main() -> Result<()> {
                 );
             }
             eprintln!("({} tool rounds)", result["rounds"]);
+            if result["incomplete"] == json!(true) {
+                eprintln!(
+                    "(it stopped before it was done — \"keep looking\" in the dashboard's Ask panel carries on from here)"
+                );
+            }
         }
         Cmd::Quarantine { command } => {
             let client = Client::with_url(home, url.clone())?;
