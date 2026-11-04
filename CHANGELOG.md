@@ -8,6 +8,19 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.80 — 2026-11-03
+
+### Security
+- **An ember can no longer start a question to Ask.** An ember granted
+  `read` could reach Ask's streaming route, which checked no key and ran
+  the question as you: it spent your tokens and, through a "do it" reply,
+  could hand a task to your agents (sent without approval under the
+  "delegate" preset). It saw only the locked view, never private
+  material. Ask's routes are now off the ember read surface, and the
+  streaming route admits only you — your signed-in session, an admin key
+  or your paired phone. Found while auditing the agent layer for email
+  and calendar work.
+
 ## 0.5.79 — 2026-11-03
 
 ### Fixed
