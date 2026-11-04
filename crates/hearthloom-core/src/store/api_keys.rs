@@ -360,6 +360,40 @@ impl Store {
     }
 
     /// Revoke = stamp, never delete.
+    /// Replace a key's scopes, keeping its id and secret (an ember upgrade:
+    /// the key file the program holds stays valid, but what the key may do
+    /// becomes exactly what was granted — narrower or, when the owner
+    /// approved, wider). Scoped (grants) keys are refused.
+    pub fn set_api_key_scopes(&self, actor: &Actor, id: &str, scopes: &[String]) -> Result<()> {
+        if scopes.is_empty() {
+            return Err(anyhow!("a key needs at least one scope"));
+        }
+        for scope in scopes {
+            if !API_KEY_SCOPES.contains(&scope.as_str()) {
+                return Err(anyhow!(
+                    "unknown scope {scope:?} (valid: {})",
+                    API_KEY_SCOPES.join(", ")
+                ));
+            }
+        }
+        let conn = self.lock();
+        let changed = conn.execute(
+            "UPDATE api_keys SET scopes = ?2 WHERE id = ?1 AND revoked_at IS NULL AND grants IS NULL",
+            rusqlite::params![id, serde_json::json!(scopes).to_string()],
+        )?;
+        if changed == 0 {
+            return Err(anyhow!("no active unscoped key {id:?}"));
+        }
+        record_mutation(
+            &conn,
+            actor,
+            "api_key_scopes_set",
+            &format!("api_key_scopes_set:{id}:{}", now_utc()),
+            &serde_json::json!({"id": id, "scopes": scopes}),
+        )?;
+        Ok(())
+    }
+
     pub fn revoke_api_key(&self, actor: &Actor, id: &str) -> Result<()> {
         let conn = self.lock();
         let changed = conn.execute(

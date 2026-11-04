@@ -8,8 +8,8 @@ If no local daemon is running, one is spawned on demand.
 
 | flag | meaning |
 |---|---|
-| `--url <base>` | Target another node you own (e.g. `--url https://brain.example.com`). Remote nodes are never auto-spawned. |
-| `--json` | Machine-readable output where supported (`status`, `key list`). |
+| `--url <base>` | Target another node you own (e.g. `--url https://brain.example.com`). Remote nodes are never auto-spawned. Commands that read this machine's files (`ingest`, `logs`, `ember logs`) refuse it rather than quietly work on this node. |
+| `--json` | Machine-readable output where supported (`status`, `key list`, the `ember` commands…). |
 
 **Authentication.** On an auth-locked node, run `auth login` once: it
 stores a CLI key in your login keychain, and every command sends it
@@ -85,12 +85,14 @@ for the port, launchd pointing at the wrong binary, CLI/daemon version
 skew, whether credentials reach past the auth door, embedding-model
 presence, WAL bloat, and PATH. Run this first when anything seems off.
 
-### `ember` — registry install + developer tools
+### `ember` — install, manage, develop
 
 ```
 hearthloom ember search presence            # discover (your configured registry)
 hearthloom ember info hpresence             # versions, scopes, review status
 hearthloom ember install hpresence          # fetch → verify → approve scopes → install
+hearthloom ember install ./my-ember         # a folder or .zip you built (unreviewed)
+hearthloom ember install ./my-ember --grant read,notify --yes   # …from a script
 hearthloom ember install hpresence --version 0.1.0 --yes
 hearthloom ember install foo --registry https://other-registry.example
 hearthloom ember install foo --upgrade-host   # upgrade hearthloom first if the ember needs it
@@ -98,6 +100,11 @@ hearthloom ember update                     # check ALL installed vs the registr
 hearthloom ember update hpresence --check   # report only
 hearthloom ember uninstall hpresence
 hearthloom ember list                       # installed on the node
+hearthloom ember disable hpresence          # stop it; key, settings, data kept
+hearthloom ember enable hpresence
+hearthloom ember config hpresence           # its settings (manifest config[])
+hearthloom ember config hpresence interval 15
+hearthloom ember config hpresence interval --unset
 hearthloom ember validate ./my-ember        # lint with the daemon's real parser
 hearthloom ember pack ./my-ember            # validate + zip for publishing
 hearthloom ember logs hpresence -f          # tail a sidecar's log
@@ -124,6 +131,28 @@ remote node, install/update are staged and verified BY that node — a
 hosted instance's cloud policy (eligible + counter-signed only) is
 enforced server-side no matter the client. `validate`/`pack` are the developer loop; `search --cloud`
 limits results to embers approved for hosted nodes.
+
+**From a folder or .zip** (anything with a `/`, starting with `.` or
+`~`, or ending in `.zip`), `install` shows the dashboard's consent
+screen for an unreviewed ember and asks. For scripts, `--yes` answers
+and `--grant <scopes>` names what the ember may do; an upgrade keeps
+what the installed version holds, so `--yes` alone covers it unless the
+new version asks for more — then it installs without the extra, warns,
+and prints the command that grants it. Exit codes: 0 done; 3 done with
+scopes withheld; 4 nothing installed, approval missing; 5 refused by a
+hosted node (registry-reviewed embers only); 1 anything else. With
+`--json` the outcome is one object whose `status` names it
+(`installed`, `upgraded`, `installed_scopes_withheld`,
+`upgraded_scopes_withheld`, `needs_grant`, `needs_yes`,
+`refused_hosted`, `declined`, `error`) and whose `rerun` holds the
+command to run when something was withheld. Details:
+[plugin-guide.md](plugin-guide.md#installing-from-the-command-line).
+
+`config` values are checked against the ember's declared types (numbers;
+`true`/`false`; comma-separated lists), on the node as well — the
+dashboard's settings form meets the same check. `enable`, `disable`,
+`config`, `list` and `uninstall` take `--json`; `uninstall` needs
+`--yes` when no one is at a terminal.
 
 ### `entity` — an entity's dossier
 

@@ -12850,12 +12850,24 @@ async fn plugins_upload(
     .map_err(anyhow::Error::from)?
     .map_err(|e| bad_request(format!("{e:#}")))?;
     let (dir, manifest) = staged;
+    // what the CLI's consent screen shows (0.5.84): the same facts the
+    // dashboard's card does, plus what's installed under that name now
+    let installed = state.store.plugin(&manifest.name)?.map(|row| {
+        json!({"version": row.version, "granted_scopes": row.granted_scopes, "enabled": row.enabled})
+    });
     Ok(Json(json!({
         "path": dir.display().to_string(),
         "name": manifest.name, "version": manifest.version,
         "requested_scopes": manifest.scopes,
         "description": manifest.description,
         "publishes": manifest.publish.iter().map(|p| p.path.clone()).collect::<Vec<_>>(),
+        "publisher": manifest.publisher,
+        "placement": manifest.effective_placement(),
+        "runs": crate::plugins::launch_entry(&manifest),
+        "requires_host": manifest.host_requirement(),
+        "reviewed": false,
+        "installed": installed,
+        "hosted_refuses_unreviewed": !crate::registry_client::unreviewed_install_allowed(),
     })))
 }
 
@@ -13790,6 +13802,22 @@ async fn plugin_config_set(
             return Err(bad_request(format!(
                 "{k:?} isn't in {name}'s declared config"
             )));
+        }
+        // the value must fit the declared type (0.5.84: the dashboard and
+        // `hearthloom ember config` are held to the same schema)
+        let kind = schema
+            .iter()
+            .find(|i| i.get("key").and_then(|x| x.as_str()) == Some(k.as_str()))
+            .and_then(|i| i.get("type").and_then(|t| t.as_str()))
+            .unwrap_or("string");
+        let fits = match kind {
+            "number" => v.is_number(),
+            "boolean" => v.is_boolean(),
+            "list" => v.as_array().is_some_and(|a| a.iter().all(Value::is_string)),
+            _ => v.is_string(),
+        };
+        if !fits && !v.is_null() {
+            return Err(bad_request(format!("{k:?} is a {kind} setting")));
         }
         current.insert(k.clone(), v.clone());
     }

@@ -46,9 +46,11 @@ my-plugin/
 ```
 
 Users install it from **☰ → Integrations → embers** (folder path or
-zip upload) or with `hearthloom ember install <name>` from the
-**ember registry** you configured — either way they see exactly what you
-requested before granting anything. Registry-distributed embers are
+zip upload), with `hearthloom ember install <name>` from the
+**ember registry** you configured, or with `hearthloom ember install
+<folder-or-zip>` for one you built (see "Installing from the command
+line" below) — every way, they see exactly what you requested before
+granting anything. Registry-distributed embers are
 sha256- and Ed25519-verified against your published release signature
 (see your registry's protocol documentation: you sign each release
 with your own Ed25519 publisher key, kept outside the repo); side-loaded
@@ -140,11 +142,58 @@ Read the key from the file at startup (and re-read on a 401 — the user
 may reinstall). Your stdout/stderr goes to
 `plugins/<name>/plugin.log`.
 
+### Installing from the command line
+
+`hearthloom ember install` takes a registry name or a path. A path is
+anything with a `/`, starting with `.` or `~`, or ending in `.zip` (a
+folder in the current directory is `./my-ember`); a folder is packed the
+way `ember pack` packs it (dotfiles left out, file modes kept). The
+package is unreviewed, so the CLI shows the same consent screen as the
+dashboard — publisher, what it asks for, where it runs, the program it
+starts, what it serves without sign-in — and asks.
+
+A script answers for the person with `--yes`, and names the scopes it
+trusts the ember with in `--grant` (comma-separated):
+
+```
+hearthloom ember install ~/src/my-ember --grant read,notify --yes   # first install
+hearthloom ember install ~/src/my-ember --yes                       # an upgrade
+```
+
+An upgrade keeps what the installed version holds, so `--yes` alone
+covers it — unless the new version asks for more. Then it installs
+without the extra scopes, warns that the ember may not work properly
+without them, and prints the exact command that grants them. Nothing is
+ever granted that nobody named. A first install with `--yes` and no
+`--grant` installs nothing.
+
+Exit codes, for scripts (with `--json`, one object on stdout whose
+`status` says the same, plus `name`, `version`, `from_version`,
+`requested`, `granted`, `withheld`, `dropped`, `ignored` and, when there
+is something to re-run, `rerun`):
+
+| exit | `status` | meaning |
+|---|---|---|
+| 0 | `installed`, `upgraded` | done (`upgraded` also covers a reinstall of the same version) |
+| 3 | `installed_scopes_withheld`, `upgraded_scopes_withheld` | done, but it runs without `withheld`; `rerun` grants them |
+| 4 | `needs_grant`, `needs_yes` | nothing installed: no scope it asks for was granted, or no one was at a terminal and `--yes` wasn't given |
+| 5 | `refused_hosted` | nothing installed: a hosted node takes only embers reviewed through a registry |
+| 1 | `declined`, `error` | anything else |
+
+The rest of the Integrations card is there too: `ember enable|disable
+<name>`, `ember config <name> [key] [value]` (values are checked against
+your `config[]` types: numbers, `true`/`false`, comma-separated lists;
+`--unset` clears one), `ember list`, `ember uninstall <name> --yes`, all
+with `--json`. `--url` installs on another node you own; `ember logs`
+reads this machine's files, so it refuses `--url`.
+
 **Disable** unloads your launchd unit and revokes any live UI tokens
 (your main key survives). **Uninstall** unloads the unit, revokes your
 key, and removes the registry row — but *never* deletes your data
 directory; the user is told where it lives. Reinstall/upgrade keeps the
-existing key, so your key file stays valid.
+existing key, so your key file stays valid — and the key holds exactly
+the scopes granted for the new version: fewer if it asks for fewer, more
+only when the owner grants them.
 
 ## The API you can call
 
@@ -459,5 +508,8 @@ The node handles this for you:
    `POST /v1/ingest` with deterministic `source_ref`s, park state in
    `/v1/plugins/self/kv/*`.
 3. Drop an `index.html` in `ui/` that loads `/assets/ember.js`.
-4. `☰ → Integrations → plugins →` your folder → review → install.
-5. Watch `~/.hearthloom/plugins/<name>/plugin.log`.
+4. `hearthloom ember install ./my-ember` → review → `y` (or
+   `☰ → Integrations → embers →` your folder). After each change, run
+   the same command again: an upgrade keeps your key and settings.
+5. `hearthloom ember logs my-ember -f` (the log is
+   `~/.hearthloom/plugins/<name>/plugin.log`).

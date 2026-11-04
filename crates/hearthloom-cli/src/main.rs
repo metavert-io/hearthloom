@@ -4,6 +4,7 @@
 
 mod bench;
 mod client;
+mod embers;
 mod eval;
 mod ops;
 mod registry;
@@ -318,10 +319,22 @@ enum EmberCmd {
         #[arg(long, env = "HEARTHLOOM_REGISTRY_URL")]
         registry: Option<String>,
     },
-    /// Fetch, verify (sha256 + Ed25519), approve scopes, install.
+    /// Install or upgrade an ember: a registry name (fetched, verified —
+    /// sha256 + Ed25519 — then scopes approved), or a folder / .zip you
+    /// built (unreviewed; write ./name for a folder here).
+    ///
+    /// From a path, a script answers the prompt with --yes and names what
+    /// the ember may do with --grant. An upgrade keeps what the installed
+    /// version holds, so --yes alone covers it unless the new version asks
+    /// for more. Exit codes: 0 done; 3 done but some scopes withheld (the
+    /// output says how to re-run); 4 not installed, approval missing
+    /// (--yes / --grant); 5 refused: a hosted node takes reviewed embers
+    /// only; 1 anything else. With --json, one object whose `status` says
+    /// the same.
     Install {
+        /// A registry name, or a path to a package folder or .zip.
         name: String,
-        /// A specific version (default: latest).
+        /// A specific version (registry installs; default: latest).
         #[arg(long)]
         version: Option<String>,
         #[arg(long, env = "HEARTHLOOM_REGISTRY_URL")]
@@ -329,9 +342,29 @@ enum EmberCmd {
         /// Skip the confirmation prompt (scripting).
         #[arg(long)]
         yes: bool,
+        /// Scopes to grant an ember from a path, comma-separated
+        /// (read,ingest,notify). Needed with --yes for a first install,
+        /// and for an upgrade that asks for more than it holds.
+        #[arg(long, value_delimiter = ',')]
+        grant: Vec<String>,
         /// If the ember needs a newer hearthloom, upgrade the host first.
         #[arg(long)]
         upgrade_host: bool,
+    },
+    /// Start an installed ember again.
+    Enable { name: String },
+    /// Stop an installed ember; its key, settings and data stay.
+    Disable { name: String },
+    /// An ember's settings (its manifest's config[]): none = list them,
+    /// a key = show it, a key and a value = save it. Lists are
+    /// comma-separated; booleans are true/false.
+    Config {
+        name: String,
+        key: Option<String>,
+        value: Option<String>,
+        /// Clear the setting (back to its default).
+        #[arg(long)]
+        unset: bool,
     },
     /// Check installed embers against the registry; update outdated ones.
     Update {
@@ -672,7 +705,7 @@ async fn main() -> Result<()> {
         Cmd::Daemon { command } => match command {
             DaemonCmd::Run => hearthloom_daemon::run(home).await?,
             DaemonCmd::Status => {
-                let client = Client::new(home)?;
+                let client = Client::with_url(home, url.clone())?;
                 if client.daemon_running().await {
                     println!("daemon running at {}", client.base_url());
                 } else {
@@ -681,6 +714,9 @@ async fn main() -> Result<()> {
             }
         },
         Cmd::Ingest { source } => {
+            // Ingest reads this machine's files and hands them (or their
+            // paths) to this machine's node; peer sync carries them on.
+            local_only("ingest", &url)?;
             // TCC-gated sources: if this process can't read them, the
             // daemon (which can hold its own Full Disk Access grant) tries.
             if let Some((adapter, path, scope)) = match &source {
@@ -854,7 +890,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Search { query, limit } => {
             let query = query.join(" ");
-            let client = Client::new(home)?;
+            let client = Client::with_url(home, url.clone())?;
             let result = client
                 .get(
                     "/v1/search",
@@ -888,7 +924,7 @@ async fn main() -> Result<()> {
             to,
             entity,
         } => {
-            let client = Client::new(home)?;
+            let client = Client::with_url(home, url.clone())?;
             let mut query: Vec<(&str, String)> = Vec::new();
             if let Some(on) = on {
                 query.push(("on", on));
@@ -910,14 +946,14 @@ async fn main() -> Result<()> {
         }
         Cmd::Entity { name } => {
             let name = name.join(" ");
-            let client = Client::new(home)?;
+            let client = Client::with_url(home, url.clone())?;
             let dossier = client
                 .get(&format!("/v1/entity/{}", urlencode(&name)), &[])
                 .await?;
             print_dossier(&dossier);
         }
         Cmd::Identity { command } => {
-            let client = Client::new(home)?;
+            let client = Client::with_url(home, url.clone())?;
             handle_identity(&client, command).await?;
         }
         Cmd::Scope {
@@ -926,7 +962,7 @@ async fn main() -> Result<()> {
             cascade,
             by_source,
         } => {
-            let client = Client::new(home)?;
+            let client = Client::with_url(home, url.clone())?;
             let mut body = json!({
                 "actor": "human:cli",
                 "scope": scope,
@@ -942,7 +978,7 @@ async fn main() -> Result<()> {
             );
         }
         Cmd::Index => {
-            let client = Client::new(home)?;
+            let client = Client::with_url(home, url.clone())?;
             let result = client.post("/v1/index", &json!({})).await?;
             println!(
                 "wrote {} ({} lines, {} bytes)",
@@ -1004,7 +1040,7 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         Cmd::Events { since, limit } => {
-            let client = Client::new(home)?;
+            let client = Client::with_url(home, url.clone())?;
             let result = client
                 .get(
                     "/v1/events",
@@ -1031,7 +1067,7 @@ async fn main() -> Result<()> {
             let name =
                 suite.unwrap_or_else(|| if ask { "ask-eval" } else { "personal-eval" }.to_string());
             let path = eval::resolve(home.root(), &name, file)?;
-            let client = Client::new(home)?;
+            let client = Client::with_url(home, url.clone())?;
             if ask {
                 eval::run_ask(&client, &path, &only).await?;
             } else {
@@ -1039,7 +1075,7 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Bench { iterations } => {
-            let client = Client::new(home)?;
+            let client = Client::with_url(home, url.clone())?;
             bench::run(&client, iterations).await?;
         }
         Cmd::Query { question, verbose } => {
@@ -1047,7 +1083,7 @@ async fn main() -> Result<()> {
             if question.trim().is_empty() {
                 anyhow::bail!("usage: hearthloom query <question>");
             }
-            let client = Client::new(home)?;
+            let client = Client::with_url(home, url.clone())?;
             eprintln!("(thinking across the brain — this spends tokens…)");
             let result = client
                 .post(
@@ -1081,7 +1117,7 @@ async fn main() -> Result<()> {
             eprintln!("({} tool rounds)", result["rounds"]);
         }
         Cmd::Quarantine { command } => {
-            let client = Client::new(home)?;
+            let client = Client::with_url(home, url.clone())?;
             match command {
                 QuarantineCmd::List => {
                     let result = client.get("/v1/quarantine", &[]).await?;
@@ -1125,16 +1161,16 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Source { command } => {
-            let client = Client::new(home)?;
+            let client = Client::with_url(home, url.clone())?;
             client.ensure_daemon().await?;
             handle_source(&client, command).await?;
         }
         Cmd::Intent { command } => {
-            let client = Client::new(home)?;
+            let client = Client::with_url(home, url.clone())?;
             handle_intent(&client, command).await?;
         }
         Cmd::Consolidate => {
-            let client = Client::new(home)?;
+            let client = Client::with_url(home, url.clone())?;
             let summary = client.post("/v1/consolidate", &json!({})).await?;
             println!(
                 "embedded {} chunks (coverage {}/{})",
@@ -1265,12 +1301,76 @@ async fn main() -> Result<()> {
                 version,
                 registry,
                 yes,
+                grant,
                 upgrade_host,
             } => {
                 let client = Client::with_url(home, url.clone())?;
-                let reg = registry::Registry::connect(registry).await?;
-                reg.install(&client, &name, version, yes, upgrade_host)
-                    .await?;
+                if embers::is_path(&name) {
+                    if version.is_some() {
+                        anyhow::bail!("--version is for registry installs; a package's version is in its manifest");
+                    }
+                    let code = match embers::install_path(
+                        &client,
+                        embers::InstallArgs {
+                            path: &name,
+                            grant,
+                            yes,
+                            upgrade_host,
+                            as_json,
+                            url: url.as_deref(),
+                        },
+                    )
+                    .await
+                    {
+                        Ok(code) => code,
+                        Err(e) if as_json => {
+                            println!("{}", json!({"status": "error", "error": format!("{e:#}")}));
+                            1
+                        }
+                        Err(e) => return Err(e),
+                    };
+                    if code != 0 {
+                        use std::io::Write;
+                        std::io::stdout().flush().ok();
+                        std::process::exit(code);
+                    }
+                    return Ok(());
+                }
+                if !grant.is_empty() {
+                    anyhow::bail!("--grant is for installs from a path; a registry install shows its scopes and asks");
+                }
+                let installed = async {
+                    let reg = registry::Registry::connect(registry).await?;
+                    reg.install(&client, &name, version, yes, upgrade_host)
+                        .await
+                }
+                .await;
+                installed.map_err(|e| {
+                    if std::path::Path::new(&name).exists() {
+                        anyhow::anyhow!(
+                            "{e:#} (to install the folder or file here, write ./{name})"
+                        )
+                    } else {
+                        e
+                    }
+                })?;
+            }
+            EmberCmd::Enable { name } => {
+                let client = Client::with_url(home, url.clone())?;
+                embers::set_enabled(&client, &name, true, as_json).await?;
+            }
+            EmberCmd::Disable { name } => {
+                let client = Client::with_url(home, url.clone())?;
+                embers::set_enabled(&client, &name, false, as_json).await?;
+            }
+            EmberCmd::Config {
+                name,
+                key,
+                value,
+                unset,
+            } => {
+                let client = Client::with_url(home, url.clone())?;
+                embers::config(&client, &name, key, value, unset, as_json).await?;
             }
             EmberCmd::Update {
                 name,
@@ -1284,21 +1384,27 @@ async fn main() -> Result<()> {
             }
             EmberCmd::Uninstall { name, yes } => {
                 let client = Client::with_url(home, url.clone())?;
-                registry::uninstall(&client, &name, yes).await?;
+                registry::uninstall(&client, &name, yes, as_json).await?;
             }
             EmberCmd::Validate { path } => ops::ember_validate(&path)?,
             EmberCmd::Pack { path, out } => ops::ember_pack(&path, out)?,
             EmberCmd::List => {
                 let client = Client::with_url(home, url.clone())?;
-                ops::ember_list(&client).await?;
+                ops::ember_list(&client, as_json).await?;
             }
-            EmberCmd::Logs { name, follow } => ops::ember_logs(&name, follow)?,
+            EmberCmd::Logs { name, follow } => {
+                local_only("ember logs", &url)?;
+                ops::ember_logs(&name, follow)?
+            }
         },
         Cmd::Notify { title, body } => {
             let client = Client::with_url(home, url.clone())?;
             ops::notify(&client, &title, body).await?;
         }
-        Cmd::Logs { follow } => ops::logs(follow)?,
+        Cmd::Logs { follow } => {
+            local_only("logs", &url)?;
+            ops::logs(follow)?
+        }
         Cmd::Completions { shell } => {
             use clap::CommandFactory;
             let shell: clap_complete::Shell = shell
@@ -1772,4 +1878,15 @@ fn urlencode(s: &str) -> String {
             other => format!("%{other:02X}"),
         })
         .collect()
+}
+
+/// Commands that read this machine's files can't act on another node:
+/// say so instead of quietly working on this one.
+fn local_only(what: &str, url: &Option<String>) -> Result<()> {
+    if let Some(url) = url {
+        anyhow::bail!(
+            "{what} works on this machine only, so it can't use --url ({url}): run it on that node's machine"
+        );
+    }
+    Ok(())
 }

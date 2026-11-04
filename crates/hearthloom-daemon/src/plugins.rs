@@ -668,7 +668,9 @@ pub fn install_from_dir(
         && !crate::registry_client::is_verified_stage(src)
     {
         bail!(
-            "hosted instances install only reviewed embers from the registry — {} wasn't staged through it",
+            "this is a hosted node: it installs only embers reviewed through the registry, and \
+             {} wasn't — the node's operator can allow unreviewed embers with \
+             HEARTHLOOM_ALLOW_UNREVIEWED_EMBERS=1",
             manifest.name
         );
     }
@@ -699,7 +701,16 @@ pub fn install_from_dir(
     let existing = state.store.plugin(&name)?;
     let existing_row_present = existing.is_some();
     let (api_key_id, secret) = match existing {
-        Some(row) => (row.api_key_id, None),
+        // An upgrade keeps the key id and secret (the program's key file
+        // stays valid) but the key may do exactly what was granted now:
+        // narrower, or wider when the owner approved it (0.5.84 — before,
+        // the key kept its first scopes whatever the upgrade granted).
+        Some(row) => {
+            state
+                .store
+                .set_api_key_scopes(&actor, &row.api_key_id, &granted)?;
+            (row.api_key_id, None)
+        }
         None => {
             let (row, secret) =
                 state
@@ -952,6 +963,49 @@ pub fn ui_contributions(state: &AppState) -> Result<Value> {
 /// Extract an uploaded package zip into plugins/.staging/<uuid>/ and
 /// return the directory holding the manifest (the zip may nest one
 /// top-level folder). Blocking: call from spawn_blocking.
+/// Zip a package folder in memory (what `hearthloom ember install <folder>`
+/// uploads): every regular file under `dir`, relative paths, deflated.
+/// Hidden files and folders (`.git`, `.DS_Store`) are left out.
+pub fn pack_dir(dir: &Path) -> Result<Vec<u8>> {
+    use std::io::Write;
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<std::io::Result<_>>()?;
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                walk(root, &entry.path(), out)?;
+            } else if kind.is_file() {
+                out.push(entry.path().strip_prefix(root)?.to_path_buf());
+            }
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    walk(dir, dir, &mut files)?;
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for rel in files {
+        let full = dir.join(&rel);
+        #[cfg(unix)]
+        let mode = {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(&full)?.permissions().mode()
+        };
+        #[cfg(not(unix))]
+        let mode = 0o644;
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .unix_permissions(mode);
+        writer.start_file(rel.to_string_lossy().replace('\\', "/"), options)?;
+        writer.write_all(&std::fs::read(&full)?)?;
+    }
+    Ok(writer.finish()?.into_inner())
+}
+
 pub fn stage_zip(state: &AppState, bytes: &[u8]) -> Result<PathBuf> {
     let staging = plugins_root(state)
         .join(".staging")
@@ -1322,6 +1376,67 @@ mod handshake_warning_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 0.5.84: before, an upgrade kept the key's FIRST scopes whatever it
+    /// granted — a narrower grant didn't narrow and a wider one didn't widen.
+    #[test]
+    fn test_an_upgrade_gives_the_kept_key_exactly_what_was_granted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::paths::Home::at(tmp.path());
+        home.init().unwrap();
+        let state = AppState {
+            store: std::sync::Arc::new(
+                hearthloom_core::store::Store::open(&home.db_path()).unwrap(),
+            ),
+            home,
+            embedder: None,
+            llm: None,
+            auth_locked: Default::default(),
+            bus: Default::default(),
+            killswitch: Default::default(),
+            running: Default::default(),
+        };
+        let package = |version: &str, scopes: &[&str]| {
+            let dir = tmp.path().join(format!("pkg-{version}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("hearthember.json"),
+                json!({"protocol": 1, "name": "scope-test", "version": version, "scopes": scopes})
+                    .to_string(),
+            )
+            .unwrap();
+            dir
+        };
+        let key_scopes = |id: &str| {
+            state
+                .store
+                .list_api_keys()
+                .unwrap()
+                .into_iter()
+                .find(|k| k.id == id)
+                .map(|k| k.scopes)
+                .unwrap()
+        };
+        let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        let (first, secret) =
+            install_from_dir(&state, &package("1.0.0", &["read"]), Some(v(&["read"]))).unwrap();
+        assert!(secret.is_some(), "a first install mints a key");
+        assert_eq!(key_scopes(&first.api_key_id), v(&["read"]));
+
+        let (wider, secret) = install_from_dir(
+            &state,
+            &package("1.1.0", &["read", "notify"]),
+            Some(v(&["read", "notify"])),
+        )
+        .unwrap();
+        assert!(secret.is_none(), "an upgrade keeps the key");
+        assert_eq!(wider.api_key_id, first.api_key_id);
+        assert_eq!(key_scopes(&first.api_key_id), v(&["read", "notify"]));
+
+        install_from_dir(&state, &package("1.2.0", &["notify"]), Some(v(&["notify"]))).unwrap();
+        assert_eq!(key_scopes(&first.api_key_id), v(&["notify"]));
+    }
 
     #[test]
     fn test_version_satisfies() {

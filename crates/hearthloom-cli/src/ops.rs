@@ -1073,21 +1073,21 @@ pub fn ember_pack(dir: &std::path::Path, out: Option<std::path::PathBuf>) -> Res
     });
     let out_abs = std::fs::canonicalize(out.parent().unwrap_or(std::path::Path::new(".")))?
         .join(out.file_name().unwrap_or_default());
+    // the same packer `ember install <folder>` uses: dotfiles left out,
+    // file modes kept, no `zip` tool needed (and not last run's zip)
     let _ = std::fs::remove_file(&out_abs);
-    let status = std::process::Command::new("zip")
-        .args(["-r", "-q", out_abs.to_str().unwrap_or_default(), "."])
-        .current_dir(dir)
-        .status()
-        .context("running zip")?;
-    if !status.success() {
-        bail!("zip failed");
-    }
+    let bytes = hearthloom_daemon::plugins::pack_dir(dir)?;
+    std::fs::write(&out_abs, bytes).with_context(|| format!("writing {}", out_abs.display()))?;
     println!("✓ {}", out_abs.display());
     Ok(())
 }
 
-pub async fn ember_list(client: &Client) -> Result<()> {
+pub async fn ember_list(client: &Client, as_json: bool) -> Result<()> {
     let res = client.get("/v1/plugins", &[]).await?;
+    if as_json {
+        println!("{res}");
+        return Ok(());
+    }
     let list = res
         .get("plugins")
         .and_then(|v| v.as_array())

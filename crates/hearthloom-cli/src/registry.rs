@@ -212,7 +212,7 @@ impl Registry {
             // remote node: IT stages and verifies (its cloud policy is
             // enforced server-side); we show scopes and approve.
             let staged = self.remote_stage(client, name, version).await?;
-            self.ensure_host(
+            Self::ensure_host(
                 client,
                 staged.get("requires_host").and_then(|v| v.as_str()),
                 upgrade_host,
@@ -233,8 +233,7 @@ impl Registry {
                 .to_string(),
         };
         let v = self.fetch_and_verify(name, &version).await?;
-        self.ensure_host(client, v.requires_host.as_deref(), upgrade_host)
-            .await?;
+        Self::ensure_host(client, v.requires_host.as_deref(), upgrade_host).await?;
         println!("{name} {version} by {}", v.publisher);
         println!(
             "  scopes it will hold: {}",
@@ -534,12 +533,7 @@ impl Registry {
     /// If the ember needs a newer hearthloom than the target runs,
     /// either upgrade the host first (--upgrade-host) or refuse with
     /// guidance. `req` is the ember's `requires.host` range.
-    async fn ensure_host(
-        &self,
-        client: &Client,
-        req: Option<&str>,
-        upgrade_host: bool,
-    ) -> Result<()> {
+    pub async fn ensure_host(client: &Client, req: Option<&str>, upgrade_host: bool) -> Result<()> {
         let Some(req) = req.filter(|r| !r.trim().is_empty()) else {
             return Ok(());
         };
@@ -557,7 +551,7 @@ impl Registry {
                 "this ember needs hearthloom {req} but the node is {current} — \n                   re-run with --upgrade-host, or `hearthloom upgrade` first"
             );
         }
-        println!("this ember needs hearthloom {req}; upgrading the host from {current}…");
+        eprintln!("this ember needs hearthloom {req}; upgrading the host from {current}…");
         crate::ops::upgrade(client, false).await?;
         // wait for the daemon to come back on the new version
         for _ in 0..60 {
@@ -565,7 +559,7 @@ impl Registry {
             if let Ok(h) = client.get("/health", &[]).await {
                 let now = h.get("version").and_then(|v| v.as_str()).unwrap_or("");
                 if version_satisfies(now, req) {
-                    println!("host upgraded to {now}; continuing the install…");
+                    eprintln!("host upgraded to {now}; continuing the install…");
                     return Ok(());
                 }
             }
@@ -735,8 +729,12 @@ fn semver_gt(a: &str, b: &str) -> bool {
     false
 }
 
-pub async fn uninstall(client: &Client, name: &str, yes: bool) -> Result<()> {
+pub async fn uninstall(client: &Client, name: &str, yes: bool, as_json: bool) -> Result<()> {
     if !yes {
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() {
+            bail!("uninstalling needs --yes when no one is at a terminal to confirm");
+        }
         use std::io::Write;
         eprint!("put out {name}? Its key is revoked and its program stops; its data folder stays. [y/N] ");
         std::io::stderr().flush().ok();
@@ -747,6 +745,13 @@ pub async fn uninstall(client: &Client, name: &str, yes: bool) -> Result<()> {
         }
     }
     let res = client.delete(&format!("/v1/plugins/{name}"), &[]).await?;
+    if as_json {
+        println!(
+            "{}",
+            json!({"status": "uninstalled", "name": name, "data_dir_kept": res.get("data_dir_kept")})
+        );
+        return Ok(());
+    }
     println!(
         "✓ uninstalled — data kept at {}",
         res.get("data_dir_kept")
