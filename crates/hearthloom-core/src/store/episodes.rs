@@ -181,7 +181,146 @@ pub struct EpisodeComposition {
     pub scopes: Vec<(String, i64)>,
 }
 
+/// One source's share of the record: what BRAIN.md's "## Sources" and
+/// Ask's episode inventory say exists (0.5.82 — a small source used to
+/// vanish from Ask's top-40 list on a large record).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceShare {
+    pub source: String,
+    pub episodes: i64,
+    /// Kinds with their counts, largest first.
+    pub kinds: Vec<(String, i64)>,
+    /// First and last event dates (YYYY-MM-DD), when known.
+    pub first: Option<String>,
+    pub last: Option<String>,
+}
+
+/// Whether a source or kind name may be printed in a prompt or BRAIN.md.
+/// Names are chosen by whoever ingests (an ember, an importer): only short
+/// plain identifiers are shown; anything else is counted, never printed.
+pub fn printable_name(name: &str) -> bool {
+    (1..=40).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b))
+}
+
+/// One line per source, largest first, for BRAIN.md and Ask:
+/// `- minidash: 33 episodes (minidash_day 16, minidash_incident 13, …), 2026-10-18 → 2026-11-02`.
+/// At most `max_sources` lines and `max_kinds` kinds per line, each cap
+/// saying what it left out; unprintable names are counted, never shown.
+pub fn source_lines(shares: &[SourceShare], max_sources: usize, max_kinds: usize) -> Vec<String> {
+    let (shown, hidden): (Vec<&SourceShare>, Vec<&SourceShare>) =
+        shares.iter().partition(|s| printable_name(&s.source));
+    let mut lines: Vec<String> = shown
+        .iter()
+        .take(max_sources)
+        .map(|share| {
+            let printable: Vec<&(String, i64)> = share
+                .kinds
+                .iter()
+                .filter(|(k, _)| printable_name(k))
+                .collect();
+            let mut kinds: Vec<String> = printable
+                .iter()
+                .take(max_kinds)
+                .map(|(k, n)| format!("{k} {n}"))
+                .collect();
+            let left = share.kinds.len() - kinds.len();
+            if left > 0 {
+                kinds.push(format!("+{left} more"));
+            }
+            let span = match (&share.first, &share.last) {
+                (Some(a), Some(b)) if a == b => format!(", {a}"),
+                (Some(a), Some(b)) => format!(", {a} → {b}"),
+                _ => String::new(),
+            };
+            format!(
+                "- {}: {} episode{} ({}){span}",
+                share.source,
+                share.episodes,
+                if share.episodes == 1 { "" } else { "s" },
+                kinds.join(", ")
+            )
+        })
+        .collect();
+    let more: Vec<&&SourceShare> = shown.iter().skip(max_sources).collect();
+    if !more.is_empty() {
+        let n: i64 = more.iter().map(|s| s.episodes).sum();
+        lines.push(format!("- and {} more sources ({n} episodes)", more.len()));
+    }
+    if !hidden.is_empty() {
+        let n: i64 = hidden.iter().map(|s| s.episodes).sum();
+        lines.push(format!(
+            "- other sources with unusual names: {} ({n} episodes)",
+            hidden.len()
+        ));
+    }
+    lines
+}
+
 impl Store {
+    /// Live episodes per source and kind (retired and replaced ones left
+    /// out). `public_only`: private excluded whatever the vault says (what
+    /// BRAIN.md needs); otherwise the caller's own view (`scope_guard`, what
+    /// Ask needs). Largest source first, then by name: byte-stable.
+    pub fn source_shares(&self, public_only: bool) -> Result<Vec<SourceShare>> {
+        let guard = if public_only {
+            " AND scope != 'private'".to_string()
+        } else {
+            self.scope_guard("scope")
+        };
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT source, kind, COUNT(*), MIN(substr(event_time, 1, 10)),
+                    MAX(substr(event_time, 1, 10))
+             FROM episodes WHERE superseded_by IS NULL{guard}
+             GROUP BY source, kind"
+        ))?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+            ))
+        })?;
+        let mut by_source: std::collections::BTreeMap<String, SourceShare> = Default::default();
+        for row in rows {
+            let (source, kind, n, first, last) = row?;
+            let share = by_source
+                .entry(source.clone())
+                .or_insert_with(|| SourceShare {
+                    source,
+                    episodes: 0,
+                    kinds: Vec::new(),
+                    first: None,
+                    last: None,
+                });
+            share.episodes += n;
+            share.kinds.push((kind, n));
+            if first.is_some() && (share.first.is_none() || first < share.first) {
+                share.first = first;
+            }
+            if last.is_some() && last > share.last {
+                share.last = last;
+            }
+        }
+        let mut shares: Vec<SourceShare> = by_source.into_values().collect();
+        for share in &mut shares {
+            share
+                .kinds
+                .sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        }
+        shares.sort_by(|a, b| {
+            b.episodes
+                .cmp(&a.episodes)
+                .then_with(|| a.source.cmp(&b.source))
+        });
+        Ok(shares)
+    }
+
     /// The first of these episodes whose words aren't the owner's
     /// (`trust != 'self'`), if any. A provenance check over ids the caller
     /// has already been shown, so it ignores the vault and area filters:

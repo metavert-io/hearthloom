@@ -130,6 +130,37 @@ fn yes() -> bool {
     true
 }
 
+/// An ember's own revision (0.5.82): a `<base>#r<n>` ref written by
+/// `plugin:<name>` revises — supersedes — only episodes that same writer
+/// wrote. Returns the base when the ref is a revision and the writer is a
+/// plugin. (The record's own revisioned sources — photos, visits,
+/// contacts, trips — keep their writer-agnostic rule in `ingest_apply`.)
+pub(crate) fn plugin_revision<'a>(source_ref: &'a str, writer: Option<&str>) -> Option<&'a str> {
+    let (base, rev) = source_ref.rsplit_once("#r")?;
+    (!base.is_empty()
+        && !rev.is_empty()
+        && rev.chars().all(|c| c.is_ascii_digit())
+        && writer.is_some_and(|w| w.starts_with("plugin:")))
+    .then_some(base)
+}
+
+/// SQL: the `episodes` row in scope was first written by `?{n}` — its
+/// recorded origin says so, or (written here before v61, so unrecorded)
+/// its own actor does. A peer-sent row with no recorded origin matches
+/// nothing: fail closed.
+pub(crate) fn same_writer_sql(n: usize) -> String {
+    format!(
+        "(id IN (SELECT episode_id FROM episode_origin WHERE writer = ?{n})
+          OR (id NOT IN (SELECT episode_id FROM episode_origin) AND actor = ?{n}))"
+    )
+}
+
+/// SQL: the row's ref is `?{n}` itself or one of its revisions — matched
+/// exactly, never with LIKE (an ember-chosen `_` or `%` must not widen it).
+pub(crate) fn base_or_revision_sql(n: usize) -> String {
+    format!("(source_ref = ?{n} OR substr(source_ref, 1, length(?{n}) + 2) = ?{n} || '#r')")
+}
+
 /// This node's id — the one the node list knows it by. Created on first
 /// use (the daemon's `agents::node_id` reads it through here).
 pub(crate) fn node_id_on(conn: &Connection) -> Result<String> {

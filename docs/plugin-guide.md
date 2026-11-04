@@ -280,6 +280,35 @@ POST /v1/ingest
   identity resolution.
 - Episodes you ingest replicate to the user's peer node through the
   normal pipeline automatically.
+- Your source and kind names appear in what Ask is told the record holds
+  (BRAIN.md's "## Sources" and Ask's episode inventory) **only if they are
+  short plain identifiers**: lowercase letters, digits, `_ . -`, at most 40
+  characters (`minidash`, `minidash_day`). Anything else is counted as
+  "other sources" but never printed. So name them plainly — that is what
+  tells Ask your source exists and what kinds of memory it holds.
+
+#### Revising your own episodes (host 0.5.82 or later)
+
+Episodes are append-only, so to improve one — better wording, a fuller
+day — send a **revision**: the same `source_ref` with `#r<n>` appended,
+`n` being digits (`home:day:2026-10-20#r2`, later `#r3`). The newest
+revision supersedes the base and every lower revision: they stay in the
+record (the owner's forensic view shows them as replaced) but leave
+search, Ask, the timeline and everything else.
+
+- **Only your own episodes.** A revision supersedes only episodes written
+  by your ember — the receiver-stamped `plugin:<name>` writer. It can't
+  touch anything the owner, another ember, an importer or anyone else
+  wrote, even under the same source name and ref.
+- **It converges everywhere.** Each of the owner's nodes applies the same
+  rule when the revision arrives by sync, using the writer recorded with
+  each episode (provenance, host 0.5.78+). Episodes your ember wrote
+  before the owner's nodes ran 0.5.78 may have no recorded writer on a
+  peer; a revision then leaves the old copy there (it fails closed).
+- **Retired stays retired.** If the owner retired the episode, its
+  revision arrives retired too.
+- Set `"requires": {"host": ">=0.5.82"}` in your manifest if you rely on
+  this; older hosts keep both copies.
 
 ## Replication (`"sync": "mirror"`)
 

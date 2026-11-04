@@ -154,7 +154,12 @@ photos after a second device syncs, a health day after a later export),
 the replacement is minted under a versioned ref (`<base>#r2`) and the
 older revisions are marked superseded. Because ids are deterministic,
 two nodes minting the same revision converge on one row, and the marking
-is derived from the ref on receipt, so it syncs with no wire change.
+is derived from the ref on receipt, so it syncs with no wire change. Only
+the record's own revisioned sources (photos, visits, contacts, trips) do
+this for any writer; an ember's `#r<n>` (0.5.82) supersedes only what that
+same ember wrote, judged by each episode's recorded writer (its origin),
+so it too converges on every node and can never hide anyone else's
+record.
 
 **Retirement** (schema v59) is supersession by nothing: the person takes
 a memory, or a whole source, out of the record (a phishing mail, a bad
@@ -348,8 +353,13 @@ A laptop paired with a healthy, key-holding tenant delegates the LLM
 passes to it and runs only the local ones.
 
 `BRAIN.md` is regenerated at the end: a byte-stable index of at most 200
-lines (self-model, top entities, recent activity, a schema cheat sheet)
-that agents load at session start.
+lines (self-model, what each source holds, top entities, recent activity,
+a schema cheat sheet) that agents load at session start. "## Sources"
+(0.5.82) gives each source's live, non-private episode count, its kinds
+and its date span (`Store::source_shares` + `source_lines`; names printed
+only when they're plain identifiers). Ask gets the same per-source lines,
+in the asker's own vault view, as its episode inventory — every source up
+to 60, so a small source on a large record is never left out.
 
 ## 7. The LLM layer
 

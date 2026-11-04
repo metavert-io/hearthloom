@@ -372,32 +372,19 @@ fn source_inventory(state: &AppState) -> String {
 }
 
 fn source_inventory_uncached(state: &AppState) -> String {
-    let sql = "SELECT source, kind, COUNT(*), substr(MIN(event_time),1,10), \
-               substr(MAX(event_time),1,10) FROM episodes \
-               WHERE superseded_by IS NULL \
-               GROUP BY source, kind ORDER BY 3 DESC";
-    let Ok((_, rows)) = state.store.read_query(sql, 40) else {
+    // One line per source in the asker's own view, every source up to 60
+    // (0.5.82: the old top-40 source/kind pairs dropped a small source —
+    // a 33-episode ember — on a large record). Names are printed only when
+    // they are plain short identifiers: whoever ingests chooses them, and
+    // this sits in the system prompt.
+    let Ok(shares) = state.store.source_shares(false) else {
         return String::new();
     };
-    let cell = |v: &Value| match v {
-        Value::String(s) => s.clone(),
-        Value::Null => "?".into(),
-        other => other.to_string(),
-    };
-    rows.iter()
-        .map(|r| {
-            format!(
-                "- {}/{}: {} episodes, {} → {}",
-                cell(&r[0]),
-                cell(&r[1]),
-                cell(&r[2]),
-                cell(&r[3]),
-                cell(&r[4])
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    hearthloom_core::store::source_lines(&shares, INVENTORY_SOURCES, INVENTORY_KINDS).join("\n")
 }
+
+const INVENTORY_SOURCES: usize = 60;
+const INVENTORY_KINDS: usize = 12;
 
 /// Execute one tool call against the store. Returns a preview string.
 fn run_tool(state: &AppState, tool: &str, args: &Value) -> Result<String> {
@@ -1457,6 +1444,7 @@ fn brain_for_ask(brain: &str) -> String {
     const SECTIONS: &[&str] = &[
         "## Self-model",
         "## Store",
+        "## Sources",
         "## Top entities",
         "## Recent activity",
         "## Schema cheat-sheet",
@@ -1471,7 +1459,12 @@ fn brain_for_ask(brain: &str) -> String {
             // Recent titles and top entity names are other people's text
             // (a calendar title, a sender's display name): Ask reaches
             // them through its tools, fenced and taint-tracked.
-            skipping = matches!(line.trim_end(), "## Recent activity" | "## Top entities");
+            // "## Sources" is skipped too: the episode inventory above
+            // carries the same lines in the asker's own vault view.
+            skipping = matches!(
+                line.trim_end(),
+                "## Recent activity" | "## Top entities" | "## Sources"
+            );
         } else if line.starts_with("_From the ") && line.contains("consolidation digest") {
             skipping = true; // up to the next section header
         } else if line.starts_with("_No consolidation digest yet") {
@@ -1755,7 +1748,7 @@ pub async fn run_query(
     // first reads it at a fraction of the input price. Anything volatile
     // — today's date, the question — belongs in `conversation`.
     let system = format!(
-        "{}\n\nEpisode inventory (source/kind: count, span):\n{inventory}{virtual_section}{network_section}{agents_section}\n\n--- BRAIN.md (current index) ---\n{brain}",
+        "{}\n\nEpisode inventory (source: episodes (kind count, …), first → last date):\n{inventory}{virtual_section}{network_section}{agents_section}\n\n--- BRAIN.md (current index) ---\n{brain}",
         system_prompt()
     );
 
@@ -2158,7 +2151,10 @@ mod tests {
             running: Default::default(),
         };
         let inventory = source_inventory_uncached(&state);
-        assert!(inventory.contains("git/commit"), "got: {inventory}");
+        assert!(
+            inventory.contains("- git: 1 episode (commit 1)"),
+            "got: {inventory}"
+        );
         assert!(inventory.contains("2026-07-01"), "got: {inventory}");
     }
 

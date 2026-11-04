@@ -782,6 +782,7 @@ impl ArrivalRules {
         episode_id: &str,
         source: &str,
         source_ref: &str,
+        writer: Option<&str>,
     ) -> Result<Arrival> {
         if self.live.is_empty() && self.undone.is_empty() {
             return Ok(Arrival::Live);
@@ -794,21 +795,39 @@ impl ArrivalRules {
             return Ok(Arrival::Retire(rid.clone()));
         }
         // A fuller revision of a retired memory (`<base>#r<n>` — photos
-        // days, visits, contact cards) stays retired: the person retired
-        // that day / visit / card, not one copy of it.
-        if let Some((base, _)) = source_ref
-            .rsplit_once("#r")
-            .filter(|(_, n)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
-            .filter(|_| super::ingest_apply::REVISIONED_SOURCES.contains(&source))
-        {
-            let mut stmt = conn.prepare(
-                "SELECT superseded_by FROM episodes /* all-episodes: is an earlier revision retired? */
-                 WHERE source = ?1 AND (source_ref = ?2 OR source_ref LIKE ?2 || '#r%')
-                   AND superseded_by LIKE 'retired:%' AND id != ?3",
-            )?;
-            let states: Vec<String> = stmt
-                .query_map(params![source, base, episode_id], |r| r.get(0))?
-                .collect::<std::result::Result<_, _>>()?;
+        // days, visits, contact cards; or an ember's revision of what it
+        // wrote itself, 0.5.82) stays retired: the person retired that
+        // day / visit / card / memory, not one copy of it.
+        let revisioned = super::ingest_apply::REVISIONED_SOURCES.contains(&source);
+        let base = if revisioned {
+            source_ref
+                .rsplit_once("#r")
+                .filter(|(_, n)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+                .map(|(base, _)| base)
+        } else {
+            super::provenance::plugin_revision(source_ref, writer)
+        };
+        if let Some(base) = base {
+            let states: Vec<String> = if revisioned {
+                let mut stmt = conn.prepare(
+                    "SELECT superseded_by FROM episodes /* all-episodes: is an earlier revision retired? */
+                     WHERE source = ?1 AND (source_ref = ?2 OR source_ref LIKE ?2 || '#r%')
+                       AND superseded_by LIKE 'retired:%' AND id != ?3",
+                )?;
+                let rows = stmt.query_map(params![source, base, episode_id], |r| r.get(0))?;
+                rows.collect::<std::result::Result<_, _>>()?
+            } else {
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT superseded_by FROM episodes /* all-episodes: is an earlier revision retired? */
+                     WHERE source = ?1 AND {} AND superseded_by LIKE 'retired:%' AND id != ?3
+                       AND {}",
+                    super::provenance::base_or_revision_sql(2),
+                    super::provenance::same_writer_sql(4)
+                ))?;
+                let rows =
+                    stmt.query_map(params![source, base, episode_id, writer], |r| r.get(0))?;
+                rows.collect::<std::result::Result<_, _>>()?
+            };
             if let Some(rid) = states
                 .iter()
                 .filter_map(|s| s.strip_prefix(RETIRED_PREFIX))

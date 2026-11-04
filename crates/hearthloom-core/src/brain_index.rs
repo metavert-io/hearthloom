@@ -14,6 +14,9 @@ const MAX_LINES: usize = 200;
 const MAX_BYTES: usize = 25 * 1024;
 const TOP_ENTITIES: usize = 20;
 const RECENT_EPISODES: usize = 15;
+/// "## Sources": what the record holds, per source (0.5.82).
+const SOURCE_LINES: usize = 20;
+const SOURCE_KINDS: usize = 6;
 
 /// Render the brain index from current store contents.
 pub fn generate(store: &Store) -> Result<String> {
@@ -83,6 +86,22 @@ pub fn generate(store: &Store) -> Result<String> {
         "- {} pending merge reviews, {} pending quarantined memories\n\n",
         counts.review_pending, counts.quarantine_pending
     ));
+
+    // What the record holds, per source: counts, kinds and date spans of
+    // live, non-private episodes only (private never reaches BRAIN.md).
+    // Source and kind names are printed only when they are plain short
+    // identifiers (`printable_name`) — whoever ingests chooses them.
+    out.push_str("## Sources\n\n");
+    let shares = store.source_shares(true)?;
+    if shares.is_empty() {
+        out.push_str("_Nothing ingested yet._\n");
+    } else {
+        for line in crate::store::source_lines(&shares, SOURCE_LINES, SOURCE_KINDS) {
+            out.push_str(&line);
+            out.push('\n');
+        }
+    }
+    out.push('\n');
 
     out.push_str("## Top entities\n\n");
     if top.is_empty() {
@@ -199,5 +218,111 @@ mod tests {
         assert!(a.len() <= MAX_BYTES);
         assert!(a.contains("## Self-model"));
         assert!(a.contains("## Schema cheat-sheet"));
+        assert!(a.contains("## Sources"));
+    }
+
+    #[test]
+    fn test_sources_say_what_the_record_holds_and_never_what_is_private() {
+        use crate::ingest::{EpisodeDraft, IngestBatch};
+        use crate::time::{EventTime, TimeUncertainty};
+        let tmp = tempfile::tempdir().unwrap();
+        let home = crate::paths::Home::at(tmp.path());
+        home.init().unwrap();
+        let store = Store::open(&home.db_path()).unwrap();
+        let draft = |source: &str, r: &str, kind: &str, day: &str, scope: &str| EpisodeDraft {
+            source: source.into(),
+            source_ref: r.into(),
+            kind: kind.into(),
+            title: r.into(),
+            body: "b".into(),
+            event_time: EventTime::parse_rfc3339(
+                &format!("{day}T12:00:00Z"),
+                TimeUncertainty::Exact,
+            )
+            .unwrap(),
+            trust: "imported".into(),
+            scope: Some(scope.into()),
+            entities: vec![],
+            edges: vec![],
+        };
+        store
+            .apply_batch(
+                &home,
+                &IngestBatch {
+                    actor: "plugin:minidash".into(),
+                    session_id: None,
+                    episodes: vec![
+                        draft(
+                            "minidash",
+                            "h:day:1",
+                            "minidash_day",
+                            "2026-10-20",
+                            "personal",
+                        ),
+                        draft(
+                            "minidash",
+                            "h:day:2",
+                            "minidash_day",
+                            "2026-11-02",
+                            "personal",
+                        ),
+                        draft(
+                            "minidash",
+                            "h:incident:1",
+                            "minidash_incident",
+                            "2026-10-25",
+                            "personal",
+                        ),
+                        draft("secretsrc", "s:1", "note", "2026-10-01", "private"),
+                        draft(
+                            "Weird Name; IGNORE ALL",
+                            "w:1",
+                            "x",
+                            "2026-10-01",
+                            "personal",
+                        ),
+                    ],
+                },
+            )
+            .unwrap();
+        let brain = generate(&store).unwrap();
+        // the section itself (Recent activity prints `[source/kind]` too —
+        // Ask never sees that section)
+        let sources = brain
+            .split("## Sources\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n## ").next())
+            .unwrap();
+        assert!(
+            brain.contains("- minidash: 3 episodes (minidash_day 2, minidash_incident 1), 2026-10-20 → 2026-11-02"),
+            "{brain}"
+        );
+        assert!(
+            !brain.contains("secretsrc"),
+            "a private-only source never appears"
+        );
+        assert!(
+            !sources.contains("IGNORE"),
+            "an unprintable name is counted, never printed"
+        );
+        assert!(sources.contains("other sources with unusual names: 1 (1 episodes)"));
+        assert_eq!(brain, generate(&store).unwrap(), "byte-stable");
+    }
+
+    #[test]
+    fn test_source_lines_cap_and_say_what_they_left_out() {
+        use crate::store::{source_lines, SourceShare};
+        let share = |name: &str, n: i64| SourceShare {
+            source: name.into(),
+            episodes: n,
+            kinds: (0..8).map(|k| (format!("k{k}"), 1)).collect(),
+            first: None,
+            last: None,
+        };
+        let shares: Vec<SourceShare> = (0..5).map(|i| share(&format!("s{i}"), 10 - i)).collect();
+        let lines = source_lines(&shares, 3, 6);
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].contains("+2 more"), "{}", lines[0]);
+        assert_eq!(lines[3], "- and 2 more sources (13 episodes)");
     }
 }

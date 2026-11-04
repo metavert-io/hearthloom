@@ -1038,9 +1038,23 @@ the design log 2026-07-14.
   modal can open the exact entity past a case-collision.
 - Raw episode content is never discarded after extraction.
 - **`#r<n>` SUPERSEDES ONLY FOR `REVISIONED_SOURCES`** (ingest_apply.rs:
-  photos, visits, contacts — 0.5.66). A source whose `source_ref` a
+  photos, visits, contacts, trips — 0.5.66). A source whose `source_ref` a
   third party can choose (mail Message-ID, calendar UID, a URL) must
-  never be added: it lets a sender hide a known record.
+  never be added: it lets a sender hide a known record. **The one other
+  path (0.5.82): an ember revises only what IT wrote** —
+  `provenance::plugin_revision` + `same_writer_sql`: a `#r<n>` whose writer
+  is `plugin:<name>` (the batch actor here; the sent origin's writer on a
+  peer) supersedes only base/lower revisions whose RECORDED writer
+  (`episode_origin.writer`, or an unrecorded local row's own actor) is the
+  same. Unknown writer → nothing (fail closed). The base is matched
+  exactly (`base_or_revision_sql`), never with LIKE — the ember chooses
+  the ref. ArrivalRules applies the same check. Never widen this to other
+  writers: the owner, importers and other embers write under names an
+  ember can also use.
+- **Source and kind names in prompts and BRAIN.md go through
+  `printable_name`** (`[a-z0-9_.-]{1,40}`): whoever ingests chooses them,
+  and Ask's inventory sits in the system prompt. `source_lines` counts an
+  unprintable one, never prints it.
 - **THE SUPERSESSION PATTERN (v47 — reuse this for any "append-only
   episode needs a fuller replacement" situation).** Episodes stay
   append-only in CONTENT; `superseded_by` is lifecycle METADATA (the

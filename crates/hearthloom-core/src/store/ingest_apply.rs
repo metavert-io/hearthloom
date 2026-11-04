@@ -175,6 +175,40 @@ impl Store {
             // UID — both chosen by the SENDER — so honouring the suffix
             // everywhere let anyone hide a known message or event by
             // sending one whose id ended in `#r2`.
+            // Who wrote this draft: the batch's actor here, or — synced —
+            // the writer its sender recorded (provenance, v61).
+            let writer: Option<String> = if actor.actor.starts_with("peer:") {
+                origins
+                    .get(&(draft.source.as_str(), draft.source_ref.as_str()))
+                    .and_then(|o| o.writer.clone())
+            } else {
+                Some(actor.actor.clone())
+            };
+            // An ember revises what IT wrote, never anyone else's (0.5.82):
+            // a `<base>#r<n>` from `plugin:<name>` supersedes the base and
+            // lower revisions only where their recorded writer is the same.
+            // Derived from the ref and the recorded origin, so every node
+            // converges when the revision arrives by sync.
+            if let Some(base) = (!REVISIONED_SOURCES.contains(&draft.source.as_str()))
+                .then(|| super::provenance::plugin_revision(&draft.source_ref, writer.as_deref()))
+                .flatten()
+            {
+                tx.execute(
+                    &format!(
+                        "UPDATE episodes SET superseded_by = ?1
+                         WHERE source = ?2 AND superseded_by IS NULL AND id != ?1
+                           AND {} AND {}",
+                        super::provenance::base_or_revision_sql(3),
+                        super::provenance::same_writer_sql(4)
+                    ),
+                    rusqlite::params![episode_id, draft.source, base, writer],
+                )?;
+                tx.execute(
+                    "DELETE FROM location_points WHERE episode_id IN (
+                         SELECT id FROM episodes WHERE superseded_by = ?1)",
+                    [&episode_id],
+                )?;
+            }
             if let Some((base, _rev)) = draft
                 .source_ref
                 .rsplit_once("#r")
@@ -193,7 +227,13 @@ impl Store {
                     [&episode_id],
                 )?;
             }
-            let arrival = arrivals.covering(&tx, &episode_id, &draft.source, &draft.source_ref)?;
+            let arrival = arrivals.covering(
+                &tx,
+                &episode_id,
+                &draft.source,
+                &draft.source_ref,
+                writer.as_deref(),
+            )?;
             record_mutation(
                 &tx,
                 &actor,
@@ -329,6 +369,169 @@ mod tests {
         }
     }
 
+    fn ember(source_ref: &str) -> EpisodeDraft {
+        EpisodeDraft {
+            source: "minidash".into(),
+            kind: "minidash_day".into(),
+            title: format!("day {source_ref}"),
+            trust: "imported".into(),
+            entities: vec![],
+            edges: vec![],
+            ..draft(source_ref)
+        }
+    }
+
+    fn apply_as(store: &Store, home: &Home, actor: &str, drafts: Vec<EpisodeDraft>) {
+        store
+            .apply_batch(
+                home,
+                &IngestBatch {
+                    actor: actor.into(),
+                    session_id: None,
+                    episodes: drafts,
+                },
+            )
+            .unwrap();
+    }
+
+    fn superseded_ref(store: &Store, source_ref: &str) -> Option<String> {
+        store
+            .lock()
+            .query_row(
+                "SELECT superseded_by FROM episodes WHERE source = 'minidash' AND source_ref = ?1",
+                [source_ref],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn test_an_ember_revises_only_what_it_wrote_itself_and_peers_agree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mini_home = Home::at(tmp.path().join("mini"));
+        let cloud_home = Home::at(tmp.path().join("cloud"));
+        mini_home.init().unwrap();
+        cloud_home.init().unwrap();
+        let mini = Store::open(&mini_home.db_path()).unwrap();
+        let cloud = Store::open(&cloud_home.db_path()).unwrap();
+        let sync = |after: i64| -> i64 {
+            let page = mini
+                .sync_export_for(&mini_home, after, 100, Some("cloud"))
+                .unwrap();
+            cloud
+                .apply_batch_from(
+                    &cloud_home,
+                    &IngestBatch {
+                        actor: "peer:mini".into(),
+                        session_id: None,
+                        episodes: page.episodes,
+                    },
+                    &page.origins,
+                )
+                .unwrap();
+            page.next_cursor
+        };
+
+        // the ember's own days, and others' writing under the same source
+        apply_as(
+            &mini,
+            &mini_home,
+            "plugin:minidash",
+            vec![ember("h:day:1"), ember("h:day:2"), ember("x_y")],
+        );
+        apply_as(&mini, &mini_home, "plugin:other", vec![ember("h:other:1")]);
+        apply_as(
+            &mini,
+            &mini_home,
+            "human:dashboard",
+            vec![ember("h:mine:1")],
+        );
+        apply_as(&mini, &mini_home, "plugin:minidash", vec![ember("xzy")]);
+        let cursor = sync(0);
+
+        // its revision of its own day; its "revisions" of others' writing;
+        // another ember's revision of its day; a LIKE-shaped base
+        apply_as(
+            &mini,
+            &mini_home,
+            "plugin:minidash",
+            vec![ember("h:day:1#r2")],
+        );
+        apply_as(
+            &mini,
+            &mini_home,
+            "plugin:minidash",
+            vec![ember("h:other:1#r2"), ember("h:mine:1#r2")],
+        );
+        apply_as(&mini, &mini_home, "plugin:other", vec![ember("h:day:2#r2")]);
+        apply_as(&mini, &mini_home, "plugin:minidash", vec![ember("x_y#r2")]);
+        sync(cursor);
+
+        for (store, node) in [
+            (&mini, "the ingesting node"),
+            (&cloud, "the peer, after sync"),
+        ] {
+            let revision = crate::ids::episode_id("minidash", "h:day:1#r2");
+            assert_eq!(superseded_ref(store, "h:day:1"), Some(revision), "{node}");
+            assert_eq!(superseded_ref(store, "h:day:1#r2"), None, "{node}");
+            assert_eq!(
+                superseded_ref(store, "h:other:1"),
+                None,
+                "{node}: another ember's"
+            );
+            assert_eq!(
+                superseded_ref(store, "h:mine:1"),
+                None,
+                "{node}: the owner's"
+            );
+            assert_eq!(
+                superseded_ref(store, "h:day:2"),
+                None,
+                "{node}: a different ember's revision"
+            );
+            assert!(superseded_ref(store, "x_y").is_some(), "{node}");
+            assert_eq!(
+                superseded_ref(store, "xzy"),
+                None,
+                "{node}: matched exactly, never LIKE"
+            );
+        }
+
+        // a peer that doesn't say who wrote a revision supersedes nothing
+        apply_as(&cloud, &cloud_home, "peer:mini", vec![ember("xzy#r2")]);
+        assert_eq!(
+            superseded_ref(&cloud, "xzy"),
+            None,
+            "an unknown writer fails closed"
+        );
+    }
+
+    #[test]
+    fn test_an_embers_revision_of_a_retired_memory_stays_retired() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path());
+        home.init().unwrap();
+        let store = Store::open(&home.db_path()).unwrap();
+        apply_as(&store, &home, "plugin:minidash", vec![ember("h:day:1")]);
+        let first = crate::ids::episode_id("minidash", "h:day:1");
+        let r = store
+            .retire(&Actor::new("human:test"), "memory", &first, &[], "")
+            .unwrap();
+        store.retirement_apply(&r.id).unwrap();
+        apply_as(&store, &home, "plugin:minidash", vec![ember("h:day:1#r2")]);
+        let retired = Some(format!("retired:{}", r.id));
+        assert_eq!(
+            superseded_ref(&store, "h:day:1"),
+            retired,
+            "the retired copy keeps its mark"
+        );
+        assert_eq!(
+            superseded_ref(&store, "h:day:1#r2"),
+            retired,
+            "the revision lands retired"
+        );
+    }
+
     #[test]
     fn test_revision_suffix_only_supersedes_for_our_own_sources() {
         let tmp = tempfile::tempdir().unwrap();
@@ -373,6 +576,20 @@ mod tests {
             from("ics", "meeting-77@corp.example#r9"),
         ]);
         assert!(!superseded("mbox", "invoice-1234@bank.example"));
+        assert!(!superseded("ics", "meeting-77@corp.example"));
+        // Nor may an ember: its own-revision rule never reaches what an
+        // importer wrote, under any source name (0.5.82).
+        apply_as(
+            &store,
+            &home,
+            "plugin:minidash",
+            vec![
+                from("mbox", "invoice-1234@bank.example#r3"),
+                from("ics", "meeting-77@corp.example#r4"),
+            ],
+        );
+        assert!(!superseded("mbox", "invoice-1234@bank.example"));
+        assert!(!superseded("mbox", "invoice-1234@bank.example#r2"));
         assert!(!superseded("ics", "meeting-77@corp.example"));
         // Our own revisioned sources still supersede.
         for (source, base) in [

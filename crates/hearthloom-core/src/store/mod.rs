@@ -72,7 +72,7 @@ pub use cascades::{CascadeContext, CascadeSeed};
 pub use connections::ConnectionUpsert;
 pub use contacts::{ContactCardIn, PendingContact};
 pub use device_state::DeviceStateIn;
-pub use episodes::{EpisodeRow, PendingExtraction};
+pub use episodes::{printable_name, source_lines, EpisodeRow, PendingExtraction, SourceShare};
 pub use export_all::{is_internal_table, TableClass, TABLE_CLASSES};
 pub use graph::{
     ClaimOutcome, DossierEdge, EntityDossier, EntityRow, MergeRecord, ReviewItem, TraverseHop,
