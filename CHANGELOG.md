@@ -8,6 +8,8 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.85 — 2026-11-04
+
 ### Added
 - **Claude accounts for agents.** Say how much of your Claude account's
   5-hour and weekly limits agents may use (in the Claude Code agent's
