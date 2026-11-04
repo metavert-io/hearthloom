@@ -265,6 +265,10 @@ impl Store {
     /// BRAIN.md needs); otherwise the caller's own view (`scope_guard`, what
     /// Ask needs). Largest source first, then by name: byte-stable.
     pub fn source_shares(&self, public_only: bool) -> Result<Vec<SourceShare>> {
+        // Only a real date is printed: whoever ingests sets event_time, so
+        // anything else ("game-devel", "0000-…") would reach the prompt.
+        const DAY: &str = "CASE WHEN event_time GLOB '[12][0-9][0-9][0-9]-[01][0-9]-[0-3][0-9]*' \
+                           THEN substr(event_time, 1, 10) END";
         let guard = if public_only {
             " AND scope != 'private'".to_string()
         } else {
@@ -272,8 +276,7 @@ impl Store {
         };
         let conn = self.lock();
         let mut stmt = conn.prepare(&format!(
-            "SELECT source, kind, COUNT(*), MIN(substr(event_time, 1, 10)),
-                    MAX(substr(event_time, 1, 10))
+            "SELECT source, kind, COUNT(*), MIN({DAY}), MAX({DAY})
              FROM episodes WHERE superseded_by IS NULL{guard}
              GROUP BY source, kind"
         ))?;

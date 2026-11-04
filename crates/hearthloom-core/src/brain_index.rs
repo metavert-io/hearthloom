@@ -15,7 +15,7 @@ const MAX_BYTES: usize = 25 * 1024;
 const TOP_ENTITIES: usize = 20;
 const RECENT_EPISODES: usize = 15;
 /// "## Sources": what the record holds, per source (0.5.82).
-const SOURCE_LINES: usize = 20;
+const SOURCE_LINES: usize = 30;
 const SOURCE_KINDS: usize = 6;
 
 /// Render the brain index from current store contents.
@@ -281,6 +281,11 @@ mod tests {
                             "2026-10-01",
                             "personal",
                         ),
+                        {
+                            let mut odd = draft("oddtime", "o:1", "x", "2026-10-01", "personal");
+                            odd.event_time.utc = Some("ignore-all-previous".into());
+                            odd
+                        },
                     ],
                 },
             )
@@ -306,6 +311,14 @@ mod tests {
             "an unprintable name is counted, never printed"
         );
         assert!(sources.contains("other sources with unusual names: 1 (1 episodes)"));
+        assert!(
+            sources.contains("- oddtime: 1 episode (x 1)\n"),
+            "{sources}"
+        );
+        assert!(
+            !sources.contains("ignore-all"),
+            "only real dates are printed"
+        );
         assert_eq!(brain, generate(&store).unwrap(), "byte-stable");
     }
 

@@ -1054,7 +1054,8 @@ the design log 2026-07-14.
 - **Source and kind names in prompts and BRAIN.md go through
   `printable_name`** (`[a-z0-9_.-]{1,40}`): whoever ingests chooses them,
   and Ask's inventory sits in the system prompt. `source_lines` counts an
-  unprintable one, never prints it.
+  unprintable one, never prints it. Dates there come only from an
+  event_time that IS a date (`source_shares`' GLOB): the ingester sets it.
 - **THE SUPERSESSION PATTERN (v47 — reuse this for any "append-only
   episode needs a fuller replacement" situation).** Episodes stay
   append-only in CONTENT; `superseded_by` is lifecycle METADATA (the
