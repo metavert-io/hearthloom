@@ -8,6 +8,8 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.88 — 2026-11-04
+
 ### Added
 - **Ask searches mail on all your nodes.** Each node lists the mail
   archives it holds (`hearthloom node` shows them), and Ask on any node
