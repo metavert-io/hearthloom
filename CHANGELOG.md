@@ -8,6 +8,8 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.86 — 2026-11-04
+
 ### Security
 - **Mail archives honour your privacy rules and the vault.** Mail kept in
   an archive (the Gmail Takeout, the live Gmail archive) is read in place,
