@@ -414,7 +414,17 @@ workspace with `npm i playwright`) — screenshot + pageerror check.
   Ed25519 release-sig verify + counter-sig when present, then a scope
   prompt — the human gate survives; stages through the daemon's normal
   upload+install) + `ember validate|pack|list|logs` (dev loop),
-  `notify`, `logs -f`, `completions`. For agent shells: `hearthloom
+  `ember install <folder|zip>` (0.5.84, cli embers.rs — unreviewed, the
+  same consent screen; `--yes` + `--grant <scopes>`; an upgrade keeps
+  held scopes and WITHHOLDS new ones unless granted — never grant what
+  nobody named; exit codes 0/3/4/5/1 and the `--json` `status` strings
+  are a contract scripts (minidash) depend on: don't renumber them),
+  `ember enable|disable|config`,
+  `notify`, `logs -f`, `completions`. **A command that talks to a node
+  builds its client with `Client::with_url(home, url.clone())`** —
+  `Client::new` ignores `--url` (query and a dozen others did until
+  0.5.84); one that reads this machine's files calls `local_only` and
+  refuses `--url`. For agent shells: `hearthloom
   doctor` first when anything seems wedged; `status --json` for parsing.
 - **Eval suites live in the data home, not the repo**: `hearthloom eval`
   runs `~/.hearthloom/eval/personal-eval.yaml` (retrieval checks; extend it
@@ -854,6 +864,20 @@ the design log 2026-07-14.
   (`assert_trip_day`) — never switch it to a counter revision (a peer's
   stale revision would win). Re-open a day by setting `trip_day.dirty`,
   never by deleting the ledger row.
+- **A PROGRAM THE DAEMON STARTS NEVER INHERITS ITS ENVIRONMENT (0.5.84 —
+  a fixed security hole, don't re-open it).** The daemon's environment
+  holds every sealed secret (core config.rs `apply_dotenv`). An agent run
+  and a supervised ember start `.env_clear().envs(child_env::inherited())`
+  — PATH, HOME, user, locale, clock — plus what they're handed on purpose.
+  Before, an ember on a hosted node could read the issuer secret that signs
+  the owner in, and `claude -p` billed an API key it found instead of the
+  subscription. A new program started for an agent or an ember does the
+  same; `test_agent_and_ember_programs_start_clean` checks the two files.
+- **AN UPGRADE SETS THE KEPT KEY'S SCOPES (0.5.84).** `install_from_dir`
+  keeps an installed ember's key id and secret but sets its scopes to what
+  was granted now (`set_api_key_scopes`). Before 0.5.84 the key kept its
+  first scopes forever: narrowing didn't narrow, a granted widening didn't
+  widen. `test_an_upgrade_gives_the_kept_key_exactly_what_was_granted`.
 - **EMBERS ON HOSTED NODES (0.5.72, design log 2026-10-23).**
   A hosted (cloud-kind) node installs ONLY packages
   `registry_client::stage` verified in this process

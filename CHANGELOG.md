@@ -8,6 +8,48 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.84 — 2026-11-04
+
+### Security
+- **Programs Hearthloom starts no longer see its secrets.** The daemon
+  keeps its sealed settings in its own environment, and a Claude Code
+  agent run (with every command it ran) and an ember program on a hosted
+  node inherited all of it: the AI provider's key, the Gmail app password,
+  agents' keys, and on a hosted node the secrets that sign the owner in.
+  They now start with only the basics (PATH, HOME, user, locale, clock)
+  plus what they're given on purpose. Embers on a Mac, which launchd
+  starts, were never affected. A side effect fixed with it: an agent run on
+  a node with an Anthropic key used that key instead of your Claude
+  subscription.
+
+### Added
+- **Install an ember you built from the command line.** `hearthloom ember
+  install <folder-or-zip>` shows the dashboard's consent screen for an
+  unreviewed ember and asks. Scripts answer with `--yes` and name the
+  scopes they trust it with in `--grant`; an upgrade keeps what the
+  installed version holds, so `--yes` alone covers it unless the new
+  version asks for more — then it installs without the extra, warns, and
+  prints the command that grants it. Distinct exit codes and a `--json`
+  `status` tell a script which case it hit (see docs/cli.md).
+- **The rest of the embers card as commands:** `ember enable`, `ember
+  disable`, `ember config <name> [key] [value]`, with `--json` (also on
+  `ember list` and `ember uninstall`).
+
+### Fixed
+- **An upgraded ember's key holds what was granted for the new version.**
+  An upgrade kept the key's first scopes whatever it granted: a version
+  that asked for less kept the old access, and one granted more didn't get
+  it.
+- **Ember settings are checked against their declared type** (number,
+  true/false, list) when saved, from the dashboard or the CLI.
+- **`--url` reaches the node you named.** `query`, `search`, `recall`,
+  `entity`, `identity`, `scope`, `index`, `events`, `eval`, `bench`,
+  `quarantine`, `source`, `intent`, `consolidate` and `daemon status`
+  ignored it and asked this machine's node. `ingest`, `logs` and `ember
+  logs`, which read this machine's files, now refuse it.
+- A hosted node's refusal of an unreviewed ember says why in plain words.
+- `ember pack` no longer needs the `zip` tool.
+
 ## 0.5.83 — 2026-11-03
 
 ### Fixed
