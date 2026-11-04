@@ -8,6 +8,24 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.81 — 2026-11-03
+
+### Added
+- **New mail arrives within seconds, not every six hours.** The node where
+  Gmail is connected keeps a watch open (IMAP IDLE) and pulls as soon as
+  Gmail reports new mail, with a catch-up every 5 minutes in case a notice
+  was missed. Same archive, same memories, same dedupe as before — only
+  sooner. Works on any node (a hosted node, a home server, a laptop that's
+  awake); it pauses while a hosted node is fenced and backs off on errors.
+  If Gmail refuses the sign-in it stops, tells you, and waits for you to
+  reconnect instead of retrying a bad password.
+- **Settings for it**, per node: on Integrations → Gmail (watch on/off,
+  catch-up interval, live status) and in the CLI: `hearthloom gmail`,
+  `hearthloom gmail watch on|off --every N`, and `hearthloom gmail
+  connect <address>` / `disconnect` (the app password is prompted, never
+  an argument). The node list shows which node watches Gmail, and the card
+  warns when two nodes watch a mailbox.
+
 ## 0.5.80 — 2026-11-03
 
 ### Security
