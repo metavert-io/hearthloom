@@ -8,6 +8,8 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.87 — 2026-11-04
+
 ### Added
 - **Search inside archived mail.** A mail archive's search now covers
   each message's text and the web addresses it links to, not only the
