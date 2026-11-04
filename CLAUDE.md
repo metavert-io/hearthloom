@@ -938,6 +938,11 @@ the design log 2026-07-14.
   (their stamps can run ahead of the clock — `next_stamp`). A new friend
   read that calls `effective_grant` directly silently ignores groups;
   one that flattens grants over-shares.
+- **THE EMBER READ SURFACE IS A DENY LIST (`plugins.rs::plugin_route_allowed`).**
+  An ember's `read` key reaches every GET under `/v1/` not denied there,
+  and the KEY CEILING does not apply to it. A GET that ACTS — runs Ask,
+  spends tokens, hands work to agents — must be on that list AND check
+  `require_owner` itself: `/v1/query/stream` was neither until 0.5.80.
 - **THE OWNER GATE (0.5.65).** Only the owner unlocks the vault or turns
   a key into a session: `http.rs::require_owner` — a signed-in session
   (or open-posture loopback), an admin key, or a paired-device key

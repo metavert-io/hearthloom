@@ -928,6 +928,33 @@ mod ingest_origin_tests {
     }
 
     #[tokio::test]
+    async fn test_only_the_owner_starts_an_ask() {
+        let (state, _tmp) = state();
+        let params = |q: &str| QueryStreamParams {
+            question: q.into(),
+            thread: None,
+        };
+        // a read key (an ember's, an integration's) is not the owner
+        let refused = deep_query_stream(
+            State(state.clone()),
+            axum::Extension(key(&["read"])),
+            Query(params("hi")),
+        )
+        .await;
+        assert!(matches!(refused, Err(ApiError(StatusCode::FORBIDDEN, _))));
+        // the owner's key (and a signed-in session, keyless here) may
+        for auth in [key(&["admin"]), AuthInfo(None)] {
+            let allowed = deep_query_stream(
+                State(state.clone()),
+                axum::Extension(auth),
+                Query(params("hi")),
+            )
+            .await;
+            assert!(allowed.is_ok());
+        }
+    }
+
+    #[tokio::test]
     async fn test_only_one_of_the_owners_nodes_may_say_where_an_episode_came_from() {
         let (state, _tmp) = state();
         let origin = |r: &str| {
@@ -10503,10 +10530,17 @@ async fn sync_agents_post(
 /// gets a `task` event: the hand-off's card (agents::propose).
 async fn deep_query_stream(
     State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
     Query(params): Query<QueryStreamParams>,
-) -> axum::response::Sse<
-    impl futures_core::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+) -> Result<
+    axum::response::Sse<
+        impl futures_core::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    >,
+    ApiError,
 > {
+    // Ask runs as the owner and may hand work to agents: only the owner
+    // starts one (0.5.80 — an ember's read key used to reach this route)
+    require_owner(&auth, "ask Hearthloom")?;
     use axum::response::sse::Event;
     let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<Value>();
     let question = params.question;
@@ -10625,7 +10659,7 @@ async fn deep_query_stream(
         }
         yield Ok(Event::default().event("done").data("{}"));
     };
-    axum::response::Sse::new(stream)
+    Ok(axum::response::Sse::new(stream))
 }
 
 #[derive(Deserialize)]

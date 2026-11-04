@@ -877,6 +877,9 @@ pub fn plugin_route_allowed(path: &str, method: &str, scopes: &[String]) -> bool
             "/v1/integrations",
             "/v1/monitor",
             "/v1/agents",
+            // Ask runs as the owner (and may hand work to agents): an
+            // ember's read key must never start one (0.5.80)
+            "/v1/query",
             // who drives your car, and the questions about it, are yours
             "/v1/vehicles",
             "/v1/trips",
@@ -1402,6 +1405,10 @@ mod tests {
         assert!(!plugin_route_allowed("/v1/vault", "GET", &rd));
         assert!(!plugin_route_allowed("/v1/keys", "GET", &rd));
         assert!(!plugin_route_allowed("/v1/plugins", "GET", &rd));
+        assert!(
+            !plugin_route_allowed("/v1/query/stream", "GET", &rd),
+            "Ask runs as the owner"
+        );
         assert!(!plugin_route_allowed("/v1/search", "POST", &rd));
         assert!(!plugin_route_allowed("/v1/ingest", "POST", &rd));
     }
