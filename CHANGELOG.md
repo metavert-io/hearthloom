@@ -8,6 +8,17 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.83 — 2026-11-03
+
+### Fixed
+- **Only real dates are shown in the per-source lists.** A few memories
+  carry something other than a date in their time field (an import's
+  "game-devel", a photo dated year 0000); BRAIN.md and Ask's source list
+  printed the first ten characters of it. They now show a date only when
+  it is one, and nothing otherwise. (0.5.82 reached only one node.)
+- **BRAIN.md lists up to 30 sources** (was 20), so a small source like an
+  ember's isn't folded into "and N more" on a typical record.
+
 ## 0.5.82 — 2026-11-03
 
 ### Fixed
