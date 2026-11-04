@@ -8,7 +8,18 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.82 — 2026-11-03
+
 ### Fixed
+- **Ask knows every source the record holds.** Ask was told only the 40
+  largest source-and-kind pairs, so on a large record a small source —
+  minidash's 33 house readings among a quarter of a million memories —
+  never made the list, and Ask said it didn't track that. It now gets one
+  line per source (count, kinds, date span), every source up to 60.
+- **BRAIN.md says what each source holds** ("## Sources": counts, kinds,
+  date spans of live, non-private memories), for agents that read it.
+  Source and kind names chosen by embers and importers are shown only when
+  they're plain identifiers; anything else is counted, never printed.
 - **Connecting Gmail takes effect at once.** The watch noticed a new
   connection only on its once-a-minute check, and said "not connected"
   meanwhile; it now starts within a second, and shows "starting" until it
@@ -16,6 +27,14 @@ pin release tags, never a branch.
 - **A failed Gmail connect is logged with Gmail's reason** (never the
   password), in the activity log and the daemon log, so it can be
   diagnosed without anyone pasting the error.
+
+### Added
+- **An ember can revise its own memories.** Re-send a memory under the
+  same reference with `#r2` (then `#r3`…) and the newer copy replaces the
+  older one everywhere — search, Ask, the timeline — on every one of your
+  nodes. Only the ember that wrote a memory can replace it: never yours,
+  an importer's or another ember's, even under the same name. A memory you
+  retired stays retired when its revision arrives.
 
 ## 0.5.81 — 2026-11-03
 
