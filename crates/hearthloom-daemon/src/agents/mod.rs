@@ -292,6 +292,13 @@ pub fn publish_self(state: &AppState) {
         // the mail archives this node holds, for Ask on any node (0.5.88)
         "archives": crate::lookups::archives_here(state),
     });
+    // where archives should live: always on, room, the owner's choice (0.5.90)
+    let mut roles = roles;
+    if let (Some(map), Value::Object(extra)) =
+        (roles.as_object_mut(), crate::archives_place::roles(state))
+    {
+        map.extend(extra);
+    }
     let _ = state.store.publish_node(
         &node_id(state),
         &node_name(state),

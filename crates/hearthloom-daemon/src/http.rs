@@ -91,6 +91,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/sources/virtual/{name}/query", get(query_virtual))
         .route("/v1/sources/virtual/{name}/promote", post(promote_virtual))
         .route(
+            "/v1/sources/virtual/{name}",
+            axum::routing::delete(virtual_forget),
+        )
+        .route(
             "/v1/sources/virtual/{name}/text",
             get(virtual_text_get).post(virtual_text_set),
         )
@@ -2576,6 +2580,61 @@ async fn search_virtual(
     Ok(Json(
         json!({"source": name, "query": params.q, "hits": hits}),
     ))
+}
+
+#[derive(Deserialize)]
+struct ForgetParams {
+    #[serde(default)]
+    delete: bool,
+}
+
+/// Stop offering a mounted source here; with `delete`, also remove a mail
+/// archive's file and its index (0.5.90 — after it moved to a keeper).
+async fn virtual_forget(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Path(name): Path<String>,
+    Query(params): Query<ForgetParams>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "remove a mounted source")?;
+    // a registered source, or the file an archive left here when it moved
+    // to a keeper (archives_place's release)
+    let released_key = format!("{}{name}", crate::archives_place::RELEASED);
+    let released = state
+        .store
+        .consolidation_state(&released_key)?
+        .filter(|p| !p.is_empty())
+        .map(std::path::PathBuf::from);
+    let file = match crate::virtual_source::resolve(&state, &name) {
+        Ok(def) => {
+            state
+                .store
+                .unregister_virtual_source(&Actor::new("human:owner"), &name)?;
+            crate::virtual_source::mbox_path_if_online(&def).or(released)
+        }
+        Err(_) if released.is_some() => released,
+        Err(_) => {
+            return Err(bad_request(format!(
+                "there's no source called {name:?} here"
+            )))
+        }
+    };
+    let mut deleted = vec![];
+    if params.delete {
+        let Some(mbox) = file else {
+            return Err(bad_request(format!(
+                "{name} isn't a mail archive file on this node — only that is deleted"
+            )));
+        };
+        for path in [crate::mbox_index::index_path(&mbox), mbox.clone()] {
+            if std::fs::remove_file(&path).is_ok() {
+                deleted.push(path.display().to_string());
+            }
+        }
+        let _ = state.store.set_consolidation_state(&released_key, "");
+    }
+    crate::agents::publish_self(&state);
+    Ok(Json(json!({"forgotten": name, "deleted": deleted})))
 }
 
 /// A mail archive's text search on this node (0.5.87): the owner's
@@ -6873,7 +6932,18 @@ async fn imports_status(State(state): State<AppState>) -> Result<Json<Value>, Ap
 /// Start the export job. HARD RULE: the vault must be UNLOCKED — the
 /// export contains everything, private included, and starting it must
 /// be a conscious unvaulted act.
-async fn export_start(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+#[derive(Deserialize, Default)]
+struct ExportStartBody {
+    /// also the mail archives this node holds (0.5.90)
+    #[serde(default)]
+    archives: bool,
+}
+
+async fn export_start(
+    State(state): State<AppState>,
+    body: Option<Json<ExportStartBody>>,
+) -> Result<Json<Value>, ApiError> {
+    let with_archives = body.map(|Json(b)| b.archives).unwrap_or_default();
     let (locked, _) = state.store.vault_status();
     if locked {
         return Err(ApiError(
@@ -6889,7 +6959,7 @@ async fn export_start(State(state): State<AppState>) -> Result<Json<Value>, ApiE
     let bg = state.clone();
     tokio::spawn(async move {
         let _guard = guard;
-        crate::export::run_export(bg).await;
+        crate::export::run_export(bg, with_archives).await;
     });
     Ok(Json(json!({"started": true})))
 }
@@ -9911,6 +9981,9 @@ struct NodesSetBody {
     thinking: Option<String>,
     #[serde(default)]
     imports: Option<String>,
+    /// keep | no | auto: whether this node keeps mail archives (0.5.90)
+    #[serde(default)]
+    archives: Option<String>,
 }
 
 /// This node's name, thinking role and whether it imports its own files.
@@ -9943,6 +10016,15 @@ async fn nodes_set(
             return Err(bad_request("imports must be on or off"));
         }
         state.store.set_consolidation_state("node.imports", mode)?;
+    }
+    if let Some(mode) = body.archives.as_deref() {
+        if !["keep", "no", "auto"].contains(&mode) {
+            return Err(bad_request("archives must be keep, no or auto"));
+        }
+        state
+            .store
+            .set_consolidation_state(crate::archives_place::KEY, mode)?;
+        crate::archives_place::kick();
     }
     crate::agents::publish_self(&state);
     Ok(Json(json!({

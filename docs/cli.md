@@ -87,6 +87,17 @@ presence, WAL bloat, and PATH. Run this first when anything seems off.
 
 ### `source text` — search inside a mail archive's messages
 
+```
+hearthloom node --archives keep            # this machine keeps your mail archives
+hearthloom node --archives auto            # let Hearthloom choose (an always-on machine)
+hearthloom source forget gmail-takeout --delete   # remove a copy that moved
+hearthloom export --with-archives          # a full export that includes them
+```
+
+Archives move to the node that keeps them by themselves, through your
+hub, resuming after any interruption; the machine they came from stops
+offering its copy and tells you it can be deleted.
+
 `hearthloom node` lists each node's mail archives under it (message
 count, months, whether the text is searchable). Ask on any node can
 search an archive another node holds; the lookup goes through your hub.

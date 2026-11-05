@@ -103,6 +103,9 @@ enum Cmd {
     Export {
         /// Output path (default: hearthloom-export-<ts>.zip)
         out: Option<PathBuf>,
+        /// Also the mail archives this node holds (often tens of GB).
+        #[arg(long)]
+        with_archives: bool,
     },
     /// Manage identities: many emails/handles, one human (or org/project).
     Identity {
@@ -218,6 +221,11 @@ enum Cmd {
         /// history, Photos and known repos (agents' runs never are).
         #[arg(long)]
         imports: Option<String>,
+        /// keep | no | auto: whether this node keeps your mail archives
+        /// (auto: the always-on node with the most room does; a second
+        /// `keep` node holds a second copy).
+        #[arg(long)]
+        archives: Option<String>,
     },
     /// Peer sync: status, or `--now` to force a cycle.
     Sync {
@@ -517,6 +525,16 @@ enum SourceCmd {
         /// Token-fit budget (HearthFS mounts only).
         #[arg(long)]
         budget: Option<u32>,
+    },
+    /// Stop offering a mounted source on this node; --delete also removes
+    /// a mail archive's file and index (e.g. once it lives on an
+    /// always-on node of yours).
+    Forget {
+        name: String,
+        #[arg(long)]
+        delete: bool,
+        #[arg(long)]
+        yes: bool,
     },
     /// A mail archive's text search on this node: status, or on|off. Big
     /// archives (over 100,000 messages) wait for `on`; off gives the space
@@ -1248,6 +1266,38 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Source {
+            command: SourceCmd::Forget { name, delete, yes },
+        } => {
+            let client = Client::with_url(home, url.clone())?;
+            if delete && !yes {
+                use std::io::{IsTerminal, Write};
+                if !std::io::stdin().is_terminal() {
+                    anyhow::bail!("deleting needs --yes when no one is at a terminal to confirm");
+                }
+                eprint!("delete {name}'s archive file and index on this node? [y/N] ");
+                std::io::stderr().flush().ok();
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line)?;
+                if !matches!(line.trim(), "y" | "Y" | "yes") {
+                    anyhow::bail!("nothing deleted");
+                }
+            }
+            let res = client
+                .delete(
+                    &format!("/v1/sources/virtual/{}", urlencode(&name)),
+                    &[("delete", delete.to_string())],
+                )
+                .await?;
+            if as_json {
+                println!("{res}");
+            } else {
+                println!("✓ {name} is no longer offered here");
+                for path in res["deleted"].as_array().into_iter().flatten() {
+                    println!("  deleted {}", path.as_str().unwrap_or("?"));
+                }
+            }
+        }
+        Cmd::Source {
             command: SourceCmd::Text { name, value },
         } => {
             let client = Client::with_url(home, url.clone())?;
@@ -1356,17 +1406,18 @@ async fn main() -> Result<()> {
             SecretCmd::Set { key } => ops::secret_set(&home, &key)?,
             SecretCmd::List => ops::secret_list(&home)?,
         },
-        Cmd::Export { out } => {
+        Cmd::Export { out, with_archives } => {
             let client = Client::with_url(home, url.clone())?;
-            ops::export(&client, out).await?;
+            ops::export(&client, out, with_archives).await?;
         }
         Cmd::Node {
             name,
             thinking,
             imports,
+            archives,
         } => {
             let client = Client::with_url(home, url.clone())?;
-            ops::node(&client, name, thinking, imports, as_json).await?;
+            ops::node(&client, name, thinking, imports, archives, as_json).await?;
         }
         Cmd::Sync { now, full } => {
             let client = Client::with_url(home, url.clone())?;
@@ -1620,7 +1671,9 @@ async fn source_text(
 async fn handle_source(client: &Client, command: SourceCmd) -> Result<()> {
     match command {
         // routed in main (it needs --json)
-        SourceCmd::Text { .. } => unreachable!("source text is handled in main"),
+        SourceCmd::Text { .. } | SourceCmd::Forget { .. } => {
+            unreachable!("source text and forget are handled in main")
+        }
         SourceCmd::Register {
             name,
             mount,

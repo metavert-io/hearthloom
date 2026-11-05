@@ -8,6 +8,28 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+### Added
+- **Mail archives live on an always-on machine of yours, by themselves.**
+  A Takeout imported on a laptop no longer stays where it landed, and no
+  file is ever copied by hand: the node that keeps archives — the
+  always-on machine with the most room (a home server before the hosted
+  node), or the ones you choose with `hearthloom node --archives keep` —
+  brings each archive in through your hub, in checked 4 MB pieces, and
+  picks up where it stopped after a sleep, a restart or a dropped link.
+  Once it has it, the machine it came from stops offering its copy and
+  tells you it can be deleted (`hearthloom source forget <name> --delete`);
+  nothing is deleted without you. Choosing a second machine to keep
+  archives gives a second copy. Ask on any machine reaches it there.
+  Only archives that have stopped changing move.
+- `hearthloom node` shows which machines are always on, which keep
+  archives, and an archive on its way in.
+- `hearthloom export --with-archives` adds the mail archives this machine
+  holds to a full export.
+
+### Fixed
+- `hearthloom node` described the live Gmail mailbox as "counting · headers
+  only".
+
 ## 0.5.89 — 2026-11-04
 
 ### Added

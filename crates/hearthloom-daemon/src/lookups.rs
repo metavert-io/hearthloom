@@ -38,7 +38,9 @@ pub const WAIT: Duration = Duration::from_secs(25);
 const HINT_AGAIN: Duration = Duration::from_secs(2);
 /// A request nobody claimed is dropped after this.
 const STALE: Duration = Duration::from_secs(60);
-pub const TOOLS: &[&str] = &["vsearch", "vfetch"];
+/// What another node may ask: Ask's two archive reads, and `vchunk` — a
+/// piece of an archive file, for a keeper bringing it in (archives_place).
+pub const TOOLS: &[&str] = &["vsearch", "vfetch", "vchunk"];
 pub const TOPIC: &str = "lookup.requested";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -93,9 +95,13 @@ pub fn archives_here(state: &AppState) -> Value {
                 _ => json!("starting"),
             }
         };
+        let (bytes, settled) =
+            crate::archives_place::file_facts(&mbox, &def.name).unwrap_or((0, false));
         out.push(json!({
             "name": def.name,
             "adapter": def.adapter,
+            "bytes": bytes,
+            "settled": settled,
             "messages": summary.as_ref().map(|s| s.messages),
             "first": summary.as_ref().and_then(|s| s.first.clone()),
             "last": summary.as_ref().and_then(|s| s.last.clone()),
@@ -148,6 +154,11 @@ pub fn resolve_node(state: &AppState, name: &str) -> Option<(String, String, Str
 
 /// Run a lookup here, as the asker's vault state allows.
 pub fn run_here(state: &AppState, tool: &str, args: &Value, vault_open: bool) -> Result<String> {
+    if tool == "vchunk" {
+        // raw bytes for the owner's own keeper node (peers already carry
+        // everything, private included)
+        return crate::archives_place::chunk(state, args);
+    }
     let source = args["source"]
         .as_str()
         .ok_or_else(|| anyhow!("{tool} needs args.source"))?;

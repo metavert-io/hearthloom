@@ -319,7 +319,11 @@ the node list, and Ask on any node can search an archive another node
 holds (see "Lookups on another node" below). Where Gmail is connected, the `gmail`
 source (`gmail_search.rs`) searches the whole mailbox with Gmail's own
 search, read-only, so no archive file has to travel for Ask to reach old
-mail.
+mail. An archive file itself has a home: the node that keeps
+archives (`archives_place.rs`) — always on, chosen from the synced node
+list — brings it in through the hub in checked, resumable chunks, and
+the node it came from stops offering its copy (deleting it is the
+owner's call).
 
 ## 6. Consolidation: the idle-time mind
 

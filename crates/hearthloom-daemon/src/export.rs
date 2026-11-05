@@ -54,7 +54,10 @@ pub const DIR_CLASSES: &[(&str, DirClass)] = &[
     ("plugins", DirClass::Exported),
     (
         "archives",
-        DirClass::Excluded("original third-party exports — re-obtainable, often multi-GB"),
+        DirClass::Excluded(
+            "mail archives — tens of GB; included when the export asks for them (--with-archives), \
+             and kept on an always-on node of yours otherwise",
+        ),
     ),
     ("inbox", DirClass::Excluded("transient drop folder")),
     (
@@ -123,9 +126,9 @@ pub fn export_dir(state: &AppState) -> std::path::PathBuf {
 
 /// The background job. Progress phases: scanning → snapshot → tables →
 /// files → ready (or error). ETA from unit throughput (rows + files).
-pub async fn run_export(state: AppState) {
+pub async fn run_export(state: AppState, with_archives: bool) {
     let started = std::time::Instant::now();
-    let result = build(&state, started).await;
+    let result = build(&state, started, with_archives).await;
     match result {
         Ok((path, bytes)) => {
             set_progress(
@@ -152,7 +155,11 @@ pub async fn run_export(state: AppState) {
     }
 }
 
-async fn build(state: &AppState, started: std::time::Instant) -> Result<(std::path::PathBuf, u64)> {
+async fn build(
+    state: &AppState,
+    started: std::time::Instant,
+    with_archives: bool,
+) -> Result<(std::path::PathBuf, u64)> {
     set_progress(state, json!({"phase": "scanning", "pct": 0}));
     let dir = export_dir(state);
     std::fs::create_dir_all(&dir)?;
@@ -175,7 +182,7 @@ async fn build(state: &AppState, started: std::time::Instant) -> Result<(std::pa
         table_counts.push((*t, n));
         total_units += n;
     }
-    let (file_list, warnings) = collect_files(&state.home);
+    let (file_list, warnings) = collect_files(&state.home, with_archives);
     total_units += file_list.len() as i64 + 500; // +db snapshot weight
 
     let store = state.store.clone();
@@ -303,7 +310,10 @@ async fn build(state: &AppState, started: std::time::Instant) -> Result<(std::pa
 
 /// Walk the home root honoring DIR_CLASSES; unknown entries are
 /// EXPORTED with a warning — the safe default is never to lose data.
-fn collect_files(home: &hearthloom_core::Home) -> (Vec<String>, Vec<String>) {
+/// `with_archives`: also the mail archives this node holds (0.5.90, the
+/// owner's choice at export time: a Takeout runs to tens of GB). Their
+/// indexes rebuild, and a half-arrived `.part` is never a backup.
+fn collect_files(home: &hearthloom_core::Home, with_archives: bool) -> (Vec<String>, Vec<String>) {
     let mut files = Vec::new();
     let mut warnings = Vec::new();
     let root = home.root();
@@ -312,6 +322,12 @@ fn collect_files(home: &hearthloom_core::Home) -> (Vec<String>, Vec<String>) {
     };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
+        if with_archives && name == "archives" {
+            let mut found = Vec::new();
+            walk(&entry.path(), root, &mut found);
+            files.extend(found.into_iter().filter(|f| f.ends_with(".mbox")));
+            continue;
+        }
         match DIR_CLASSES.iter().find(|(n, _)| *n == name) {
             Some((_, DirClass::Excluded(_))) => continue,
             Some((_, DirClass::Exported)) => {}
@@ -535,7 +551,7 @@ mod tests {
         std::fs::write(home.root().join("archives/huge.zip"), "nope").unwrap();
         std::fs::create_dir_all(home.root().join("somenewfeature")).unwrap();
         std::fs::write(home.root().join("somenewfeature/data.bin"), "keep me").unwrap();
-        let (files, warnings) = collect_files(&home);
+        let (files, warnings) = collect_files(&home, false);
         assert!(files.iter().any(|f| f == "raw/x.txt"));
         assert!(
             !files.iter().any(|f| f.starts_with("archives/")),

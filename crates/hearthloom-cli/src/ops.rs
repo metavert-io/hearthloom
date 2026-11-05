@@ -550,9 +550,16 @@ pub async fn vault(client: &Client, action: Option<&str>, minutes: Option<u32>) 
     Ok(())
 }
 
-pub async fn export(client: &Client, out: Option<std::path::PathBuf>) -> Result<()> {
+pub async fn export(
+    client: &Client,
+    out: Option<std::path::PathBuf>,
+    with_archives: bool,
+) -> Result<()> {
     client
-        .post("/v1/export/start", &json!({"actor": ACTOR}))
+        .post(
+            "/v1/export/start",
+            &json!({"actor": ACTOR, "archives": with_archives}),
+        )
         .await
         .map_err(|e| {
             if e.to_string().contains("vault") {
@@ -820,13 +827,14 @@ pub async fn node(
     name: Option<String>,
     thinking: Option<String>,
     imports: Option<String>,
+    archives: Option<String>,
     as_json: bool,
 ) -> Result<()> {
-    if name.is_some() || thinking.is_some() || imports.is_some() {
+    if name.is_some() || thinking.is_some() || imports.is_some() || archives.is_some() {
         client
             .post(
                 "/v1/nodes",
-                &json!({"name": name, "thinking": thinking, "imports": imports}),
+                &json!({"name": name, "thinking": thinking, "imports": imports, "archives": archives}),
             )
             .await?;
     }
@@ -855,6 +863,13 @@ pub async fn node(
         } else {
             imports
         };
+        let imports = if roles.get("keeps_archives").and_then(|v| v.as_bool()) == Some(true) {
+            format!("{imports} · keeps archives")
+        } else if roles.get("always_on").and_then(|v| v.as_bool()) == Some(true) {
+            format!("{imports} · always on")
+        } else {
+            imports
+        };
         println!(
             "{}{}  v{} · {} · thinking {} · {} agent(s){} · seen {}",
             s("name"),
@@ -874,12 +889,39 @@ pub async fn node(
             s("last_seen"),
         );
         // the mail archives it holds, which Ask on any node can search (0.5.88)
+        for p in roles
+            .get("pulling")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let (done, total) = (
+                p["done"].as_u64().unwrap_or(0),
+                p["total"].as_u64().unwrap_or(1),
+            );
+            println!(
+                "    bringing in {} — {:.1} of {:.1} GB",
+                p["name"].as_str().unwrap_or("?"),
+                done as f64 / 1e9,
+                total as f64 / 1e9
+            );
+        }
         for a in roles
             .get("archives")
             .and_then(|v| v.as_array())
             .into_iter()
             .flatten()
         {
+            if a["adapter"] == "gmail" {
+                println!(
+                    "    gmail — the whole mailbox{}, searched live",
+                    a["account"]
+                        .as_str()
+                        .map(|x| format!(" of {x}"))
+                        .unwrap_or_default()
+                );
+                continue;
+            }
             let messages = a["messages"]
                 .as_u64()
                 .map(|n| format!("{n} messages"))

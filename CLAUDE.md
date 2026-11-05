@@ -894,6 +894,16 @@ the design log 2026-07-14.
   starts without 3× the projected size free. Text comes from
   `mail-parser` (decoded MIME), never the adapter's shallow `extract_text`.
   Header hits rank before text hits in `mbox_index::search`.
+- **AN ARCHIVE HAS A HOME; FILES MOVE, NEVER MULTIPLY, NEVER VANISH
+  (0.5.90, `archives_place.rs`).** Keepers come from the synced node list
+  (`keepers`: the owner's `node.archives = keep` nodes, else the
+  always-on local node with the most room, the hosted node only when
+  there's none) so every node agrees. A keeper pulls settled archives
+  (unchanged 24 h, never `gmail-live`) through the hub with `vchunk`
+  lookups — sha256-checked, written at the `.part` file's length, so a
+  pull resumes anywhere. The releasing node unregisters and records
+  `archives.released.<name>` = path; ONLY the owner deletes
+  (`source forget --delete`). Never add an automatic delete.
 - **THE `gmail` SOURCE IS READ-ONLY AND ITS OWN SESSION (0.5.89,
   `gmail_search.rs`).** EXAMINE (never SELECT) on All Mail, BODY.PEEK
   only — a search must never mark mail read or change it — and a session

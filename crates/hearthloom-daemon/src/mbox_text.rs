@@ -91,7 +91,7 @@ pub fn clear(mbox: &Path) -> Result<()> {
 }
 
 /// Room left on the archive's disk, in bytes (statvfs; None if unknown).
-fn free_bytes(path: &Path) -> Option<u64> {
+pub fn free_bytes(path: &Path) -> Option<u64> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;

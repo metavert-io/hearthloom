@@ -712,6 +712,29 @@ impl Store {
         }
     }
 
+    /// Stop offering a virtual source (its files stay where they are).
+    /// True when one was registered under that name.
+    pub fn unregister_virtual_source(&self, actor: &super::Actor, name: &str) -> Result<bool> {
+        let conn = self.lock();
+        let gone = conn.execute(
+            "DELETE FROM sources WHERE name = ?1 AND kind = 'virtual'",
+            [name],
+        )?;
+        if gone > 0 {
+            super::record_mutation(
+                &conn,
+                actor,
+                "virtual_source_unregistered",
+                &format!(
+                    "virtual_source_unregistered:{name}:{}",
+                    crate::time::now_utc()
+                ),
+                &serde_json::json!({"name": name}),
+            )?;
+        }
+        Ok(gone > 0)
+    }
+
     /// All registered virtual sources — the RLM surfaces these as extra
     /// read handles, and Browse lists them alongside materialized sources.
     pub fn list_virtual_sources(&self) -> Result<Vec<VirtualSourceDef>> {

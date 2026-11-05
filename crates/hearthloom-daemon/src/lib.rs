@@ -7,6 +7,7 @@
 
 mod agents;
 pub mod apm;
+mod archives_place;
 mod budget;
 mod bus;
 mod child_env;
@@ -325,6 +326,7 @@ pub async fn run(home: Home) -> Result<()> {
     tokio::spawn(inbox::run_loop(state.clone()));
     tokio::spawn(gmail_watch::run_loop(state.clone()));
     tokio::spawn(mbox_text::run_loop(state.clone()));
+    tokio::spawn(archives_place::run_loop(state.clone()));
     // Hybrid peer sync: dormant until a peer is paired (Integrations).
     tokio::spawn(sync::run_loop(state.clone()));
     tokio::spawn(agents::run_loop(state.clone()));
