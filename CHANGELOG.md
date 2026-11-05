@@ -8,6 +8,8 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.90 — 2026-11-05
+
 ### Added
 - **Mail archives live on an always-on machine of yours, by themselves.**
   A Takeout imported on a laptop no longer stays where it landed, and no
