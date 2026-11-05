@@ -8,6 +8,12 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+### Fixed
+- **Building needs Rust 1.98 or newer since 0.5.87, and now says so.**
+  The workspace declares it (`rust-version`), and `scripts/install.sh`
+  updates an older toolchain through rustup before building (without
+  rustup, it says what to do) instead of stopping on a dependency error.
+
 ## 0.5.90 — 2026-11-05
 
 ### Added

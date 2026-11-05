@@ -7,6 +7,21 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BIN_DIR="${HEARTHLOOM_BIN_DIR:-$HOME/.local/bin}"
 PLIST="$HOME/Library/LaunchAgents/com.hearthloom.daemon.plist"
 
+# The Rust this needs (Cargo.toml's rust-version): an older toolchain is
+# updated through rustup when there is one, rather than failing mid-build.
+NEED="$(sed -n 's/^rust-version = "\(.*\)"/\1/p' "$REPO_DIR/Cargo.toml" | head -1)"
+HAVE="$(rustc --version | awk '{print $2}')"
+if [ -n "$NEED" ] && [ "$(printf '%s\n%s\n' "$NEED" "$HAVE" | sort -V | head -1)" != "$NEED" ]; then
+  if command -v rustup >/dev/null 2>&1; then
+    echo "Hearthloom needs Rust $NEED or newer (this machine has $HAVE) — updating it with rustup…"
+    rustup update stable
+  else
+    echo "Hearthloom needs Rust $NEED or newer, and this machine has $HAVE." >&2
+    echo "Update Rust (https://rustup.rs), then run this again." >&2
+    exit 1
+  fi
+fi
+
 echo "building release binary…"
 # Build for the NATIVE target explicitly — the default toolchain host
 # can be x86_64 (Rosetta) on Apple Silicon, which runs 5-30x slower.
