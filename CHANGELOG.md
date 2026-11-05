@@ -8,6 +8,8 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.89 — 2026-11-04
+
 ### Added
 - **Ask searches your whole Gmail mailbox where it lives.** On the node
   where Gmail is connected, a `gmail` source searches the mailbox with
