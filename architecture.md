@@ -316,7 +316,10 @@ archives wait for the owner). Archives are read in place, so every read
 goes through `virtual_source::{search,fetch}_for_viewer`, which applies
 the privacy rules and the caller's vault. Each node lists its archives in
 the node list, and Ask on any node can search an archive another node
-holds (see "Lookups on another node" below).
+holds (see "Lookups on another node" below). Where Gmail is connected, the `gmail`
+source (`gmail_search.rs`) searches the whole mailbox with Gmail's own
+search, read-only, so no archive file has to travel for Ask to reach old
+mail.
 
 ## 6. Consolidation: the idle-time mind
 

@@ -82,6 +82,8 @@ fn with_status(f: impl FnOnce(&mut Status)) {
 pub fn recheck(credential_changed: bool) {
     if credential_changed {
         REFUSED.store(false, Ordering::SeqCst);
+        // the search session signed in with the old password
+        crate::gmail_search::reset();
     }
     RECHECK.store(true, Ordering::SeqCst);
 }
@@ -175,6 +177,8 @@ pub async fn run_loop(state: AppState) {
             continue;
         }
 
+        // the whole mailbox, searchable live from any node (0.5.89)
+        crate::gmail_search::ensure_registered(&state);
         // Catch up: the one pull path, serialized with the 6-hour pass.
         set_state("catching up");
         let st = state.clone();

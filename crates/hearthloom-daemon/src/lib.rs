@@ -16,6 +16,7 @@ mod downloads;
 mod embeddings_dl;
 mod export;
 mod gmail_pull;
+mod gmail_search;
 mod gmail_watch;
 mod health_index;
 mod http;

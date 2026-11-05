@@ -894,6 +894,15 @@ the design log 2026-07-14.
   starts without 3× the projected size free. Text comes from
   `mail-parser` (decoded MIME), never the adapter's shallow `extract_text`.
   Header hits rank before text hits in `mbox_index::search`.
+- **THE `gmail` SOURCE IS READ-ONLY AND ITS OWN SESSION (0.5.89,
+  `gmail_search.rs`).** EXAMINE (never SELECT) on All Mail, BODY.PEEK
+  only — a search must never mark mail read or change it — and a session
+  separate from the watch's IDLE one. Registered while Gmail is connected
+  (`ensure_registered` from the watch loop); `recheck(true)` resets the
+  session. Its hits carry the decoded text in `VirtualHit::text` (skipped
+  on the wire) so the privacy check needs no second fetch; its messages
+  are the pull's `mbox` memories (same Message-ID). Ask is told to search
+  it first.
 - **A LOOKUP ON ANOTHER NODE GOES THROUGH THE HUB AND RUNS UNDER THE
   HOLDER'S RULES (0.5.88, `lookups.rs`).** Only `vsearch`/`vfetch`, only
   peer keys (`/v1/sync/lookup*` in KEY_ROUTES under `peer`; embers are

@@ -36,6 +36,10 @@ const SNIPPET_CHARS: usize = 140;
 pub struct VirtualHit {
     pub path: String,
     pub snippet: String,
+    /// The item's text when the search already has it (Gmail search), for
+    /// the privacy check — never sent anywhere.
+    #[serde(skip)]
+    pub text: Option<String>,
 }
 
 /// The result of a promotion: exactly one of `episode_id` (materialized)
@@ -265,6 +269,10 @@ fn require_online(def: &VirtualSourceDef, mount: &Path) -> Result<()> {
 /// the `@search` magic path; plain mounts fall back to a bounded recursive
 /// filename+content match (AND over whitespace-split terms).
 pub fn search(def: &VirtualSourceDef, query: &str, limit: usize) -> Result<Vec<VirtualHit>> {
+    if def.adapter == crate::gmail_search::ADAPTER {
+        // the live mailbox: Gmail's own search (0.5.89)
+        return crate::gmail_search::search(query, limit);
+    }
     let mount = mount_of(def)?;
     require_online(def, &mount)?;
     if def.adapter == "apple-health" {
@@ -278,7 +286,11 @@ pub fn search(def: &VirtualSourceDef, query: &str, limit: usize) -> Result<Vec<V
         // message ids usable with vfetch/promote.
         return Ok(crate::mbox_index::search(&mount, query, limit)?
             .into_iter()
-            .map(|(id, snippet)| VirtualHit { path: id, snippet })
+            .map(|(id, snippet)| VirtualHit {
+                path: id,
+                snippet,
+                text: None,
+            })
             .collect());
     }
     if uses_magic(def) {
@@ -293,7 +305,7 @@ pub fn search(def: &VirtualSourceDef, query: &str, limit: usize) -> Result<Vec<V
 /// messages are also the `mbox` memories the Gmail pull and the Takeout
 /// ingest made (keyed by the same Message-ID).
 fn materialized_sources(def: &VirtualSourceDef) -> Vec<&str> {
-    if def.adapter == "mbox" {
+    if def.adapter == "mbox" || def.adapter == crate::gmail_search::ADAPTER {
         vec!["mbox", def.name.as_str()]
     } else {
         vec![def.name.as_str()]
@@ -362,7 +374,9 @@ pub fn search_with(
         if marked.contains(&hit.path) {
             continue;
         }
-        let text = if def.adapter == "mbox" {
+        let text = if let Some(text) = &hit.text {
+            text.clone()
+        } else if def.adapter == "mbox" {
             fetch(def, &hit.path, None).unwrap_or_else(|_| hit.snippet.clone())
         } else {
             format!("{}\n{}", hit.path, hit.snippet)
@@ -433,6 +447,7 @@ fn magic_search(mount: &Path, query: &str, limit: usize) -> Result<Vec<VirtualHi
             hits.push(VirtualHit {
                 path,
                 snippet: String::new(),
+                text: None,
             });
         } else if let Some(hit) = hits.last_mut() {
             if trimmed.is_empty() || trimmed.starts_with("next:") {
@@ -488,6 +503,7 @@ fn fs_search(mount: &Path, query: &str, limit: usize) -> Result<Vec<VirtualHit>>
                 hits.push(VirtualHit {
                     path: rel,
                     snippet: snippet_of(&content),
+                    text: None,
                 });
                 if hits.len() >= limit {
                     return Ok(hits);
@@ -502,6 +518,9 @@ fn fs_search(mount: &Path, query: &str, limit: usize) -> Result<Vec<VirtualHit>>
 /// `budget` requests a token-fit view (`file@fit/<budget>`); on a plain
 /// mount `budget` is ignored (the whole file, capped, is returned).
 pub fn fetch(def: &VirtualSourceDef, path: &str, budget: Option<u32>) -> Result<String> {
+    if def.adapter == crate::gmail_search::ADAPTER {
+        return crate::gmail_search::fetch(path);
+    }
     let mount = mount_of(def)?;
     require_online(def, &mount)?;
     if def.adapter == "apple-health" {
@@ -642,11 +661,33 @@ pub fn promote(
 /// The RLM system-prompt fragment describing available virtual sources and
 /// their read handles — None when none are registered (base experience
 /// unchanged; the system stays degraded-but-useful without them).
+/// The live mailbox's line in Ask's instructions (0.5.89).
+fn gmail_line(account: Option<&str>, node: Option<&str>, reachable: bool) -> String {
+    format!(
+        "- gmail [gmail]{} — the WHOLE Gmail mailbox{}, searched live with Gmail's own search: \
+         every message the account holds, old and new{}\n",
+        node.map(|n| format!(" on node \"{n}\""))
+            .unwrap_or_default(),
+        account.map(|a| format!(" of {a}")).unwrap_or_default(),
+        if reachable {
+            ""
+        } else {
+            " — UNAVAILABLE right now: don't call it; say so if it mattered"
+        }
+    )
+}
+
 /// How Ask should look for things in mail (0.5.86; message text 0.5.87).
 const MAIL_GUIDANCE: &str = "\
-Finding things in mail: the user's Sent, Primary and Starred mail is ALSO in the record as \
+Finding things in mail: when a `gmail` source is listed, search it FIRST — it is the whole \
+mailbox, current to the minute. Its vsearch takes Gmail search syntax: words anywhere in the \
+message, from:, to:, subject:, after:YYYY/MM/DD, before:, has:attachment, label:, \
+category:, OR, quotes for a phrase; results come newest first (up to 25), so narrow with \
+operators rather than paging; each hit ends with the start of its text, and vfetch reads one \
+message's text and links. The archives are the fallback when Gmail can't be reached. The \
+user's Sent, Primary and Starred mail is ALSO in the record as \
 email episodes, and `search` finds words in their text. Everything else (Updates, Social, \
-Promotions, Forums) is only in the mail archives above. vsearch over an archive matches \
+Promotions, Forums) is only in Gmail and the mail archives above. vsearch over an archive matches \
 sender, recipients, subject, labels and date, and also the message text and the web \
 addresses it links to where the archive's line says its text is searchable (such hits end \
 `text: …` with the words that matched). Where the text isn't searchable yet, a link, an \
@@ -707,6 +748,14 @@ pub fn rlm_prompt_section(state: &AppState) -> Option<String> {
          path in \"citations\"):\n",
     );
     for source in &sources {
+        if source.adapter == crate::gmail_search::ADAPTER {
+            out.push_str(&gmail_line(
+                source.config["account"].as_str(),
+                None,
+                crate::gmail_search::account().is_some(),
+            ));
+            continue;
+        }
         let mount = source
             .config
             .get("mount")
@@ -756,6 +805,14 @@ pub fn rlm_prompt_section(state: &AppState) -> Option<String> {
              (each lookup goes through your hub to that node and takes a few seconds):\n",
         );
         for (_, node, seen, archive) in &elsewhere {
+            if archive["adapter"] == crate::gmail_search::ADAPTER {
+                out.push_str(&gmail_line(
+                    archive["account"].as_str(),
+                    Some(node),
+                    crate::lookups::recently_seen(seen),
+                ));
+                continue;
+            }
             let summary = crate::mbox_index::Summary {
                 messages: archive["messages"].as_u64().unwrap_or(0) as usize,
                 first: archive["first"].as_str().map(String::from),

@@ -8,6 +8,18 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+### Added
+- **Ask searches your whole Gmail mailbox where it lives.** On the node
+  where Gmail is connected, a `gmail` source searches the mailbox with
+  Gmail's own search (the search box's syntax: words anywhere in a
+  message, `from:`, `subject:`, `after:`, `has:attachment`…) over every
+  message the account holds, and reads one message at a time — read-only,
+  nothing marked read, its own connection beside the live watch. Ask on
+  any of your nodes reaches it through your hub, and looks there first;
+  the archives are the fallback. No Takeout file has to be copied
+  anywhere for Ask to find old mail. Your privacy rules and the vault
+  apply to every result, as for the archives.
+
 ## 0.5.88 — 2026-11-04
 
 ### Added

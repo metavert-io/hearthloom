@@ -285,6 +285,117 @@ impl ImapFeed {
     }
 }
 
+/// One message Gmail's own search found: its UID, labels, raw header,
+/// and the start of its text (raw MIME, enough to decode a few KB).
+#[derive(Debug, Clone)]
+pub struct FoundMessage {
+    pub uid: u32,
+    pub labels: Vec<String>,
+    pub header: Vec<u8>,
+    pub text_head: Vec<u8>,
+}
+
+/// Read-only search of the whole mailbox with Gmail's own search (0.5.89):
+/// the same syntax as the Gmail search box, over All Mail, server-side.
+/// The mailbox is opened with EXAMINE and messages read with BODY.PEEK, so
+/// nothing is ever marked read or changed. A session of its own: the
+/// watch's IDLE session is never disturbed.
+pub struct GmailSearch {
+    session: imap::Session<imap::Connection>,
+}
+
+/// An IMAP quoted string (RFC 3501): backslash and double quote escaped;
+/// line breaks can't appear in one, so they become spaces.
+fn quoted(text: &str) -> String {
+    let clean: String = text
+        .chars()
+        .map(|c| if c == '\r' || c == '\n' { ' ' } else { c })
+        .collect();
+    format!("\"{}\"", clean.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+impl GmailSearch {
+    pub fn connect(user: &str, password: &str) -> Result<Self> {
+        let client = imap::ClientBuilder::new("imap.gmail.com", 993).connect()?;
+        let mut session = client
+            .login(user, password)
+            .map_err(|(e, _)| anyhow!("gmail login failed: {e}"))?;
+        // lets a search carry non-ASCII words (Gmail supports RFC 6855);
+        // without it such a search is refused, never mangled
+        let _ = session.run_command_and_check_ok("ENABLE UTF8=ACCEPT");
+        session.examine("[Gmail]/All Mail")?;
+        Ok(Self { session })
+    }
+
+    /// Messages matching a Gmail search, newest first, at most `limit`.
+    pub fn search(&mut self, query: &str, limit: usize) -> Result<Vec<FoundMessage>> {
+        let mut uids: Vec<u32> = self
+            .session
+            .uid_search(format!("X-GM-RAW {}", quoted(query)))?
+            .into_iter()
+            .collect();
+        uids.sort_unstable_by(|a, b| b.cmp(a));
+        uids.truncate(limit);
+        self.found(&uids)
+    }
+
+    fn found(&mut self, uids: &[u32]) -> Result<Vec<FoundMessage>> {
+        if uids.is_empty() {
+            return Ok(vec![]);
+        }
+        let set = uids
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let fetches = self.session.uid_fetch(
+            set,
+            "(UID X-GM-LABELS BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.65536>)",
+        )?;
+        let mut out: Vec<FoundMessage> = fetches
+            .iter()
+            .filter_map(|f| {
+                Some(FoundMessage {
+                    uid: f.uid?,
+                    labels: f
+                        .gmail_labels()
+                        .map(|it| it.map(normalize_label).filter(|l| !l.is_empty()).collect())
+                        .unwrap_or_default(),
+                    header: f.header().unwrap_or_default().to_vec(),
+                    text_head: f.text().unwrap_or_default().to_vec(),
+                })
+            })
+            .collect();
+        // newest first, as asked
+        out.sort_unstable_by_key(|m| std::cmp::Reverse(m.uid));
+        Ok(out)
+    }
+
+    /// The raw message with this Message-ID (Gmail's `rfc822msgid:`), or
+    /// with this UID (`uid:<n>`), cut at `cap` bytes. None: not found.
+    pub fn fetch(&mut self, id: &str, cap: usize) -> Result<Option<Vec<u8>>> {
+        let uid = match id.strip_prefix("uid:").and_then(|u| u.parse::<u32>().ok()) {
+            Some(uid) => Some(uid),
+            None => self
+                .session
+                .uid_search(format!("X-GM-RAW {}", quoted(&format!("rfc822msgid:{id}"))))?
+                .into_iter()
+                .max(),
+        };
+        let Some(uid) = uid else {
+            return Ok(None);
+        };
+        let fetches = self
+            .session
+            .uid_fetch(uid.to_string(), format!("(UID BODY.PEEK[]<0.{cap}>)"))?;
+        Ok(fetches.iter().find_map(|f| f.body().map(<[u8]>::to_vec)))
+    }
+
+    pub fn logout(mut self) {
+        let _ = self.session.logout();
+    }
+}
+
 /// Whether an IMAP error is Gmail refusing the sign-in (a wrong or revoked
 /// app password) rather than a network hiccup: retrying it fast only
 /// risks Google locking the account.
@@ -361,6 +472,15 @@ impl MailFeed for ImapFeed {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_search_text_is_a_safe_quoted_string() {
+        assert_eq!(quoted("from:susan portal"), "\"from:susan portal\"");
+        assert_eq!(
+            quoted("say \"hi\" \\ there\r\nnow"),
+            "\"say \\\"hi\\\" \\\\ there  now\""
+        );
+    }
 
     struct FakeFeed {
         uidvalidity: u32,
