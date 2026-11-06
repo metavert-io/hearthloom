@@ -93,7 +93,7 @@ fn provisioner_domain() -> Option<String> {
         .map(|h| h.to_ascii_lowercase())
 }
 
-/// `metavertbrain` from `metavertbrain.hearthlaunch.com` (one label).
+/// `sam` from `sam.provider.example` (one label).
 fn label_of(host: &str, domain: &str) -> Option<String> {
     let host = host.split(':').next()?.to_ascii_lowercase();
     let label = host.strip_suffix(&format!(".{domain}"))?;
@@ -353,8 +353,8 @@ pub fn notify_system(
 mod tests {
     use super::*;
 
-    /// The same vector hearthsaas's Go test verifies (internal/provisioner/
-    /// node_token_test.go): a token this node signs is one Hearthlaunch reads.
+    /// The same vector the provisioner's own verifier is tested with: a
+    /// token this node signs is one the provisioner reads.
     #[test]
     fn test_node_tokens_match_hearthlaunchs_vector() {
         let payload = br#"{"exp":2000000000,"jti":"j1","node":"demo","purpose":"google-relay"}"#;
@@ -366,19 +366,16 @@ mod tests {
 
     #[test]
     fn test_a_label_is_one_name_under_the_provisioners_domain() {
-        let d = "hearthlaunch.com";
+        let d = "provider.example";
+        assert_eq!(label_of("sam.provider.example", d).as_deref(), Some("sam"));
         assert_eq!(
-            label_of("metavertbrain.hearthlaunch.com", d).as_deref(),
-            Some("metavertbrain")
+            label_of("Sam.Provider.example:443", d).as_deref(),
+            Some("sam")
         );
-        assert_eq!(
-            label_of("MetavertBrain.Hearthlaunch.com:443", d).as_deref(),
-            Some("metavertbrain")
-        );
-        assert_eq!(label_of("a.b.hearthlaunch.com", d), None);
-        assert_eq!(label_of("hearthlaunch.com", d), None);
-        assert_eq!(label_of("evil-hearthlaunch.com", d), None);
-        assert_eq!(label_of("hearth-t-x.fly.dev", d), None);
+        assert_eq!(label_of("a.b.provider.example", d), None);
+        assert_eq!(label_of("provider.example", d), None);
+        assert_eq!(label_of("evil-provider.example", d), None);
+        assert_eq!(label_of("app-x.fly.dev", d), None);
     }
     use base64::Engine;
     use hmac::{Hmac, Mac};

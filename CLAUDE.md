@@ -1174,7 +1174,7 @@ the design log 2026-07-14.
   node signs for Hearthlaunch (`provisioner::sign_for_provisioner`) carry a
   purpose (`google-relay`, `google-web-client`, `oauth-relay`) that
   Hearthlaunch checks; `test_node_tokens_match_hearthlaunchs_vector` pins
-  the format to hearthsaas's Go verifier.
+  the format to the provisioner's verifier.
 - **GOOGLE CALENDAR IS FREE/BUSY ONLY (0.5.95, google_calendar.rs).**
   Scopes stay `calendar.freebusy` + `calendar.calendarlist.readonly`
   (+ `openid email` for the account's name): never a scope that reads
