@@ -92,6 +92,7 @@ pub const TABLE_CLASSES: &[(&str, TableClass)] = &[
     ("mail_rules", TableClass::Exported),
     ("mail_thread_messages", TableClass::Exported),
     ("mail_watches", TableClass::Exported),
+    ("mail_drafts", TableClass::Exported),
     ("mail_ember_views", TableClass::Exported),
     (
         "mail_matches",

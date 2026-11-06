@@ -8,9 +8,11 @@ license.workspace = true
 [dependencies]
 hearthloom-core = { workspace = true }
 anyhow = { workspace = true }
+base64 = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 imap = { workspace = true }
+imap-proto = { workspace = true }
 reqwest = { workspace = true }
 rusqlite = { workspace = true }
 serde_json = { workspace = true }
@@ -18,4 +20,5 @@ tempfile = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+mail-parser = { workspace = true }
 tempfile = { workspace = true }

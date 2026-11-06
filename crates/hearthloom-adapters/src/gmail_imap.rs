@@ -12,7 +12,7 @@
 
 use std::collections::HashSet;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 
 /// Where a pull resumes. UIDs are only meaningful within one
 /// UIDVALIDITY generation — a generation change re-anchors via the
@@ -394,6 +394,45 @@ impl GmailSearch {
     pub fn logout(mut self) {
         let _ = self.session.logout();
     }
+}
+
+/// Save a draft in the mailbox's Drafts folder (0.5.94) — the folder
+/// marked `\Drafts` (RFC 6154; Gmail names it by the account's language),
+/// `[Gmail]/Drafts` when none is marked. It is APPENDed with the `\Draft`
+/// and `\Seen` flags in a session of its own and nothing else is touched:
+/// this never sends, and never changes or deletes another message.
+/// Returns the folder it went to.
+pub fn save_draft(user: &str, password: &str, raw: &[u8]) -> Result<String> {
+    if !raw.is_ascii() {
+        bail!("a draft must be 7-bit (the composer encodes everything else)");
+    }
+    let client = imap::ClientBuilder::new("imap.gmail.com", 993).connect()?;
+    let mut session = client
+        .login(user, password)
+        .map_err(|(e, _)| anyhow!("gmail login failed: {e}"))?;
+    let out = (|| -> Result<String> {
+        let names = session.list(None, Some("*"))?;
+        let folder = names
+            .iter()
+            .find(|n| {
+                n.attributes()
+                    .iter()
+                    .any(|a| matches!(a, imap_proto::NameAttribute::Drafts))
+            })
+            .map(|n| n.name().to_string())
+            .unwrap_or_else(|| "[Gmail]/Drafts".to_string());
+        if folder.contains('"') || folder.contains('\\') {
+            bail!("the Drafts folder's name can't be used ({folder:?})");
+        }
+        session
+            .append(&folder, raw)
+            .flag(imap::types::Flag::Draft)
+            .flag(imap::types::Flag::Seen)
+            .finish()?;
+        Ok(folder)
+    })();
+    let _ = session.logout();
+    out
 }
 
 /// Whether an IMAP error is Gmail refusing the sign-in (a wrong or revoked

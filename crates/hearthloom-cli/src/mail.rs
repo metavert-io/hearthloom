@@ -28,6 +28,53 @@ pub enum Op {
         chars: Option<i64>,
         reset: bool,
     },
+    Draft {
+        id: String,
+        say: Option<String>,
+        all: bool,
+        wait: bool,
+    },
+    Drafts {
+        model: Option<String>,
+    },
+}
+
+fn print_draft(d: &Value) {
+    match d["state"].as_str() {
+        Some("saved") => {
+            println!(
+                "✓ a reply is in your Drafts ({}) — to {}",
+                d["folder"].as_str().unwrap_or("Drafts"),
+                d["recipients"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|r| r.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            println!("  {}\n", d["subject"].as_str().unwrap_or(""));
+            for line in d["body"].as_str().unwrap_or("").lines() {
+                println!("  {line}");
+            }
+            let fill: Vec<&str> = d["placeholders"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|p| p.as_str())
+                .collect();
+            if !fill.is_empty() {
+                println!("\n  fill in: {}", fill.join(", "));
+            }
+            println!("  Nothing was sent: review and send it from Gmail.");
+        }
+        Some("failed") => println!(
+            "the draft didn't work: {}",
+            d["error"].as_str().unwrap_or("unknown")
+        ),
+        Some(s) => println!("{} {s}", d["id"].as_str().unwrap_or("?")),
+        None => println!("?"),
+    }
 }
 
 fn view_words(view: &Value, chars: &Value) -> String {
@@ -261,6 +308,119 @@ pub async fn run(client: &Client, op: Op, as_json: bool) -> Result<()> {
                 print_triage(&res);
                 if now {
                     println!("  sorting what's waiting now");
+                }
+            }
+        }
+        Op::Draft { id, say, all, wait } => {
+            let res = client
+                .post(
+                    &format!("/v1/mail/threads/{id}/draft"),
+                    &json!({"say": say, "reply_all": all}),
+                )
+                .await?;
+            let draft_id = res["draft"]["id"].as_str().unwrap_or("").to_string();
+            if !wait {
+                if as_json {
+                    println!("{res}");
+                } else {
+                    println!(
+                        "asked for a draft ({draft_id}); it's written on {}",
+                        res["drafter"]["writer"]
+                            .as_str()
+                            .unwrap_or("the machine that watches Gmail")
+                    );
+                }
+                return Ok(());
+            }
+            if !as_json {
+                eprintln!(
+                    "drafting on {}…",
+                    res["drafter"]["writer"]
+                        .as_str()
+                        .unwrap_or("the machine that watches Gmail")
+                );
+            }
+            let started = std::time::Instant::now();
+            let draft = loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                let got = client
+                    .get(&format!("/v1/mail/drafts/{draft_id}"), &[])
+                    .await?;
+                let state = got["draft"]["state"].as_str().unwrap_or("");
+                if state == "saved" || state == "failed" {
+                    break got["draft"].clone();
+                }
+                if started.elapsed() > std::time::Duration::from_secs(300) {
+                    bail!(
+                        "still {state} after five minutes — `hearthloom mail drafts` shows it when it's done"
+                    );
+                }
+            };
+            if as_json {
+                println!("{}", json!({"draft": draft}));
+            } else {
+                print_draft(&draft);
+            }
+        }
+        Op::Drafts { model } => {
+            let res = match &model {
+                Some(m) => {
+                    client
+                        .post("/v1/mail/drafts/settings", &json!({"model": m}))
+                        .await?;
+                    client
+                        .get("/v1/mail/drafts", &[("limit", "20".into())])
+                        .await?
+                }
+                None => {
+                    client
+                        .get("/v1/mail/drafts", &[("limit", "20".into())])
+                        .await?
+                }
+            };
+            if as_json {
+                println!("{res}");
+                return Ok(());
+            }
+            let d = &res["drafter"];
+            println!(
+                "drafts are written on {}{} · model {}",
+                d["writer"]
+                    .as_str()
+                    .unwrap_or("no machine (Gmail isn't watched anywhere)"),
+                if d["writer_is_me"] == json!(true) {
+                    " (this machine)"
+                } else {
+                    ""
+                },
+                d["model"].as_str().unwrap_or("?")
+            );
+            if model.is_some() && d["writer_is_me"] != json!(true) {
+                println!(
+                    "  the model setting belongs to the machine that writes them: use --url for it"
+                );
+            }
+            let drafts = res["drafts"].as_array().cloned().unwrap_or_default();
+            if drafts.is_empty() {
+                println!("no drafts yet — hearthloom mail draft <thread id>");
+            }
+            for x in drafts {
+                println!(
+                    "{}  {}  {}  {}",
+                    x["created_at"].as_str().unwrap_or("?"),
+                    x["state"].as_str().unwrap_or("?"),
+                    x["subject"]
+                        .as_str()
+                        .or(x["thread_id"].as_str())
+                        .unwrap_or("?"),
+                    x["requested_by"]
+                        .as_str()
+                        .and_then(|r| r.strip_prefix("plugin:"))
+                        .map(|e| format!("(by {e})"))
+                        .unwrap_or_default()
+                );
+                if let Some(e) = x["error"].as_str() {
+                    println!("    {e}");
                 }
             }
         }

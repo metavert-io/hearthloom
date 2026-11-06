@@ -326,6 +326,14 @@ cursor, on whichever node it runs. The owner's view for that ember
 (headers, a snippet, or the text) and a fresh privacy check are applied
 when it reads. Watches and views mirror like mail rules.
 
+**Reply drafts (v65, `store/mail_draft.rs`, `mail_drafts.rs`).** A
+request (the owner's words, or an ember's finished text) is a mirrored
+row. The node that watches Gmail (the one with the smallest id, when
+several do) takes it, reads the thread from its live archive, has a
+tool-less model write the reply, and APPENDs it to the folder Gmail marks
+`\Drafts` with the `\Draft` flag (`gmail_imap::save_draft`; the message
+itself from `mail_compose`, 7-bit). Nothing is sent or changed.
+
 A mail archive's sidecar indexes the headers when it is built, and its
 message text and links in the background afterwards (`mbox_text.rs`; big
 archives wait for the owner). Archives are read in place, so every read

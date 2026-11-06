@@ -1149,10 +1149,32 @@ let recentExercises = [];
    never runs in this origin). Invisible when nothing declares one. */
 /* ————— mail waiting on you (0.5.92): threads triage marked as needing a
    reply, a time, or a look — each with the words that decided it. ————— */
+let mailPoll = null;
+
 async function paintMail(host) {
   if (!host) return;
   let data;
   try { data = await api("/v1/mail/threads?state=open&limit=30"); } catch { host.hidden = true; return; }
+  // reply drafts (0.5.94): the latest per thread
+  const drafted = await api("/v1/mail/drafts?limit=100").catch(() => ({ drafts: [] }));
+  const latest = {};
+  for (const d of drafted.drafts || []) if (d.thread_id && !latest[d.thread_id]) latest[d.thread_id] = d;
+  const writer = drafted.drafter?.writer;
+  const draftLine = (d) => {
+    if (!d) return "";
+    if (d.state === "requested" || d.state === "writing") {
+      return `<div class="meta">drafting a reply${writer ? ` on ${esc(writer)}` : ""}…</div>`;
+    }
+    if (d.state === "failed") return `<div class="meta">the draft didn't work: ${esc(d.error || "unknown")}</div>`;
+    const fill = (d.placeholders || []).length
+      ? ` · fill in: ${d.placeholders.map((p) => esc(p)).join(", ")}` : "";
+    return `<details class="meta"><summary>a reply is in your Gmail Drafts${fill} —
+        <a href="https://mail.google.com/mail/u/0/#drafts" target="_blank" rel="noopener noreferrer">open Drafts ↗</a></summary>
+        <div style="white-space:pre-wrap; margin-top:var(--s1)">${esc(d.body || "")}</div></details>`;
+  };
+  const pending = Object.values(latest).some((d) => d.state === "requested" || d.state === "writing");
+  clearTimeout(mailPoll);
+  if (pending) mailPoll = setTimeout(() => { if (host.isConnected) paintMail(host); }, 4000);
   const threads = data.threads || [];
   const err = data.triage?.last?.error;
   if (!threads.length && !err) { host.hidden = true; host.innerHTML = ""; return; }
@@ -1172,12 +1194,43 @@ async function paintMail(host) {
           ${t.due_by ? `<span class="task-tag">by ${esc(t.due_by)}</span>` : ""}
         </div>
         ${t.why ? `<div class="meta">${esc(t.why)}</div>` : ""}
+        ${draftLine(latest[t.id])}
+        <div class="mail-draft-form" hidden style="margin-top:var(--s1)">
+          <input class="mail-say" type="text" maxlength="2000" placeholder="what should it say? (optional — e.g. yes, but next week)" style="width:100%">
+          <label class="meta"><input class="mail-all" type="checkbox"> copy everyone on it</label>
+          <button class="btn mail-draft-go">draft it</button>
+          <span class="meta">it goes to your Gmail Drafts; nothing is sent</span>
+        </div>
         <div class="tend-actions">
+          <button class="btn btn-quiet mail-draft">${latest[t.id] ? "draft again" : "draft a reply"}</button>
           <button class="btn btn-quiet mail-act" data-state="done">done</button>
           <button class="btn btn-quiet mail-act" data-state="fyi">not needed</button>
           ${gmail(t.last_message_id) ? `<a class="btn btn-quiet" href="${esc(gmail(t.last_message_id))}" target="_blank" rel="noopener noreferrer">open in Gmail ↗</a>` : ""}
         </div>
       </div>`).join("")}`;
+  host.querySelectorAll(".mail-draft").forEach((b) => {
+    b.onclick = () => {
+      const form = b.closest("[data-thread]").querySelector(".mail-draft-form");
+      form.hidden = !form.hidden;
+      if (!form.hidden) form.querySelector(".mail-say").focus();
+    };
+  });
+  host.querySelectorAll(".mail-draft-form").forEach((form) => {
+    const go = async () => {
+      const row = form.closest("[data-thread]");
+      const btn = form.querySelector(".mail-draft-go");
+      btn.disabled = true;
+      try {
+        await apiPost(`/v1/mail/threads/${encodeURIComponent(row.dataset.thread)}/draft`, {
+          say: form.querySelector(".mail-say").value.trim() || null,
+          reply_all: form.querySelector(".mail-all").checked,
+        });
+        paintMail(host);
+      } catch (e) { btn.disabled = false; toast(e.message); }
+    };
+    form.querySelector(".mail-draft-go").onclick = go;
+    form.querySelector(".mail-say").onkeydown = (ev) => { if (ev.key === "Enter") go(); };
+  });
   host.querySelectorAll(".mail-act").forEach((b) => {
     b.onclick = async () => {
       const row = b.closest("[data-thread]");

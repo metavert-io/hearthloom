@@ -130,6 +130,8 @@ const OPERATIONAL_TABLES: &[&str] = &[
     // v64: what embers watch for in the mail, and how much of it they see
     "mail_watches",
     "mail_ember_views",
+    // v65: reply drafts — asked for anywhere, written where Gmail is watched
+    "mail_drafts",
     // v46: item shares mirror between a user's own peers so a share
     // flagged on either node is served by the always-on one (shares
     // name the friend; they bite wherever a grant by that name lives).
@@ -183,6 +185,11 @@ const JOURNALED_KINDS: &[(&str, &str, &str)] = &[
     (
         "mail_ember_view",
         "mail_ember_views",
+        "COALESCE(updated_at, created_at, '')",
+    ),
+    (
+        "mail_draft",
+        "mail_drafts",
         "COALESCE(updated_at, created_at, '')",
     ),
     ("privacy_rule", "privacy_rules", "COALESCE(created_at, '')"),

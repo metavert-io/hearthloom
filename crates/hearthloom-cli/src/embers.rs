@@ -349,6 +349,13 @@ fn gate(staged: &Value, grants: &Grants, from_version: Option<&str>) -> String {
                 .to_string(),
         );
     }
+    if grants.granted.iter().any(|s| s == "mail.draft") {
+        lines.push(
+            "  mail.draft: it can leave reply drafts in your Gmail Drafts for mail its watches \
+             matched (to the sender, up to 20 a day). Nothing is sent."
+                .to_string(),
+        );
+    }
     if !grants.dropped.is_empty() {
         lines.push(format!(
             "  no longer asks for: {} (its key loses that access)",

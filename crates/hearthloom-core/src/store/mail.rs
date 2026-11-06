@@ -49,6 +49,7 @@ pub const RULE_ACTIONS: &[&str] = &[
     "fyi",
     "ignore",
     "triage",
+    "draft",
 ];
 
 /// One message as the pull saw it.
@@ -385,6 +386,16 @@ impl Store {
         Ok(changed > 0)
     }
 
+    /// The messages this node has seen in a thread (its own index).
+    pub fn mail_thread_message_ids(&self, thread_id: &str) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let mut stmt =
+            conn.prepare("SELECT message_id FROM mail_thread_messages WHERE thread_id = ?1")?;
+        let rows = stmt.query_map([thread_id], |r| r.get(0))?;
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
+    }
+
     /// The owner moves a thread (done, not needed, needs a reply after all…).
     pub fn mail_set_state(&self, actor: &Actor, id: &str, state: &str) -> Result<MailThread> {
         if !MAIL_STATES.contains(&state) {
@@ -463,7 +474,14 @@ impl Store {
         if !RULE_KINDS.contains(&kind) {
             bail!("a rule matches one of: {}", RULE_KINDS.join(", "));
         }
-        let action = if kind == "plain" { "triage" } else { action };
+        // a plain rule is the owner's words for the sorter (`triage`) or
+        // for reply drafts (`draft`, 0.5.94)
+        let action = match (kind, action) {
+            ("plain", "draft") => "draft",
+            ("plain", _) => "triage",
+            (_, "draft") => bail!("only a plain rule guides drafts"),
+            (_, a) => a,
+        };
         if !RULE_ACTIONS.contains(&action) {
             bail!("a rule does one of: {}", RULE_ACTIONS.join(", "));
         }

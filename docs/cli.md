@@ -125,6 +125,10 @@ hearthloom mail rules add domain mylawfirm.example --action needs_reply
 hearthloom mail rules add plain "Anything from my accountant needs a reply"
 hearthloom mail rules                       # list (rm <id> removes one)
 hearthloom mail triage                      # how new mail is sorted; --off, --model haiku, --now
+hearthloom mail draft mt_1a2b…              # a reply in your Gmail Drafts (never sent)
+hearthloom mail draft mt_1a2b… --say "yes, but next week" --all   # your words; copy everyone
+hearthloom mail drafts                      # the latest drafts, and which machine writes them
+hearthloom mail rules add plain "Sign as Sam; keep replies short" --action draft
 hearthloom mail embers                      # embers that watch your mail, and what they see
 hearthloom mail embers --view headers       # every ember: sender, subject, date only
 hearthloom mail embers --ember my-ember --view full      # one ember: the readable text
@@ -137,7 +141,10 @@ new thread and must quote the words that decided it. It runs on the node
 that watches Gmail: Claude Code (your subscription) on your own machine,
 the node's AI key on a hosted one. Rules by sender, domain, subject or
 list decide before any model; `plain` rules are instructions in your
-words. Private mail never reaches a model. `--json` everywhere.
+words (`--action draft` ones guide reply drafts). Private mail never
+reaches a model. A draft is written on the machine that watches Gmail and
+saved in Gmail's Drafts folder over its IMAP connection — no Google
+sign-in — and is never sent. `--json` everywhere.
 
 ### `agents accounts` — the Claude accounts agents run on
 

@@ -8,6 +8,23 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.94 — 2026-11-06
+
+### Added
+- **Reply drafts, without Google sign-in.** "draft a reply" on each email
+  waiting on you (or `hearthloom mail draft <thread> --say "yes, but next
+  week"`): the machine that watches your Gmail writes the reply from the
+  thread and your words, and saves it in your Gmail Drafts, threaded under
+  the message, through the connection it already has. Nothing is ever
+  sent, and no other message is touched: you review, edit and send it from
+  Gmail. Asking again adds another draft. Where it needs something only you
+  know, the draft leaves a [placeholder] and the Desk lists them. Your own
+  drafting rules: `hearthloom mail rules add plain "Sign as Sam; keep it
+  short" --action draft`. Private mail gets no draft.
+- **Embers can leave a reply draft** (`mail.draft`, alongside `mail.watch`):
+  only for mail their watches matched, only to its sender, at most 20 a
+  day; you're told when one lands in your Drafts.
+
 ## 0.5.93 — 2026-11-06
 
 ### Added

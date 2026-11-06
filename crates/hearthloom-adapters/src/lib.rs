@@ -12,6 +12,7 @@ pub mod gmail_imap;
 pub mod ics;
 pub mod imessage;
 pub mod linkedin;
+pub mod mail_compose;
 pub mod mbox;
 pub mod openai;
 pub mod photos;

@@ -29,6 +29,7 @@ mod lint;
 mod llm_usage;
 mod locations;
 pub mod mail;
+pub mod mail_draft;
 pub mod mail_watch;
 mod movements;
 mod network;
@@ -313,7 +314,7 @@ impl Drop for ReadScopeGuard {
     }
 }
 
-const SCHEMA_VERSION: i64 = 64;
+const SCHEMA_VERSION: i64 = 65;
 
 const SCHEMA_V1: &str = "
     -- L2: append-only ground truth. Raw content lives on disk at
@@ -2240,6 +2241,34 @@ impl Store {
                 "created_at",
                 "",
             ))?;
+        }
+        if version < 65 {
+            // v65: reply drafts (0.5.94, store/mail_draft.rs) — asked for on
+            // any node, written where Gmail is watched, saved to the
+            // mailbox's Drafts folder; mirrored + journaled.
+            conn.execute_batch(
+                "CREATE TABLE mail_drafts (
+                     id TEXT PRIMARY KEY,
+                     thread_id TEXT,
+                     reply_to TEXT,
+                     requested_by TEXT NOT NULL,
+                     say TEXT,
+                     reply_all INTEGER NOT NULL DEFAULT 0,
+                     body TEXT,
+                     placeholders TEXT NOT NULL DEFAULT '[]',
+                     state TEXT NOT NULL,
+                     error TEXT,
+                     node TEXT,
+                     folder TEXT,
+                     draft_message_id TEXT,
+                     recipients TEXT NOT NULL DEFAULT '[]',
+                     subject TEXT,
+                     created_at TEXT NOT NULL,
+                     updated_at TEXT NOT NULL
+                 );
+                 CREATE INDEX idx_mail_drafts_thread ON mail_drafts(thread_id);
+                 CREATE INDEX idx_mail_drafts_state ON mail_drafts(state, created_at);",
+            )?;
         }
         if version < SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;

@@ -352,6 +352,26 @@ enum MailCmd {
         #[arg(long)]
         now: bool,
     },
+    /// Draft a reply to a thread: written on the machine that watches Gmail
+    /// and saved in your Gmail Drafts. Nothing is sent.
+    Draft {
+        id: String,
+        /// what it should say, in your words (e.g. "yes, but next week")
+        #[arg(long)]
+        say: Option<String>,
+        /// copy everyone on the message, not just the sender
+        #[arg(long)]
+        all: bool,
+        /// don't wait for it to be written
+        #[arg(long)]
+        no_wait: bool,
+    },
+    /// Reply drafts: the latest, and where they're written; --model to change it.
+    Drafts {
+        /// sonnet (default), haiku, opus or a full model id
+        #[arg(long)]
+        model: Option<String>,
+    },
     /// Embers that watch your mail, and how much of a message they see:
     /// --view headers|snippet|full (for every ember, or one with --ember).
     Embers {
@@ -374,11 +394,11 @@ enum MailCmd {
 enum MailRulesCmd {
     List,
     /// kind: from | domain | subject | list | plain ("plain" = an instruction
-    /// for the sorter, in your words).
+    /// in your words: for the sorter, or with --action draft for reply drafts).
     Add {
         kind: String,
         pattern: String,
-        /// needs_reply | scheduling | opportunity | fyi | ignore | triage
+        /// needs_reply | scheduling | opportunity | fyi | ignore | triage | draft (plain only)
         #[arg(long)]
         action: Option<String>,
         #[arg(long)]
@@ -1541,6 +1561,18 @@ async fn main() -> Result<()> {
                     model,
                     now,
                 },
+                MailCmd::Draft {
+                    id,
+                    say,
+                    all,
+                    no_wait,
+                } => Op::Draft {
+                    id,
+                    say,
+                    all,
+                    wait: !no_wait,
+                },
+                MailCmd::Drafts { model } => Op::Drafts { model },
                 MailCmd::Embers {
                     ember,
                     view,

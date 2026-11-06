@@ -342,15 +342,42 @@ pub fn checked(item: &Value, text: &str) -> (String, String, f64, Option<String>
 }
 
 /// Claude Code with no tools, on the account pool.
-async fn ask_claude_code(state: &AppState, system: &str, prompt: &str) -> Result<Value> {
+/// One tool-less, structured answer from a model: Claude Code on this
+/// machine (the account pool) when it's installed, else this node's AI
+/// key. Triage and drafting both use it; neither gives the model a tool.
+pub(crate) async fn ask_structured(
+    state: &AppState,
+    purpose: &str,
+    model: &str,
+    system: &str,
+    prompt: &str,
+    schema: &Value,
+    max_tokens: u32,
+) -> Result<Value> {
+    match provider(state) {
+        "claude-code" => ask_claude_code(state, purpose, model, system, prompt, schema).await,
+        "api" => ask_api(state, purpose, system, prompt, schema, max_tokens).await,
+        _ => bail!("no model on this node (Claude Code or an AI key)"),
+    }
+}
+
+async fn ask_claude_code(
+    state: &AppState,
+    purpose: &str,
+    model: &str,
+    system: &str,
+    prompt: &str,
+    schema: &Value,
+) -> Result<Value> {
     let bin = crate::agents::claude_pool::claude_bin(state)
         .ok_or_else(|| anyhow!("Claude Code isn't installed here"))?;
-    let model = model(state);
+    let model = model.to_string();
     let seat =
         crate::agents::claude_pool::pick(state, Some(&model)).map_err(|why| anyhow!("{why}"))?;
+    // an empty folder: no project settings, nothing to read
     let dir = state.home.root().join("mail-triage");
     std::fs::create_dir_all(&dir)?;
-    let schema = schema().to_string();
+    let schema = schema.to_string();
     let run = tokio::process::Command::new(&bin)
         .env_clear()
         .envs(crate::child_env::inherited())
@@ -392,7 +419,7 @@ async fn ask_claude_code(state: &AppState, system: &str, prompt: &str) -> Result
         let n = |k: &str| u[k].as_i64().unwrap_or(0);
         let _ = state.store.record_llm_usage(
             crate::monitor::node_kind(),
-            "mail-triage",
+            purpose,
             None,
             "claude-code",
             &match seat.account {
@@ -437,11 +464,18 @@ async fn ask_claude_code(state: &AppState, system: &str, prompt: &str) -> Result
     result
         .get("structured_output")
         .cloned()
-        .ok_or_else(|| anyhow!("Claude Code returned no sorted list"))
+        .ok_or_else(|| anyhow!("Claude Code returned no structured answer"))
 }
 
 /// This node's AI key (a hosted node thinks for itself).
-async fn ask_api(state: &AppState, system: &str, prompt: &str) -> Result<Value> {
+async fn ask_api(
+    state: &AppState,
+    purpose: &str,
+    system: &str,
+    prompt: &str,
+    schema: &Value,
+    max_tokens: u32,
+) -> Result<Value> {
     let llm = state
         .llm
         .as_ref()
@@ -449,15 +483,12 @@ async fn ask_api(state: &AppState, system: &str, prompt: &str) -> Result<Value> 
     let reply = crate::llm::call(
         &state.store,
         llm.as_ref(),
-        "mail-triage",
+        purpose,
         None,
         hearthloom_core::provider::Tier::Low,
-        &format!(
-            "{system}\nAnswer with ONLY one JSON object matching this schema: {}",
-            schema()
-        ),
+        &format!("{system}\nAnswer with ONLY one JSON object matching this schema: {schema}"),
         prompt,
-        2000,
+        max_tokens,
     )
     .await?;
     let text = reply.text;
@@ -478,7 +509,7 @@ pub async fn triage_once(state: &AppState) -> Result<usize> {
         .store
         .mail_rules()?
         .into_iter()
-        .filter(|r| r.enabled && r.kind == "plain")
+        .filter(|r| r.enabled && r.kind == "plain" && r.action == "triage")
         .map(|r| r.pattern)
         .collect();
     let system = instructions(&plain);
@@ -503,11 +534,19 @@ pub async fn triage_once(state: &AppState) -> Result<usize> {
             format!("{}\n{}\n{text}", t.last_from, t.subject),
         );
     }
-    let answer = match provider(state) {
-        "claude-code" => ask_claude_code(state, &system, &prompt).await?,
-        "api" => ask_api(state, &system, &prompt).await?,
-        _ => return Ok(0),
-    };
+    if provider(state) == "none" {
+        return Ok(0);
+    }
+    let answer = ask_structured(
+        state,
+        "mail-triage",
+        &model(state),
+        &system,
+        &prompt,
+        &schema(),
+        2000,
+    )
+    .await?;
     let mut sorted = 0;
     let mut newly_open = 0;
     for item in answer["items"].as_array().into_iter().flatten() {

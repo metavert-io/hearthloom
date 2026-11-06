@@ -162,7 +162,7 @@ pub fn on_classified(state: &AppState, thread: &MailThread) -> usize {
 
 /// Private now (a privacy rule, or a private memory of the message)?
 /// Fails closed.
-fn held_back(state: &AppState, m: &MailMatch) -> bool {
+pub fn held_back(state: &AppState, m: &MailMatch) -> bool {
     state
         .store
         .privacy_rules_match(&format!("{}\n{}\n{}", m.sender, m.subject, m.text))

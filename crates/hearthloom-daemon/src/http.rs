@@ -154,6 +154,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/mail/embers",
             get(mail_embers_get).post(mail_embers_set),
         )
+        .route("/v1/mail/threads/{id}/draft", post(mail_draft_ask))
+        .route("/v1/mail/drafts", get(mail_drafts_get))
+        .route("/v1/mail/drafts/settings", post(mail_drafts_settings))
+        .route("/v1/mail/drafts/{id}", get(mail_draft_get))
         .route("/v1/sync/lookup", post(sync_lookup))
         .route("/v1/sync/lookup/pending", get(sync_lookup_pending))
         .route("/v1/sync/lookup/{id}/answer", post(sync_lookup_answer))
@@ -320,6 +324,10 @@ pub fn router(state: AppState) -> Router {
             axum::routing::delete(plugin_mail_watch_remove),
         )
         .route("/v1/plugins/self/mail/matches", get(plugin_mail_matches))
+        .route(
+            "/v1/plugins/self/mail/drafts",
+            get(plugin_mail_drafts).post(plugin_mail_draft),
+        )
         .route("/v1/plugins/self/files", get(plugin_file_list))
         .route(
             "/v1/plugins/self/files/{*path}",
@@ -5437,6 +5445,101 @@ async fn mail_triage_set(
         crate::mail_triage::kick();
     }
     Ok(Json(crate::mail_triage::status(&state)))
+}
+
+#[derive(Deserialize)]
+struct MailDraftAsk {
+    /// the owner's words for what it should say
+    #[serde(default)]
+    say: Option<String>,
+    /// copy the others on the message too
+    #[serde(default)]
+    reply_all: bool,
+}
+
+/// A reply draft for a thread (mail_drafts.rs): written on the node that
+/// watches Gmail and saved to the mailbox's Drafts folder. Never sent.
+async fn mail_draft_ask(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(body): Json<MailDraftAsk>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "draft a reply")?;
+    let draft = state
+        .store
+        .mail_draft_request(
+            &Actor::new("human:owner"),
+            Some(&id),
+            None,
+            body.say.as_deref(),
+            body.reply_all,
+            None,
+        )
+        .map_err(|e| bad_request(format!("{e:#}")))?;
+    crate::mail_drafts::kick();
+    crate::bus::touch(&state, "operational.changed");
+    Ok(Json(
+        json!({"draft": draft, "drafter": crate::mail_drafts::status(&state)}),
+    ))
+}
+
+#[derive(Deserialize)]
+struct MailDraftsParams {
+    #[serde(default)]
+    thread: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn mail_drafts_get(
+    State(state): State<AppState>,
+    Query(params): Query<MailDraftsParams>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "see reply drafts")?;
+    Ok(Json(json!({
+        "drafts": state.store.mail_drafts(params.thread.as_deref(), None, params.limit.unwrap_or(50))?,
+        "drafter": crate::mail_drafts::status(&state),
+    })))
+}
+
+async fn mail_draft_get(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "see a reply draft")?;
+    let draft = state
+        .store
+        .mail_draft(&id)?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("no draft {id}")))?;
+    Ok(Json(json!({"draft": draft})))
+}
+
+#[derive(Deserialize)]
+struct MailDraftsSettings {
+    #[serde(default)]
+    model: Option<String>,
+}
+
+async fn mail_drafts_settings(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(body): Json<MailDraftsSettings>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "change how drafts are written")?;
+    if let Some(model) = body.model.as_deref().map(str::trim) {
+        if model.is_empty() || model.len() > 60 {
+            return Err(bad_request(
+                "name a model (sonnet, haiku, opus, or a full model id)",
+            ));
+        }
+        state
+            .store
+            .set_consolidation_state(crate::mail_drafts::KEY_MODEL, model)?;
+    }
+    Ok(Json(crate::mail_drafts::status(&state)))
 }
 
 /// Embers that watch the owner's mail: what each watches and how much of
@@ -13654,6 +13757,70 @@ async fn plugin_mail_watch_remove(
         crate::bus::touch(&state, "operational.changed");
     }
     Ok(Json(json!({"removed": removed})))
+}
+
+#[derive(Deserialize)]
+struct PluginMailDraft {
+    /// the message it answers (one its watches matched)
+    message_id: String,
+    /// the reply text, the ember's own words
+    body: String,
+}
+
+/// An ember leaves a reply draft (`mail.draft`): only for mail its watches
+/// matched, to the sender, saved in Drafts for the owner to review.
+async fn plugin_mail_draft(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(body): Json<PluginMailDraft>,
+) -> Result<Json<Value>, ApiError> {
+    let plugin = bound_plugin(&state, &auth)?;
+    if !crate::mail_drafts::granted(&state, &plugin) {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            format!(
+                "{plugin} wasn't given {} — the owner grants it when installing",
+                crate::mail_drafts::SCOPE
+            ),
+        ));
+    }
+    let st = state.clone();
+    let draft = crate::scoped::spawn_blocking(move || {
+        crate::mail_drafts::ember_request(&st, &plugin, &body.message_id, &body.body)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?
+    .map_err(|e| bad_request(format!("{e:#}")))?;
+    crate::bus::touch(&state, "operational.changed");
+    Ok(Json(json!({"draft": {
+        "id": draft.id, "state": draft.state, "created_at": draft.created_at,
+    }})))
+}
+
+async fn plugin_mail_drafts(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    let plugin = bound_plugin(&state, &auth)?;
+    if !crate::mail_drafts::granted(&state, &plugin) {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            format!("{plugin} wasn't given {}", crate::mail_drafts::SCOPE),
+        ));
+    }
+    let drafts: Vec<Value> = state
+        .store
+        .mail_drafts(None, Some(&format!("plugin:{plugin}")), 100)?
+        .into_iter()
+        .map(|d| {
+            json!({
+                "id": d.id, "message_id": d.reply_to, "state": d.state, "error": d.error,
+                "recipients": d.recipients, "subject": d.subject,
+                "created_at": d.created_at, "updated_at": d.updated_at,
+            })
+        })
+        .collect();
+    Ok(Json(json!({"drafts": drafts})))
 }
 
 #[derive(Deserialize)]

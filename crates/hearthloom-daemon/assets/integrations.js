@@ -896,6 +896,7 @@ async function paintPlugins(host) {
     ingest: "add memories",
     notify: "send you notifications",
     "mail.watch": "watch your mail for what it asks (sender, subject and the start of the text, unless you change that) — never private mail",
+    "mail.draft": "leave reply drafts in your Gmail Drafts for mail its watches matched — never sends",
   };
   const scopeChips = (scopes) =>
     (scopes || []).map((s) => `<span class="chip" title="${esc(SCOPE_WORDS[s] || s)}">${esc(s)}</span>`).join(" ") || "<span class='meta'>no access</span>";
@@ -1024,6 +1025,7 @@ async function paintPlugins(host) {
         info.reviewed ? "\u00b7 \u2713 reviewed by the registry" : "\u00b7 <b>unreviewed</b>"}</p>
       <p class="meta">it will be able to: ${scopeChips(scopes)}</p>
       ${scopes.includes("mail.watch") ? `<p class="meta">With <b>mail.watch</b> it sees the mail its watches match: who sent it, the subject and the first 300 characters, unless you change that (<code>hearthloom mail embers</code>). Private mail never reaches it.</p>` : ""}
+      ${scopes.includes("mail.draft") ? `<p class="meta">With <b>mail.draft</b> it can leave a reply in your Gmail Drafts to mail its watches matched, to the sender only, up to 20 a day. Nothing is sent: you review and send it yourself.</p>` : ""}
       ${(info.publishes || []).length ? `<p class="meta">it will publish ${
         info.publishes.length === 1 ? "this file" : "these files"} openly at your address (anyone can read ${
         info.publishes.length === 1 ? "it" : "them"}): ${

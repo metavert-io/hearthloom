@@ -37,7 +37,10 @@ use hearthloom_core::store::Actor;
 /// `mail.watch` (0.5.93): register mail watches and read what they
 /// matched, as much of each message as the owner's view allows
 /// (mail_embers.rs).
-pub const PLUGIN_ALLOWED_SCOPES: &[&str] = &["read", "ingest", "notify", "mail.watch"];
+/// `mail.draft` (0.5.94): leave a reply draft for mail its watches
+/// matched (mail_drafts.rs) — saved in Drafts, never sent.
+pub const PLUGIN_ALLOWED_SCOPES: &[&str] =
+    &["read", "ingest", "notify", "mail.watch", "mail.draft"];
 
 pub const PROTOCOL: i64 = 1;
 
@@ -698,8 +701,9 @@ pub fn install_from_dir(
     }
     let name = manifest.name.clone();
     let actor = Actor::new("human:dashboard");
-    // An ember-only grant (`mail.watch`) is held by the plugin row, not
-    // the key: the mail surface reads it from the row (mail_embers.rs).
+    // Ember-only grants (`mail.watch`, `mail.draft`) are held by the
+    // plugin row, not the key: the mail surface reads them from the row
+    // (mail_embers.rs, mail_drafts.rs).
     let key_scopes: Vec<String> = granted
         .iter()
         .filter(|s| hearthloom_core::store::API_KEY_SCOPES.contains(&s.as_str()))
@@ -707,7 +711,7 @@ pub fn install_from_dir(
         .collect();
     if key_scopes.is_empty() {
         bail!(
-            "{name} needs read, ingest or notify granted too: mail.watch alone gives its key nothing to hold"
+            "{name} needs read, ingest or notify granted too: the mail permissions alone give its key nothing to hold"
         );
     }
 

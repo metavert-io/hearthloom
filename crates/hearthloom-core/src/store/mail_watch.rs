@@ -17,6 +17,7 @@
 //! queue rides its own id-keyed leg, so an ember gets its matches on
 //! whichever of the owner's nodes it runs.
 use anyhow::{bail, Result};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -542,6 +543,21 @@ impl Store {
         )?;
         rows.collect::<std::result::Result<_, _>>()
             .map_err(Into::into)
+    }
+
+    /// The match an ember holds for this message, if any.
+    pub fn mail_match_for(&self, plugin: &str, message_id: &str) -> Result<Option<MailMatch>> {
+        let conn = self.lock();
+        conn.query_row(
+            &format!(
+                "SELECT {MATCH_COLS} FROM mail_matches WHERE plugin = ?1 AND message_id = ?2
+                 ORDER BY seq DESC LIMIT 1"
+            ),
+            rusqlite::params![plugin, message_id],
+            row_to_match,
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     /// The sync leg's page: matches past `since` (relay stamp).

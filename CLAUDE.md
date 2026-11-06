@@ -92,7 +92,8 @@ workspace with `npm i playwright`) — screenshot + pageerror check.
 ## Layout
 
 - `crates/hearthloom-core` — schema (migrations via `PRAGMA user_version`,
-  **currently v64**: v64 embers' mail watches (`mail_watches`,
+  **currently v65**: v65 reply drafts (`mail_drafts` mirrored +
+  journaled — see DRAFTS NEVER SEND), v64 embers' mail watches (`mail_watches`,
   `mail_ember_views` mirrored + journaled; `mail_matches` the delivery
   queue, its own id-keyed leg /v1/sync/mail_matches — see EMBERS SEE
   MAIL), v63 mail threads + the owner's mail rules
@@ -1121,6 +1122,20 @@ the design log 2026-07-14.
   key passes `/v1/plugins/self/*`. Uninstall forgets the ember's watches,
   view and queue (`mail_watches_forget`). A new route that hands embers
   mail goes through `deliver`.
+- **DRAFTS NEVER SEND, AND TOUCH NOTHING ELSE (0.5.94, mail_drafts.rs,
+  gmail_imap.rs `save_draft`, adapters mail_compose.rs).** The only write
+  to the mailbox is an APPEND of a new message, flagged `\Draft`, into
+  the folder marked `\Drafts`. Never add SMTP, a send, or a STORE/EXPUNGE/
+  MOVE on another message — asking again adds another draft rather than
+  replacing one the owner may have edited. The drafter is one node (it
+  watches Gmail; the smallest node id among those that do,
+  `drafts_here`), the model has no tools (`mail_triage::ask_structured`),
+  other people's mail sits in defused `<message>` fences, and any private
+  message the draft would read refuses the draft. Headers built from
+  other people's mail go through mail_compose's cleaning (no CR/LF, ids
+  and addresses validated) — the message stays 7-bit. An ember's draft
+  (`mail.draft`, plugin row only, like `mail.watch`) answers only a
+  message its own queue holds, to the sender, ≤20 a day.
 - **THE OPERATIONAL MIRROR: NODE-LOCAL COLUMNS STAY HOME, TIES SETTLE
   (0.5.91, store/sync.rs).** `NODE_LOCAL_COLUMNS` (a goal's `last_seq` /
   `last_checked` — a position in THAT node's mutations log — and a note's
