@@ -92,7 +92,9 @@ workspace with `npm i playwright`) — screenshot + pageerror check.
 ## Layout
 
 - `crates/hearthloom-core` — schema (migrations via `PRAGMA user_version`,
-  **currently v61**: v61 provenance (`episode_origin` — where each
+  **currently v62**: v62 goals carry `updated_at` (`intents`; bumped by
+  every write to a mirrored column, never by the node-local watch
+  progress — see THE OPERATIONAL MIRROR invariant), v61 provenance (`episode_origin` — where each
   episode first entered one of the owner's nodes and the route it took;
   `agent_tasks.inputs`/`outputs`; and the one-time relabel of others'
   words from `self` to `imported` — see the PROVENANCE invariant), v60
@@ -1087,6 +1089,18 @@ the design log 2026-07-14.
   LLM sync envelope, and `llm.model.<tier>` keeps meaning "the ACTIVE
   provider's model" because it does sync. A loopback address pushed to
   the peer would silence that node's thinking passes.
+- **THE OPERATIONAL MIRROR: NODE-LOCAL COLUMNS STAY HOME, TIES SETTLE
+  (0.5.91, store/sync.rs).** `NODE_LOCAL_COLUMNS` (a goal's `last_seq` /
+  `last_checked` — a position in THAT node's mutations log — and a note's
+  `views`) are never exported, are dropped when an older peer sends them,
+  and survive an INSERT OR REPLACE. A column the receiver lacks is
+  ignored (wire-compat per field). LWW uses `updated_at` where a table
+  has one; equal stamps with different contents go to the greater
+  canonical form so every node keeps the same copy; a table that only has
+  `created_at` still takes the incoming copy (its stamp can't tell an
+  edit). A writer that changes a mirrored column must bump `updated_at`
+  — goals didn't, and with two spokes their copies traded places at the
+  hub every cycle (the "mirrored":3 of 2026-11-03→05).
 - **PEER SYNC IS MULTI-MASTER MERGE, NEVER REPLACE-ALL.** Both nodes are
   authoritative (the owner works on both). `apply_operational`
   (store/sync.rs) upserts each row by `id` under last-writer-wins (newer

@@ -83,8 +83,8 @@ impl Store {
                 row.get(0)
             })?;
         let changed = conn.execute(
-            "INSERT OR IGNORE INTO intents (id, name, query, created_at, last_seq)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT OR IGNORE INTO intents (id, name, query, created_at, last_seq, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?4)",
             rusqlite::params![id, name, query, now_utc(), last_seq],
         )?;
         if changed == 0 {
@@ -309,7 +309,8 @@ impl Store {
                  sphere = COALESCE(?3, sphere),
                  target_date = COALESCE(?4, target_date),
                  query = COALESCE(?5, query),
-                 name = COALESCE(?6, name)
+                 name = COALESCE(?6, name),
+                 updated_at = ?8
              WHERE id = ?7",
             rusqlite::params![
                 description,
@@ -318,12 +319,16 @@ impl Store {
                 target_date,
                 query,
                 new_name,
-                id
+                id,
+                now_utc()
             ],
         )?;
         if restatement {
             conn.execute("DELETE FROM standing_queries WHERE intent_id = ?1", [&id])?;
-            conn.execute("UPDATE intents SET decomposed = 0 WHERE id = ?1", [&id])?;
+            conn.execute(
+                "UPDATE intents SET decomposed = 0, updated_at = ?2 WHERE id = ?1",
+                rusqlite::params![&id, now_utc()],
+            )?;
         }
         record_mutation(
             &conn,
@@ -478,8 +483,8 @@ impl Store {
             )?;
         }
         conn.execute(
-            "UPDATE intents SET decomposed = 1 WHERE id = ?1",
-            [intent_id],
+            "UPDATE intents SET decomposed = 1, updated_at = ?2 WHERE id = ?1",
+            rusqlite::params![intent_id, now_utc()],
         )?;
         record_mutation(
             &conn,

@@ -311,7 +311,7 @@ impl Drop for ReadScopeGuard {
     }
 }
 
-const SCHEMA_VERSION: i64 = 61;
+const SCHEMA_VERSION: i64 = 62;
 
 const SCHEMA_V1: &str = "
     -- L2: append-only ground truth. Raw content lives on disk at
@@ -2124,6 +2124,18 @@ impl Store {
                      WHERE {}; /* all-episodes: a relabel covers retired rows too */",
                 provenance::others_words_sql()
             ))?;
+        }
+        if version < 62 {
+            // v62: goals carry `updated_at` (0.5.91). The mirror decides
+            // last-writer-wins by it; without one it fell back to
+            // `created_at`, so an edit never looked newer than the copy it
+            // replaced. Every write to a goal's mirrored columns bumps it;
+            // its node-local watch progress (last_seq, last_checked) never
+            // does, and never mirrors.
+            conn.execute_batch(
+                "ALTER TABLE intents ADD COLUMN updated_at TEXT;
+                 UPDATE intents SET updated_at = created_at;",
+            )?;
         }
         if version < SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;

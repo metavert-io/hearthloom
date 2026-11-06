@@ -85,6 +85,42 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
 /// `apply_operational`,
 /// and `operational_count` so the progress denominator can never
 /// drift from what actually ships.
+/// Columns that are each node's own and never mirror (0.5.91). A goal's
+/// watch progress (`last_seq` counts THAT node's episodes) and a note's
+/// view counter change without `updated_at`, so once a hub had two spokes
+/// each overwrote the other's copy there on every cycle (the "mirrored":3
+/// of three goals) — and a goal could skip or recheck episodes by another
+/// node's numbers. Not sent, ignored when an older peer sends them, and
+/// kept as they are when a row is replaced.
+const NODE_LOCAL_COLUMNS: &[(&str, &[&str])] = &[
+    ("intents", &["last_seq", "last_checked"]),
+    ("notes_index", &["views"]),
+];
+
+fn node_local(table: &str, column: &str) -> bool {
+    NODE_LOCAL_COLUMNS
+        .iter()
+        .any(|(t, cols)| *t == table && cols.contains(&column))
+}
+
+/// A stored value as the mirror carries it.
+fn sql_to_json(v: rusqlite::types::Value) -> serde_json::Value {
+    match v {
+        rusqlite::types::Value::Null => serde_json::Value::Null,
+        rusqlite::types::Value::Integer(n) => serde_json::json!(n),
+        rusqlite::types::Value::Real(f) => serde_json::json!(f),
+        rusqlite::types::Value::Text(t) => serde_json::json!(t),
+        rusqlite::types::Value::Blob(b) => serde_json::json!(format!("__b64__{}", b64(&b))),
+    }
+}
+
+/// One row's mirrored columns, keys sorted: what two nodes compare when
+/// their copies carry the same timestamp.
+fn canonical(obj: &serde_json::Map<String, serde_json::Value>) -> String {
+    let sorted: std::collections::BTreeMap<&String, &serde_json::Value> = obj.iter().collect();
+    serde_json::to_string(&sorted).unwrap_or_default()
+}
+
 const OPERATIONAL_TABLES: &[&str] = &[
     "notes_index",
     "tasks",
@@ -364,19 +400,11 @@ impl Store {
             let rows = stmt.query_map([], |row| {
                 let mut obj = serde_json::Map::new();
                 for (i, col) in cols.iter().enumerate() {
+                    if node_local(table, col) {
+                        continue;
+                    }
                     let v: rusqlite::types::Value = row.get(i)?;
-                    obj.insert(
-                        col.clone(),
-                        match v {
-                            rusqlite::types::Value::Null => serde_json::Value::Null,
-                            rusqlite::types::Value::Integer(n) => serde_json::json!(n),
-                            rusqlite::types::Value::Real(f) => serde_json::json!(f),
-                            rusqlite::types::Value::Text(t) => serde_json::json!(t),
-                            rusqlite::types::Value::Blob(b) => {
-                                serde_json::json!(format!("__b64__{}", b64(&b)))
-                            }
-                        },
-                    );
+                    obj.insert(col.clone(), sql_to_json(v));
                 }
                 Ok(serde_json::Value::Object(obj))
             })?;
@@ -469,6 +497,13 @@ impl Store {
             let Some(rows) = rows.as_array() else {
                 continue;
             };
+            // a column this build doesn't have (a newer peer added it) is
+            // ignored, never a failed mirror — wire-compat, per field
+            let columns: std::collections::HashSet<String> = {
+                let mut stmt = tx.prepare(&format!("PRAGMA table_info({table})"))?;
+                let names = stmt.query_map([], |r| r.get::<_, String>(1))?;
+                names.collect::<std::result::Result<_, _>>()?
+            };
             // Multi-master MERGE (never replace-all): both nodes are
             // authoritative, so upsert each sender row by its `id` primary
             // key under last-writer-wins, and NEVER delete — rows that exist
@@ -476,6 +511,12 @@ impl Store {
             // either node reconciles instead of clobbering the other's.
             for row in rows {
                 let Some(obj) = row.as_object() else { continue };
+                let stripped: serde_json::Map<String, serde_json::Value> = obj
+                    .iter()
+                    .filter(|(k, _)| !node_local(table, k) && columns.contains(k.as_str()))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                let obj = &stripped;
                 // LWW gate: if our local row is strictly newer (by updated_at,
                 // else created_at), keep it and skip the sender's stale copy.
                 // ts_col comes from the row's own keys, so it always names a
@@ -531,6 +572,43 @@ impl Store {
                     if let Some(local) = local_ts {
                         if local.as_str() > sender_ts {
                             continue; // our copy is newer — keep it
+                        }
+                        // The same stamp, different contents: every node
+                        // keeps the same one (the greater canonical form),
+                        // so a tie settles instead of two spokes trading
+                        // their copies at the hub forever (0.5.91).
+                        // (only where the stamp is a real `updated_at`: a
+                        // table that falls back to `created_at` can't tell an
+                        // edit from a tie, so its incoming copy still wins)
+                        if ts_col == "updated_at" && local.as_str() == sender_ts {
+                            let cols: Vec<&String> = obj.keys().collect();
+                            let mine: Option<serde_json::Map<String, serde_json::Value>> = tx
+                                .query_row(
+                                    &format!(
+                                        "SELECT {} FROM {table} WHERE id = ?1",
+                                        cols.iter()
+                                            .map(|c| c.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    ),
+                                    [id],
+                                    |r| {
+                                        let mut m = serde_json::Map::new();
+                                        for (i, c) in cols.iter().enumerate() {
+                                            m.insert(
+                                                (*c).clone(),
+                                                sql_to_json(r.get::<_, rusqlite::types::Value>(i)?),
+                                            );
+                                        }
+                                        Ok(m)
+                                    },
+                                )
+                                .optional()?;
+                            if let Some(mine) = mine {
+                                if canonical(obj) <= canonical(&mine) {
+                                    continue;
+                                }
+                            }
                         }
                     }
                 }
@@ -593,7 +671,36 @@ impl Store {
                 {
                     continue;
                 }
+                // this node's own columns survive the replace
+                let keep: Vec<(&str, rusqlite::types::Value)> =
+                    match obj.get("id").and_then(|v| v.as_str()) {
+                        Some(id) => NODE_LOCAL_COLUMNS
+                            .iter()
+                            .filter(|(t, _)| *t == table.as_str())
+                            .flat_map(|(_, cols)| cols.iter())
+                            .filter_map(|c| {
+                                tx.query_row(
+                                    &format!("SELECT {c} FROM {table} WHERE id = ?1"),
+                                    [id],
+                                    |r| r.get::<_, rusqlite::types::Value>(0),
+                                )
+                                .optional()
+                                .ok()
+                                .flatten()
+                                .map(|v| (*c, v))
+                            })
+                            .collect(),
+                        None => vec![],
+                    };
                 tx.execute(&sql, rusqlite::params_from_iter(params))?;
+                if let Some(id) = obj.get("id").and_then(|v| v.as_str()) {
+                    for (c, v) in keep {
+                        tx.execute(
+                            &format!("UPDATE {table} SET {c} = ?1 WHERE id = ?2"),
+                            rusqlite::params![v, id],
+                        )?;
+                    }
+                }
                 applied += 1;
             }
         }
@@ -1369,6 +1476,102 @@ mod tests {
         };
         assert_eq!(kind, "friend");
         assert!(!created.is_empty());
+    }
+
+    #[test]
+    fn test_a_column_this_build_lacks_is_ignored() {
+        let (a, a_home, _ta) = seeded();
+        let (b, b_home, _tb) = seeded();
+        let actor = Actor::new("human:t");
+        a.add_intent(&actor, "garden", "garden retreat").unwrap();
+        let mut export = a.export_operational(&a_home).unwrap();
+        export["intents"][0]["from_a_newer_build"] = serde_json::json!("x");
+        assert_eq!(b.apply_operational(&b_home, &export).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_node_local_columns_stay_put_and_ties_settle() {
+        // 0.5.91, the "mirrored":3 loop: a goal's watch progress is each
+        // node's own and changed without a newer stamp, so two spokes
+        // traded their copies at the hub on every cycle.
+        let (a, a_home, _ta) = seeded();
+        let (b, b_home, _tb) = seeded();
+        let actor = Actor::new("human:t");
+        let id = a.add_intent(&actor, "garden", "garden retreat").unwrap();
+        b.apply_operational(&b_home, &a.export_operational(&a_home).unwrap())
+            .unwrap();
+        let raw = |s: &Store, sql: &str| {
+            s.lock().execute(sql, rusqlite::params![id]).unwrap();
+        };
+        raw(&a, "UPDATE intents SET last_seq = 900, last_checked = '2026-11-05T01:00:00Z' WHERE id = ?1");
+        raw(
+            &b,
+            "UPDATE intents SET last_seq = 40, last_checked = '2026-11-05T02:00:00Z' WHERE id = ?1",
+        );
+        let export = a.export_operational(&a_home).unwrap();
+        assert!(
+            export["intents"][0].get("last_seq").is_none(),
+            "a node's watch progress isn't sent"
+        );
+        assert_eq!(
+            b.apply_operational(&b_home, &export).unwrap(),
+            0,
+            "nothing changed"
+        );
+        let seq: i64 = b
+            .lock()
+            .query_row("SELECT last_seq FROM intents WHERE id = ?1", [&id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(seq, 40, "B keeps its own progress");
+
+        // an older peer that still sends it: ignored, and kept on replace
+        let mut old = export.clone();
+        old["intents"][0]["last_seq"] = serde_json::json!(900);
+        old["intents"][0]["query"] = serde_json::json!("garden retreat 2026");
+        old["intents"][0]["updated_at"] = serde_json::json!("2099-01-01T00:00:00Z");
+        assert_eq!(b.apply_operational(&b_home, &old).unwrap(), 1);
+        let (seq, query): (i64, String) = b
+            .lock()
+            .query_row(
+                "SELECT last_seq, query FROM intents WHERE id = ?1",
+                [&id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((seq, query.as_str()), (40, "garden retreat 2026"));
+
+        // the same stamp, different contents: both directions agree on one
+        raw(
+            &a,
+            "UPDATE intents SET query = 'alpha', updated_at = '2100-01-01T00:00:00Z' WHERE id = ?1",
+        );
+        raw(
+            &b,
+            "UPDATE intents SET query = 'omega', updated_at = '2100-01-01T00:00:00Z' WHERE id = ?1",
+        );
+        let from_a = a.export_operational(&a_home).unwrap();
+        let from_b = b.export_operational(&b_home).unwrap();
+        let took_a = b.apply_operational(&b_home, &from_a).unwrap();
+        let took_b = a.apply_operational(&a_home, &from_b).unwrap();
+        assert_eq!(took_a + took_b, 1, "exactly one side gives way");
+        let q = |s: &Store| -> String {
+            s.lock()
+                .query_row("SELECT query FROM intents WHERE id = ?1", [&id], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(q(&a), q(&b), "and they agree");
+        assert_eq!(
+            b.apply_operational(&b_home, &a.export_operational(&a_home).unwrap())
+                .unwrap()
+                + a.apply_operational(&a_home, &b.export_operational(&b_home).unwrap())
+                    .unwrap(),
+            0,
+            "settled: the next cycle changes nothing"
+        );
     }
 
     #[test]

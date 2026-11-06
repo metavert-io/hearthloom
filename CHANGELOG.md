@@ -9,6 +9,18 @@ pin release tags, never a branch.
 ## Unreleased
 
 ### Fixed
+- **Goals stopped trading places between your machines.** With two
+  machines syncing through the hosted one, every sync cycle rewrote your
+  goals there: each goal's watch progress (which of that machine's own
+  records it has checked) changed without the goal looking any newer, so
+  each machine's copy replaced the other's, over and over — and a goal
+  could skip or re-check records by another machine's numbers. Watch
+  progress now stays on each machine, goals carry a real "changed at"
+  (schema v62) so an edit wins by time, and two copies changed at the same
+  moment settle on the same one everywhere. A column a machine doesn't
+  know yet no longer fails its whole sync.
+
+### Fixed
 - **Building needs Rust 1.98 or newer since 0.5.87, and now says so.**
   The workspace declares it (`rust-version`), and `scripts/install.sh`
   updates an older toolchain through rustup before building (without
