@@ -304,13 +304,125 @@ pub fn publish_self(state: &AppState) {
     {
         map.extend(extra);
     }
-    let _ = state.store.publish_node(
-        &node_id(state),
-        &node_name(state),
+    let (name, kind, version) = (
+        node_name(state),
         crate::monitor::node_kind(),
-        &roles,
         env!("CARGO_PKG_VERSION"),
     );
+    let _ = state
+        .store
+        .publish_node(&node_id(state), &name, kind, &roles, version);
+    // what this node says about itself changed: tell the others now, so
+    // they sync at once instead of at their next tick (0.5.99)
+    if tokio::runtime::Handle::try_current().is_err() {
+        return; // no runtime to send from: the next publish notices it
+    }
+    let fingerprint = announce_fingerprint(&name, kind, &roles, version);
+    let tell = ANNOUNCE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .decide(&fingerprint, std::time::Instant::now());
+    match tell {
+        Tell::Now => crate::bus::touch(state, NODES_TOPIC),
+        Tell::After(wait) => {
+            let state = state.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(wait).await;
+                publish_self(&state);
+            });
+        }
+        Tell::No => {}
+    }
+}
+
+/// The bus topic for "a node's row changed": every peer that hears a hint
+/// syncs at once (bus.rs), older ones too.
+pub const NODES_TOPIC: &str = "nodes.changed";
+/// At most one such hint per node per minute: some roles follow other
+/// nodes' rows (who keeps archives), so two nodes must never be able to
+/// keep waking each other — the 0.5.68 ten-second sync loop.
+const ANNOUNCE_GAP: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// What other nodes act on in this node's row — never the readings that
+/// change by themselves (free space; archive sizes, dates and progress;
+/// a transfer under way; `last_seen`), or every publish would be news.
+fn announce_fingerprint(name: &str, kind: &str, roles: &Value, version: &str) -> String {
+    let archives: Vec<Value> = roles["archives"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|a| json!([a["name"], a["adapter"], a["accounts"]]))
+        .collect();
+    json!({
+        "name": name,
+        "kind": kind,
+        "version": version,
+        "thinking": roles["thinking"],
+        "agents": roles["agents"],
+        "llm": roles["llm"],
+        "imports": roles["imports"],
+        "mail": roles["mail"],
+        "mailboxes": roles["mailboxes"],
+        "calendar": roles["calendar"],
+        "keeps_archives": roles["keeps_archives"],
+        "always_on": roles["always_on"],
+        "archives": archives,
+    })
+    .to_string()
+}
+
+#[derive(Debug, PartialEq)]
+enum Tell {
+    Now,
+    /// held back by the gap: publish again after this long
+    After(std::time::Duration),
+    No,
+}
+
+/// When this node last told the others its row changed.
+struct Announce {
+    last: Option<String>,
+    told_at: Option<std::time::Instant>,
+    pending: bool,
+    scheduled: bool,
+}
+
+static ANNOUNCE: std::sync::Mutex<Announce> = std::sync::Mutex::new(Announce {
+    last: None,
+    told_at: None,
+    pending: false,
+    scheduled: false,
+});
+
+impl Announce {
+    /// Only a real change is told (the first publish after a start counts
+    /// as one: the others learn the new version at once); one inside the
+    /// gap is told when the gap ends, by one scheduled re-publish.
+    fn decide(&mut self, fingerprint: &str, now: std::time::Instant) -> Tell {
+        if self.last.as_deref() != Some(fingerprint) {
+            self.last = Some(fingerprint.to_string());
+            self.pending = true;
+        }
+        if !self.pending {
+            return Tell::No;
+        }
+        match self.told_at.map(|t| now.saturating_duration_since(t)) {
+            Some(since) if since < ANNOUNCE_GAP => {
+                if self.scheduled {
+                    Tell::No
+                } else {
+                    self.scheduled = true;
+                    Tell::After(ANNOUNCE_GAP - since)
+                }
+            }
+            _ => {
+                self.pending = false;
+                self.scheduled = false;
+                self.told_at = Some(now);
+                Tell::Now
+            }
+        }
+    }
 }
 
 /// Publish every agent this node hosts into the synced directory.
@@ -1464,6 +1576,79 @@ pub fn mint_agent_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A node tells the others its row changed: at once on a real change
+    /// (and on its first publish), never for an unchanged one, and at most
+    /// once a minute — a change inside the minute goes out when it ends.
+    #[test]
+    fn test_a_node_tells_the_others_only_when_its_row_changes() {
+        use std::time::Duration;
+        let mut a = Announce {
+            last: None,
+            told_at: None,
+            pending: false,
+            scheduled: false,
+        };
+        let t0 = std::time::Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        assert_eq!(a.decide("v1", at(0)), Tell::Now, "the first publish");
+        assert_eq!(a.decide("v1", at(1)), Tell::No, "nothing changed");
+        assert_eq!(
+            a.decide("v2", at(10)),
+            Tell::After(Duration::from_secs(50)),
+            "a change inside the minute waits for its end"
+        );
+        assert_eq!(a.decide("v3", at(20)), Tell::No, "already scheduled");
+        assert_eq!(a.decide("v3", at(61)), Tell::Now, "told when the gap ends");
+        // a change and back again inside the gap is still told, once
+        assert_eq!(a.decide("v4", at(70)), Tell::After(Duration::from_secs(51)));
+        assert_eq!(a.decide("v3", at(80)), Tell::No);
+        assert_eq!(a.decide("v3", at(121)), Tell::Now);
+        assert_eq!(a.decide("v3", at(300)), Tell::No);
+        // long after: a change goes out at once again
+        assert_eq!(a.decide("v5", at(400)), Tell::Now);
+    }
+
+    /// Free space, archive sizes, dates and progress change by themselves:
+    /// they're never news. A calendar connected or a mailbox's watch is.
+    #[test]
+    fn test_readings_that_change_by_themselves_are_not_news() {
+        let roles = |free: u64, messages: u64, calendar: bool, watching: bool| {
+            json!({
+                "thinking": "on", "agents": 1, "llm": true, "imports": true,
+                "mail": watching, "calendar": calendar,
+                "mailboxes": [{"id": "1a2b3c4d", "address": "me@x.example",
+                               "watching": watching, "aliases": []}],
+                "archives": [{"name": "gmail-live", "adapter": "mbox", "bytes": messages * 900,
+                              "messages": messages, "last": format!("2026-11-06T1{}:00:00Z", messages % 10),
+                              "text": format!("{}%", messages % 100), "settled": false}],
+                "always_on": true, "free_bytes": free, "keeps_archives": null, "pulling": [],
+            })
+        };
+        let fp = |r: &Value| announce_fingerprint("Mac mini", "laptop", r, "0.5.99");
+        let base = fp(&roles(1_000, 20, false, true));
+        assert_eq!(base, fp(&roles(2_000_000, 27, false, true)));
+        assert_ne!(
+            base,
+            fp(&roles(1_000, 20, true, true)),
+            "calendar connected"
+        );
+        assert_ne!(
+            base,
+            fp(&roles(1_000, 20, false, false)),
+            "a watch switched off"
+        );
+        assert_ne!(
+            base,
+            announce_fingerprint(
+                "Mac mini",
+                "laptop",
+                &roles(1_000, 20, false, true),
+                "0.5.100"
+            ),
+            "a new version"
+        );
+    }
 
     /// The pool from the runner's side: a task waits (and says why) while
     /// the only account it may use is out; with switching on it runs on

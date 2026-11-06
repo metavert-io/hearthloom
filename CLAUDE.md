@@ -368,7 +368,11 @@ workspace with `npm i playwright`) — screenshot + pageerror check.
   ring 256/24h, `resync` past the gap) + POST /v1/bus/publish, both peer
   scope; `touch()` hooks on Desk/goal/note/relationship/selfmodel/project
   writes → operational.changed, rename → entity.renamed, scope/privacy →
-  privacy.changed; EVERY hint (and resync) triggers one debounced
+  privacy.changed, a node's own row → nodes.changed (0.5.99,
+  `agents::publish_self`: only when `announce_fingerprint` changes, ≤1 a
+  minute — keep readings that change by themselves (free space, archive
+  sizes/dates/progress, `last_seen`) OUT of the fingerprint, or every
+  publish becomes a hint and nodes wake each other); EVERY hint (and resync) triggers one debounced
   sync_once, single-flighted with the 5-min tick via automation key
   `peer-sync-early`; 404/405 → poll-only feature-detect both directions;
   willingness filter `bus::offered` at fan-out — friend grants slot in
