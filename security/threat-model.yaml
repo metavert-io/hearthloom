@@ -1,0 +1,97 @@
+# Threat model, maintained with the Security Steward (format steward-tm/0.1).
+# IDs are permanent: retire a threat instead of deleting it, and never reuse a number.
+schema: steward-tm/0.1
+project: metavert-io/hearthloom
+prefix: HL
+model_version: 1
+reviewed_at_commit: ac3b52009a9de514a869751c5cafc82e8d9a0c70
+refs:
+  asi: "2026"
+  asvs: 5.0.0
+  linddun: privacy
+  llm: "2025"
+  stride: default
+summary: 'A personal second brain: one Rust daemon with an HTTP API, an MCP server for agents, importers for personal data (health, location, messages, email, browsing, photos, contacts, agent sessions) and plugins. The record is among the most sensitive data its owner has.'
+components:
+  - id: C1
+    name: Daemon HTTP API
+    kind: service
+    exposure: local
+  - id: C2
+    name: MCP server for agents
+    kind: service
+    exposure: local
+  - id: C3
+    name: The personal record (SQLite)
+    kind: data
+    exposure: local
+  - id: C4
+    name: Importers and plugins
+    kind: service
+  - id: C5
+    name: Web UI
+    kind: client
+    exposure: local
+  - id: C6
+    name: API keys (read, ingest, write, grants)
+    kind: secret
+  - id: C7
+    name: Releases, updates and the plugin registry
+    kind: dependency
+    exposure: internet
+  - id: C8
+    name: CI
+    kind: infrastructure
+boundaries:
+  - id: B1
+    name: Agents and apps to the daemon
+    between:
+      - C1
+      - C2
+  - id: B2
+    name: Daemon to its plugins
+    between:
+      - C1
+      - C4
+assumptions:
+  - id: A1
+    text: The daemon listens on the owner's machine or a hosted tenant only, behind the owner's own authentication.
+threats:
+  - id: T-HL-0001
+    title: A compromised GitHub Action or dependency tampers with what CI builds
+    targets:
+      - C8
+      - C7
+    tags:
+      - STRIDE:T
+      - CWE-1357
+    status: mitigated
+    controls:
+      - M-HL-0001
+      - M-HL-0002
+  - id: T-HL-0002
+    title: A secret is committed to the repository
+    targets:
+      - C6
+      - C8
+    tags:
+      - STRIDE:I
+      - CWE-798
+    status: mitigated
+    controls:
+      - M-HL-0003
+controls:
+  - id: M-HL-0001
+    title: Actions pinned by commit SHA with read-only permissions
+    evidence:
+      - .github/workflows/ci.yml
+      - .github/workflows/audit.yml
+  - id: M-HL-0002
+    title: Locked dependencies and a RustSec advisory audit
+    evidence:
+      - Cargo.lock
+      - deny.toml
+  - id: M-HL-0003
+    title: Secret scanning in CI
+    evidence:
+      - .github/workflows/secret-scan.yml
