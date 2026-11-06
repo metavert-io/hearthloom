@@ -98,6 +98,7 @@ fn sleep_off() -> bool {
 }
 
 /// `pmset -g`'s line ` sleep   0 (sleep prevented by …)` — system sleep off.
+#[cfg(any(target_os = "macos", test))]
 fn parse_sleep_off(out: &str) -> bool {
     out.lines().any(|l| {
         let mut words = l.split_whitespace();
