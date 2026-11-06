@@ -124,6 +124,29 @@ pin release tags, never a branch.
 - The Docker image's base images are pinned by digest (Dependabot
   proposes updates).
 
+### Security
+The changes above closed four weaknesses. They are described here now
+that every hosted node runs the fix (published 2026-11-06); if you run a
+node yourself, upgrade it to 0.5.96 or later.
+- **A read-only key could write through MCP, and a write could name its
+  own author.** A key holding only `read` could add to the record through
+  the MCP server, and a commit was recorded under whatever actor the
+  caller gave. Now each MCP tool checks the key's scopes, and the server
+  names every writer that isn't the owner. (CWE-863)
+- **An ingest key chose who its data was recorded as.** A key allowed to
+  send data to `/v1/ingest` or a device feed could have it recorded under
+  any actor, the owner's included. Now the server names the writer.
+  (CWE-345)
+- **The first login went to whoever asked first.** A node with no login
+  let anyone who reached it create the owner's account, with no proof
+  they controlled the machine. Now it takes the node's one-time setup
+  code, or on a hosted node its provisioner's control token. (CWE-287)
+- **The dashboard kept an API key in browser storage, and could be led to
+  call other paths.** A script running on the dashboard's page could read
+  a stored key, and a crafted dashboard link could make the page request a
+  path outside its own API. Now no key is kept in the browser, and the
+  page requests only its own API. (CWE-922, CWE-918)
+
 ### Fixed
 - An ember holding a mail permission got no token for its pages.
 
