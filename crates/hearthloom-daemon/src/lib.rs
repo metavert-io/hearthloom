@@ -28,6 +28,7 @@ mod live_ingest;
 mod live_photos;
 pub mod llm;
 mod lookups;
+mod mail_triage;
 mod mbox_index;
 mod mbox_text;
 mod mcp;
@@ -326,6 +327,7 @@ pub async fn run(home: Home) -> Result<()> {
     tokio::spawn(inbox::run_loop(state.clone()));
     tokio::spawn(gmail_watch::run_loop(state.clone()));
     tokio::spawn(mbox_text::run_loop(state.clone()));
+    tokio::spawn(mail_triage::run_loop(state.clone()));
     tokio::spawn(archives_place::run_loop(state.clone()));
     // Hybrid peer sync: dormant until a peer is paired (Integrations).
     tokio::spawn(sync::run_loop(state.clone()));

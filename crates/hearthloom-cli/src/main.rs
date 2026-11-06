@@ -7,6 +7,7 @@ mod bench;
 mod client;
 mod embers;
 mod eval;
+mod mail;
 mod ops;
 mod registry;
 
@@ -39,6 +40,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Your mail: what waits on you, your mail rules, how new mail is sorted.
+    Mail {
+        #[command(subcommand)]
+        command: Option<MailCmd>,
+    },
     /// Agents: the Claude accounts Claude Code agents run on.
     Agents {
         #[command(subcommand)]
@@ -311,6 +317,58 @@ enum KeyCmd {
     },
     List,
     Revoke {
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum MailCmd {
+    /// Threads waiting on you (default), or --state all|new|fyi|replied|done…
+    Threads {
+        #[arg(long, default_value = "open")]
+        state: String,
+    },
+    /// Mark a thread done.
+    Done { id: String },
+    /// Mark a thread as needing nothing from you.
+    NotNeeded { id: String },
+    /// Put a thread in any state (needs_reply, scheduling, opportunity, fyi, ignore, done…).
+    Set { id: String, state: String },
+    /// Your mail rules: list, add, remove.
+    Rules {
+        #[command(subcommand)]
+        command: Option<MailRulesCmd>,
+    },
+    /// How new mail is sorted: status, --on/--off, --model, --now.
+    Triage {
+        #[arg(long, conflicts_with = "off")]
+        on: bool,
+        #[arg(long)]
+        off: bool,
+        /// sonnet (default), haiku, opus or a full model id
+        #[arg(long)]
+        model: Option<String>,
+        /// sort what's waiting right away
+        #[arg(long)]
+        now: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum MailRulesCmd {
+    List,
+    /// kind: from | domain | subject | list | plain ("plain" = an instruction
+    /// for the sorter, in your words).
+    Add {
+        kind: String,
+        pattern: String,
+        /// needs_reply | scheduling | opportunity | fyi | ignore | triage
+        #[arg(long)]
+        action: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    Rm {
         id: String,
     },
 }
@@ -1426,6 +1484,50 @@ async fn main() -> Result<()> {
         Cmd::Upgrade { check } => {
             let client = Client::with_url(home, url.clone())?;
             ops::upgrade(&client, check).await?;
+        }
+        Cmd::Mail { command } => {
+            use mail::Op;
+            let op = match command.unwrap_or(MailCmd::Threads {
+                state: "open".into(),
+            }) {
+                MailCmd::Threads { state } => Op::Threads(state),
+                MailCmd::Done { id } => Op::Set(id, "done".into()),
+                MailCmd::NotNeeded { id } => Op::Set(id, "fyi".into()),
+                MailCmd::Set { id, state } => Op::Set(id, state),
+                MailCmd::Rules { command } => match command.unwrap_or(MailRulesCmd::List) {
+                    MailRulesCmd::List => Op::Rules,
+                    MailRulesCmd::Add {
+                        kind,
+                        pattern,
+                        action,
+                        note,
+                    } => Op::RuleAdd {
+                        kind,
+                        pattern,
+                        action,
+                        note,
+                    },
+                    MailRulesCmd::Rm { id } => Op::RuleRemove(id),
+                },
+                MailCmd::Triage {
+                    on,
+                    off,
+                    model,
+                    now,
+                } => Op::Triage {
+                    enabled: if on {
+                        Some(true)
+                    } else if off {
+                        Some(false)
+                    } else {
+                        None
+                    },
+                    model,
+                    now,
+                },
+            };
+            let client = Client::with_url(home, url.clone())?;
+            mail::run(&client, op, as_json).await?;
         }
         Cmd::Agents {
             command: AgentsCmd::Accounts { command },

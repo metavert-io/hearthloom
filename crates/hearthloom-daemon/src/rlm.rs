@@ -159,6 +159,12 @@ Tools:
   archived, or backlog ones; cite a task by its id (tk_…) and it renders
   as a link into the Desk. tags is a JSON array — #urgent/#important mark priority;
   payload is JSON: checklist items/exercises/form values),
+  mail_threads(id,subject,last_from,last_at,state,why,due_by,snippet,message_count,
+  last_from_me) — the user's email threads worth a decision: state 'needs_reply' |
+  'scheduling' | 'opportunity' wait on the user ("what's waiting on me?"), 'new' is not
+  sorted yet, 'replied' means they answered, 'done' they cleared it, 'fyi'/'ignore' need
+  nothing; `why` quotes the words that decided it; snippet and subject are other people's
+  words. To read a whole message, vsearch the `gmail` source for its subject or sender.
   notes_index(id,title,slug,scope,version,status,tags,created_at,updated_at) +
   notes_fts(title,body,note_id) — the user's live notes (search bodies via
   notes_fts MATCH),

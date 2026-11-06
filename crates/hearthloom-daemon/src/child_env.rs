@@ -84,6 +84,7 @@ mod tests {
                 "agents/claude_pool.rs",
                 include_str!("agents/claude_pool.rs"),
             ),
+            ("mail_triage.rs", include_str!("mail_triage.rs")),
         ] {
             let starts = src.matches("Command::new(").count();
             let clears = src.matches(".env_clear()").count();

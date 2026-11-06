@@ -8,6 +8,27 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+### Added
+- **"Waiting on you": the mail that needs you, on the Desk.** New mail
+  from people (Gmail's Primary category, and replies in threads you're
+  part of) becomes a thread; on the machine that watches Gmail, a model
+  with no tools at all sorts each new thread — needs a reply, a time, or a
+  look; just so you know; or nothing — and must quote the words that
+  decided it, or the thread is only "just so you know". Threads that need
+  you appear at the top of the Desk with those words, a due date when the
+  mail names one, and done / not needed / open in Gmail. Your reply moves a
+  thread out; a new message brings it back. On your own machine the
+  sorting runs on Claude Code (your subscription, through the Claude
+  account pool); on a hosted node it uses the node's AI key. The first run
+  reads the last two weeks of mail, so what already waits shows up at once.
+- **Mail rules, in your words only:** by sender, domain, subject or
+  mailing list (decided before any model), and plain-language rules the
+  sorter follows. Mail can never write a rule.
+- Mail a privacy rule covers never goes to a model and stays hidden while
+  the vault is locked. Ask can answer "what's waiting on me?".
+- `hearthloom mail` (threads, done, not-needed, set, rules, triage), all
+  with `--json`. Schema v63.
+
 ## 0.5.91 — 2026-11-06
 
 ### Fixed

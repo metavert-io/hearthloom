@@ -310,6 +310,13 @@ A source is either copied into the episode log or left where it is.
 A large archive can be both. The Gmail Takeout is materialized for its
 core strata (sent, personal, starred) and virtual for all of it.
 
+**Mail threads (v63, `store/mail.rs`, `mail_triage.rs`).** The action
+half of mail: each message the Gmail pull fetches is observed into a
+thread (by its headers; the id hashes the root message id), owner rules
+decide first, and a tool-less model sorts what is new (needs a reply, a
+time, a look; fyi; ignore), quoting the words that decided it. Threads
+and rules mirror; the Desk shows what waits on the owner.
+
 A mail archive's sidecar indexes the headers when it is built, and its
 message text and links in the background afterwards (`mbox_text.rs`; big
 archives wait for the owner). Archives are read in place, so every read

@@ -109,9 +109,14 @@ fn pull_once_unserialized(state: &AppState) -> Result<(usize, usize, bool)> {
 
     let filter = LabelFilter::core_strata();
     let mut drafts = Vec::new();
+    // what each message means for its thread (mail_triage.rs, 0.5.92)
+    let mut seen = Vec::new();
     let outcome = gmail_imap::pull_new(&mut feed, cursor, &pull_options(), |msgs| {
         for m in &msgs {
             file.write_all(&gmail_imap::mbox_record(m))?;
+            if let Some(s) = crate::mail_triage::seen(state, &user, &m.labels, &m.raw) {
+                seen.push(s);
+            }
             match hearthloom_adapters::mbox::draft_from_message_filtered(
                 &gmail_imap::message_text(m),
                 &filter,
@@ -146,6 +151,9 @@ fn pull_once_unserialized(state: &AppState) -> Result<(usize, usize, bool)> {
         // Let parked HTTP handlers through between holds.
         std::thread::sleep(std::time::Duration::from_millis(60));
     }
+
+    // threads after the memories (a replay observes nothing twice)
+    crate::mail_triage::observe(state, &seen);
 
     // The cursor advances LAST: everything before this line is
     // idempotent under replay.

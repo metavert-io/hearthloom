@@ -897,6 +897,9 @@ pub fn plugin_route_allowed(path: &str, method: &str, scopes: &[String]) -> bool
             // mounted sources: a mail archive is the whole mailbox, read
             // in place (0.5.86; the route checks the owner too)
             "/v1/sources/virtual",
+            // the owner's mail threads and rules (embers get mail through
+            // their own `mail.watch` scope, never this)
+            "/v1/mail",
         ];
         return path.starts_with("/v1/") && !DENIED.iter().any(|d| path.starts_with(d));
     }

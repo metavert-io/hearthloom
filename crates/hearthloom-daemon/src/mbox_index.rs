@@ -527,6 +527,40 @@ pub fn compute_summary(mbox: &Path) -> Result<Summary> {
     })
 }
 
+/// Messages dated since `since`, oldest first: (id, labels) — the labels
+/// are the pull's own header (a sender's forged one is stripped).
+pub fn since(mbox: &Path, since: chrono::DateTime<chrono::Utc>) -> Result<Vec<(String, String)>> {
+    let conn =
+        Connection::open_with_flags(index_path(mbox), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut stmt = conn.prepare("SELECT id, date, labels FROM messages")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, Option<String>>(1)?,
+            r.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+    let mut out: Vec<(chrono::DateTime<chrono::Utc>, String, String)> = Vec::new();
+    for row in rows {
+        let (id, date, labels) = row?;
+        let Some(when) = date
+            .as_deref()
+            .and_then(|d| chrono::DateTime::parse_from_rfc2822(d.trim()).ok())
+            .map(|d| d.with_timezone(&chrono::Utc))
+        else {
+            continue;
+        };
+        if when >= since {
+            out.push((when, id, labels.unwrap_or_default()));
+        }
+    }
+    out.sort_by_key(|(when, _, _)| *when);
+    Ok(out
+        .into_iter()
+        .map(|(_, id, labels)| (id, labels))
+        .collect())
+}
+
 /// Read one message's raw text (headers + body) by its indexed offset.
 pub fn fetch(mbox: &Path, id: &str, cap_chars: usize) -> Result<String> {
     if is_stale(mbox) {
@@ -557,6 +591,38 @@ pub fn fetch(mbox: &Path, id: &str, cap_chars: usize) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_recent_messages_come_oldest_first_with_the_pulls_labels() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mbox = tmp.path().join("live.mbox");
+        let now = chrono::Utc::now();
+        let msg = |id: &str, days: i64, labels: &str| {
+            format!(
+                "From gmail-imap uid=1\nX-Gmail-Labels: {labels}\nFrom: A <a@x>\nSubject: s\nDate: {}\nMessage-ID: <{id}>\n\nbody\n\n",
+                (now - chrono::Duration::days(days)).to_rfc2822()
+            )
+        };
+        std::fs::write(
+            &mbox,
+            [
+                msg("old@x", 30, "Inbox"),
+                msg("b@x", 2, "Inbox, Category Personal"),
+                msg("a@x", 5, "Sent"),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        build(&mbox).unwrap();
+        let got = since(&mbox, now - chrono::Duration::days(14)).unwrap();
+        assert_eq!(
+            got,
+            vec![
+                ("a@x".to_string(), "Sent".to_string()),
+                ("b@x".to_string(), "Inbox, Category Personal".to_string())
+            ]
+        );
+    }
 
     const SAMPLE: &str = "From a@x Mon Jan 05 10:00:00 2026\n\
 From: Ann Lee <ann@x.example>\n\

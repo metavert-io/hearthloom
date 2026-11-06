@@ -1147,6 +1147,48 @@ let recentExercises = [];
 /* "from your plugins": each enabled plugin's declared desk widget as a
    small sandboxed iframe (same isolation as plugin pages — plugin JS
    never runs in this origin). Invisible when nothing declares one. */
+/* ————— mail waiting on you (0.5.92): threads triage marked as needing a
+   reply, a time, or a look — each with the words that decided it. ————— */
+async function paintMail(host) {
+  if (!host) return;
+  let data;
+  try { data = await api("/v1/mail/threads?state=open&limit=30"); } catch { host.hidden = true; return; }
+  const threads = data.threads || [];
+  const err = data.triage?.last?.error;
+  if (!threads.length && !err) { host.hidden = true; host.innerHTML = ""; return; }
+  host.hidden = false;
+  const label = { needs_reply: "reply", scheduling: "a time", opportunity: "a look" };
+  const gmail = (id) => id
+    ? `https://mail.google.com/mail/u/0/#search/${encodeURIComponent("rfc822msgid:" + id)}` : null;
+  host.innerHTML = `
+    <div class="section-title">Waiting on you <span class="meta">· ${threads.length} email${threads.length === 1 ? "" : "s"}</span></div>
+    ${err ? `<p class="meta">Sorting new mail failed last time: ${esc(err)}</p>` : ""}
+    ${threads.map((t) => `
+      <div class="mail-row" data-thread="${esc(t.id)}" style="padding:var(--s2) 0; border-bottom:1px solid var(--line)">
+        <div class="task-row" style="flex-wrap:wrap; align-items:baseline">
+          <b>${esc(t.subject || "(no subject)")}</b>
+          <span class="meta">${esc(t.last_from)}</span>
+          <span class="task-tag plain-tag">needs ${esc(label[t.state] || t.state)}</span>
+          ${t.due_by ? `<span class="task-tag">by ${esc(t.due_by)}</span>` : ""}
+        </div>
+        ${t.why ? `<div class="meta">${esc(t.why)}</div>` : ""}
+        <div class="tend-actions">
+          <button class="btn btn-quiet mail-act" data-state="done">done</button>
+          <button class="btn btn-quiet mail-act" data-state="fyi">not needed</button>
+          ${gmail(t.last_message_id) ? `<a class="btn btn-quiet" href="${esc(gmail(t.last_message_id))}" target="_blank" rel="noopener noreferrer">open in Gmail ↗</a>` : ""}
+        </div>
+      </div>`).join("")}`;
+  host.querySelectorAll(".mail-act").forEach((b) => {
+    b.onclick = async () => {
+      const row = b.closest("[data-thread]");
+      try {
+        await apiPost(`/v1/mail/threads/${encodeURIComponent(row.dataset.thread)}`, { state: b.dataset.state });
+        paintMail(host);
+      } catch (e) { toast(e.message); }
+    };
+  });
+}
+
 async function paintPluginWidgets(host) {
   if (!host) return;
   const widgets = window.__pluginUi?.desk || [];
@@ -1245,6 +1287,7 @@ export async function mount(container, helpers) {
       the record writes itself.</p>
     <div class="desk-grid">
       <div class="desk-main">
+        <div class="desk-panel" id="desk-mail" hidden style="margin-bottom:var(--s4)"></div>
         <div class="section-title">To-do list
           <span class="meta" style="font-weight:300; font-size:0.8em; opacity:0.85">— <b>#tags</b> (#urgent · #daily · #today · #template-name) and <b>@mentions</b> both work here <i>and</i> in notes</span></div>
         <div class="searchbar" style="flex-wrap:wrap">
@@ -1284,6 +1327,7 @@ export async function mount(container, helpers) {
       </div>
     </div>`;
   paintPluginWidgets(container.querySelector("#desk-plugins"));
+  paintMail(container.querySelector("#desk-mail"));
   paintSharedRail(container.querySelector("#desk-shared"));
 
   const [templatesData, goals, exercisesData] = await Promise.all([

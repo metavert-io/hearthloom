@@ -494,7 +494,7 @@ async fn sign_in(claude: &std::path::Path, dir: Option<&PathBuf>, id: &str, fres
 
 /// Where `claude` is on this machine: a Claude Code agent's own setting,
 /// else the usual places.
-fn claude_bin(state: &AppState) -> Option<PathBuf> {
+pub fn claude_bin(state: &AppState) -> Option<PathBuf> {
     let agents = state.store.agents().ok()?;
     agents
         .iter()

@@ -92,7 +92,9 @@ workspace with `npm i playwright`) — screenshot + pageerror check.
 ## Layout
 
 - `crates/hearthloom-core` — schema (migrations via `PRAGMA user_version`,
-  **currently v62**: v62 goals carry `updated_at` (`intents`; bumped by
+  **currently v63**: v63 mail threads + the owner's mail rules
+  (`mail_threads`, `mail_rules` mirrored + journaled; `mail_thread_messages`
+  the observing node's index — see MAIL TRIAGE), v62 goals carry `updated_at` (`intents`; bumped by
   every write to a mirrored column, never by the node-local watch
   progress — see THE OPERATIONAL MIRROR invariant), v61 provenance (`episode_origin` — where each
   episode first entered one of the owner's nodes and the route it took;
@@ -1089,6 +1091,18 @@ the design log 2026-07-14.
   LLM sync envelope, and `llm.model.<tier>` keeps meaning "the ACTIVE
   provider's model" because it does sync. A loopback address pushed to
   the peer would silence that node's thinking passes.
+- **MAIL TRIAGE LABELS, NEVER ACTS (0.5.92, `mail_triage.rs`,
+  store/mail.rs).** The sorter has NO tools (Claude Code `--tools ""` +
+  `--json-schema`, or `llm::call`), thread text sits inside defused
+  `<thread>` fences, and a label whose quoted span isn't in the thread is
+  only `fyi` (`checked`). Private threads (a privacy rule, or a private
+  memory of the message) never reach a model (`mail_threads_to_triage`).
+  Rules are owner-only (`require_owner`; mail never writes one). Threads
+  form only from decision-worthy mail (Primary not from the owner, rule
+  matches, replies to an existing thread); thread ids hash the root
+  message id so every node agrees. `/v1/mail` is on the ember deny list;
+  embers will get mail through their own scope. A new shadow view needs
+  its DROP (`test_every_shadow_view_is_dropped`).
 - **THE OPERATIONAL MIRROR: NODE-LOCAL COLUMNS STAY HOME, TIES SETTLE
   (0.5.91, store/sync.rs).** `NODE_LOCAL_COLUMNS` (a goal's `last_seq` /
   `last_checked` — a position in THAT node's mutations log — and a note's

@@ -28,6 +28,7 @@ mod intents;
 mod lint;
 mod llm_usage;
 mod locations;
+pub mod mail;
 mod movements;
 mod network;
 mod notes;
@@ -311,7 +312,7 @@ impl Drop for ReadScopeGuard {
     }
 }
 
-const SCHEMA_VERSION: i64 = 62;
+const SCHEMA_VERSION: i64 = 63;
 
 const SCHEMA_V1: &str = "
     -- L2: append-only ground truth. Raw content lives on disk at
@@ -493,6 +494,8 @@ const VAULT_SHADOW_VIEWS: &str = "
         WHERE e.scope != 'private';
     CREATE TEMP VIEW tasks AS
         SELECT * FROM main.tasks WHERE scope != 'private';
+    CREATE TEMP VIEW mail_threads AS
+        SELECT * FROM main.mail_threads WHERE scope != 'private';
     CREATE TEMP VIEW notes_index AS
         SELECT * FROM main.notes_index WHERE scope != 'private';
     CREATE TEMP VIEW note_mentions AS
@@ -564,6 +567,7 @@ const LIVE_SHADOW_VIEWS: &str = "
         WHERE ea.superseded_by IS NULL AND eb.superseded_by IS NULL;
 ";
 const VAULT_SHADOW_DROP: &str = "
+    DROP VIEW IF EXISTS temp.mail_threads;
     DROP VIEW IF EXISTS temp.location_points;
     DROP VIEW IF EXISTS temp.episodes;
     DROP VIEW IF EXISTS temp.entities;
@@ -2137,6 +2141,49 @@ impl Store {
                  UPDATE intents SET updated_at = created_at;",
             )?;
         }
+        if version < 63 {
+            // v63: mail threads and the owner's mail rules (0.5.92, store/
+            // mail.rs) — what is waiting on the owner. Threads and rules
+            // mirror and are journaled; which message is in which thread
+            // is the observing node's own index.
+            conn.execute_batch(
+                "CREATE TABLE mail_threads (
+                     id TEXT PRIMARY KEY,
+                     account TEXT NOT NULL DEFAULT '',
+                     subject TEXT NOT NULL DEFAULT '',
+                     last_from TEXT NOT NULL DEFAULT '',
+                     last_from_me INTEGER NOT NULL DEFAULT 0,
+                     last_message_id TEXT,
+                     last_at TEXT,
+                     message_count INTEGER NOT NULL DEFAULT 0,
+                     snippet TEXT NOT NULL DEFAULT '',
+                     state TEXT NOT NULL DEFAULT 'new',
+                     why TEXT,
+                     confidence REAL,
+                     due_by TEXT,
+                     rule_id TEXT,
+                     scope TEXT NOT NULL DEFAULT 'personal',
+                     triaged_at TEXT,
+                     created_at TEXT NOT NULL,
+                     updated_at TEXT NOT NULL
+                 );
+                 CREATE INDEX idx_mail_threads_state ON mail_threads(state, last_at);
+                 CREATE TABLE mail_thread_messages (
+                     message_id TEXT PRIMARY KEY,
+                     thread_id TEXT NOT NULL
+                 );
+                 CREATE TABLE mail_rules (
+                     id TEXT PRIMARY KEY,
+                     kind TEXT NOT NULL,
+                     pattern TEXT NOT NULL,
+                     action TEXT NOT NULL,
+                     note TEXT,
+                     enabled INTEGER NOT NULL DEFAULT 1,
+                     created_at TEXT NOT NULL,
+                     updated_at TEXT NOT NULL
+                 );",
+            )?;
+        }
         if version < SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -2727,6 +2774,22 @@ pub(crate) fn journal_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_every_shadow_view_is_dropped() {
+        // a view created for a locked read and never dropped makes the next
+        // locked read fail ("view … already exists") — 0.5.92's mail_threads
+        for name in VAULT_SHADOW_VIEWS
+            .split("CREATE TEMP VIEW ")
+            .skip(1)
+            .filter_map(|v| v.split_whitespace().next())
+        {
+            assert!(
+                VAULT_SHADOW_DROP.contains(&format!("DROP VIEW IF EXISTS temp.{name};")),
+                "{name} is created in VAULT_SHADOW_VIEWS but never dropped"
+            );
+        }
+    }
     use serde_json::json;
 
     #[test]

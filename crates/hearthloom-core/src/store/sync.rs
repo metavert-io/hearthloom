@@ -124,6 +124,9 @@ fn canonical(obj: &serde_json::Map<String, serde_json::Value>) -> String {
 const OPERATIONAL_TABLES: &[&str] = &[
     "notes_index",
     "tasks",
+    // v63: what waits on the owner in their mail, and their mail rules
+    "mail_threads",
+    "mail_rules",
     // v46: item shares mirror between a user's own peers so a share
     // flagged on either node is served by the always-on one (shares
     // name the friend; they bite wherever a grant by that name lives).
@@ -159,6 +162,16 @@ const JOURNALED_KINDS: &[(&str, &str, &str)] = &[
         "COALESCE(updated_at, created_at, '')",
     ),
     ("intent", "intents", "COALESCE(created_at, '')"),
+    (
+        "mail_thread",
+        "mail_threads",
+        "COALESCE(updated_at, created_at, '')",
+    ),
+    (
+        "mail_rule",
+        "mail_rules",
+        "COALESCE(updated_at, created_at, '')",
+    ),
     ("privacy_rule", "privacy_rules", "COALESCE(created_at, '')"),
     (
         "self_model",

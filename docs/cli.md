@@ -114,6 +114,26 @@ addresses it links to, indexed in the background. About 9 KB per message
 (measured on real Gmail); it won't start without three times that free.
 Per node, `--json` for scripts.
 
+### `mail` — what waits on you in your mail
+
+```
+hearthloom mail                             # threads that need a reply, a time or a look
+hearthloom mail threads --state all
+hearthloom mail done mt_1a2b…               # cleared
+hearthloom mail not-needed mt_1a2b…         # nothing needed after all
+hearthloom mail rules add domain mylawfirm.example --action needs_reply
+hearthloom mail rules add plain "Anything from my accountant needs a reply"
+hearthloom mail rules                       # list (rm <id> removes one)
+hearthloom mail triage                      # how new mail is sorted; --off, --model haiku, --now
+```
+
+New mail from people becomes a thread; a model with no tools sorts each
+new thread and must quote the words that decided it. It runs on the node
+that watches Gmail: Claude Code (your subscription) on your own machine,
+the node's AI key on a hosted one. Rules by sender, domain, subject or
+list decide before any model; `plain` rules are instructions in your
+words. Private mail never reaches a model. `--json` everywhere.
+
 ### `agents accounts` — the Claude accounts agents run on
 
 ```

@@ -139,6 +139,17 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/auth/logout", post(auth_logout))
         .route("/v1/auth/session-from-key", post(auth_session_from_key))
         .route("/v1/sync/episodes", get(sync_episodes))
+        .route("/v1/mail/threads", get(mail_threads_get))
+        .route("/v1/mail/threads/{id}", post(mail_thread_set))
+        .route("/v1/mail/rules", get(mail_rules_get).post(mail_rule_add))
+        .route(
+            "/v1/mail/rules/{id}",
+            axum::routing::delete(mail_rule_remove),
+        )
+        .route(
+            "/v1/mail/triage",
+            get(mail_triage_get).post(mail_triage_set),
+        )
         .route("/v1/sync/lookup", post(sync_lookup))
         .route("/v1/sync/lookup/pending", get(sync_lookup_pending))
         .route("/v1/sync/lookup/{id}/answer", post(sync_lookup_answer))
@@ -5251,6 +5262,164 @@ fn default_sync_limit() -> usize {
 /// independent, like /brain): this surface exists precisely for
 /// machines that are not this machine. Private never appears — the
 /// exclusion is hardcoded in store/sync.rs.
+/* ————— mail: what waits on the owner (0.5.92, store/mail.rs) ————— */
+
+#[derive(Deserialize)]
+struct MailThreadsQuery {
+    /// open (the default) | all | one state
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn mail_threads_get(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Query(q): Query<MailThreadsQuery>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "see your mail threads")?;
+    let which = q.state.unwrap_or_else(|| "open".into());
+    let limit = q.limit.unwrap_or(50).min(500);
+    let st = state.clone();
+    let threads = crate::scoped::spawn_blocking(move || {
+        let states: Vec<&str> = match which.as_str() {
+            "open" => hearthloom_core::store::mail::OPEN_STATES.to_vec(),
+            "all" => vec![],
+            one => vec![one],
+        };
+        st.store.mail_threads(&states, limit)
+    })
+    .await
+    .map_err(anyhow::Error::from)??;
+    Ok(Json(json!({
+        "threads": threads,
+        "triage": crate::mail_triage::status(&state),
+    })))
+}
+
+#[derive(Deserialize)]
+struct MailThreadSet {
+    state: String,
+}
+
+async fn mail_thread_set(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Path(id): Path<String>,
+    Json(body): Json<MailThreadSet>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "change a mail thread")?;
+    let thread = state
+        .store
+        .mail_set_state(&Actor::new("human:owner"), &id, &body.state)
+        .map_err(|e| bad_request(format!("{e:#}")))?;
+    crate::bus::touch(&state, "operational.changed");
+    Ok(Json(json!({"thread": thread})))
+}
+
+async fn mail_rules_get(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "see your mail rules")?;
+    Ok(Json(json!({"rules": state.store.mail_rules()?})))
+}
+
+#[derive(Deserialize)]
+struct MailRuleBody {
+    kind: String,
+    pattern: String,
+    #[serde(default)]
+    action: Option<String>,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+async fn mail_rule_add(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(body): Json<MailRuleBody>,
+) -> Result<Json<Value>, ApiError> {
+    // the owner's words only: mail never writes a rule
+    require_owner(&auth, "add a mail rule")?;
+    let rule = state
+        .store
+        .mail_rule_add(
+            &Actor::new("human:owner"),
+            &body.kind,
+            &body.pattern,
+            body.action.as_deref().unwrap_or("triage"),
+            body.note.as_deref(),
+        )
+        .map_err(|e| bad_request(format!("{e:#}")))?;
+    crate::bus::touch(&state, "operational.changed");
+    Ok(Json(json!({"rule": rule})))
+}
+
+async fn mail_rule_remove(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "remove a mail rule")?;
+    let gone = state
+        .store
+        .mail_rule_remove(&Actor::new("human:owner"), &id)?;
+    if !gone {
+        return Err(bad_request(format!("no mail rule {id:?}")));
+    }
+    crate::bus::touch(&state, "operational.changed");
+    Ok(Json(json!({"removed": id})))
+}
+
+async fn mail_triage_get(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "see mail triage")?;
+    Ok(Json(crate::mail_triage::status(&state)))
+}
+
+#[derive(Deserialize)]
+struct MailTriageSet {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    model: Option<String>,
+    /// sort what's waiting now
+    #[serde(default)]
+    run: bool,
+}
+
+async fn mail_triage_set(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(body): Json<MailTriageSet>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "change mail triage")?;
+    if let Some(on) = body.enabled {
+        state.store.set_consolidation_state(
+            crate::mail_triage::KEY_ENABLED,
+            if on { "on" } else { "off" },
+        )?;
+    }
+    if let Some(model) = body.model.as_deref().map(str::trim) {
+        if model.is_empty() || model.len() > 60 {
+            return Err(bad_request(
+                "name a model (sonnet, haiku, opus, or a full model id)",
+            ));
+        }
+        state
+            .store
+            .set_consolidation_state(crate::mail_triage::KEY_MODEL, model)?;
+    }
+    if body.run {
+        crate::mail_triage::kick();
+    }
+    Ok(Json(crate::mail_triage::status(&state)))
+}
+
 /// A lookup one of the owner's nodes wants from an archive another holds
 /// (lookups.rs). Run here when this node holds it; otherwise queue it for
 /// the spoke that does and wait for its answer.
