@@ -583,7 +583,9 @@ export async function paintCalendar(host) {
       const res = await apiPost("/v1/calendar/connect", {});
       window.open(res.url, "_blank", "noopener,noreferrer");
       host.querySelector("#cal-finish").hidden = false;
-      say("If no tab opened, open this address yourself: " + res.url);
+      say("Sign in with the Google account whose calendar you use" +
+        (res.account_hint ? ` (Google suggests ${res.account_hint}, the Gmail this node reads)` : "") +
+        ". If no tab opened, open this address yourself: " + res.url);
     } catch (e) { say(e.message); }
   });
   host.querySelector("#cal-done")?.addEventListener("click", async () => {

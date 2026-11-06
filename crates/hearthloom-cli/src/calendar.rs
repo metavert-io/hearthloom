@@ -113,10 +113,16 @@ pub async fn run(client: &Client, op: Op, as_json: bool) -> Result<()> {
         Op::Connect => {
             let res = client.post("/v1/calendar/connect", &json!({})).await?;
             let url = res["url"].as_str().unwrap_or("");
+            let which = match res["account_hint"].as_str() {
+                Some(gmail) => {
+                    format!(" — this node reads mail as {gmail}, so Google suggests that one")
+                }
+                None => String::new(),
+            };
             eprintln!(
-                "1. Open this address in a browser signed in to your Google account:\n\n{url}\n"
+                "1. Open this address in a browser and sign in with the Google account whose calendar you use{which}:\n\n{url}\n"
             );
-            eprintln!("2. Allow it (\"Google hasn't verified this app\" → Continue is expected for your own client).");
+            eprintln!("2. Allow it. (If Google says it \"hasn't verified this app\", Continue is expected for your own client.)");
             eprintln!("3. Your browser then lands on a page that doesn't load (127.0.0.1:43279). That's expected:");
             eprintln!("   copy the whole address from the address bar and paste it here.\n");
             let landing = prompt("The address it ended on")?;

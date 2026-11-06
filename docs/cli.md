@@ -121,7 +121,8 @@ Per node, `--json` for scripts.
 hearthloom calendar setup        # your Google Cloud Desktop-app client: paste the JSON Google lets you download
                                  # (or drop the file in), or just the secret; checked with Google before it's saved
 hearthloom calendar setup --file ~/Downloads/client_secret_….json
-hearthloom calendar connect      # open the address it prints, then paste the address the browser lands on
+hearthloom calendar connect      # sign in with the account whose calendar you use (it suggests the Gmail this node
+                                 # reads), then paste the address the browser lands on
 hearthloom calendar              # connected? which account, your working hours
 hearthloom calendar hours --days mon,tue,wed,thu,fri --hours 09:00-18:00 --tz America/New_York --notice 12
 hearthloom calendar calendars    # what the account can see; --calendars <id,id> on `hours` picks the busy ones

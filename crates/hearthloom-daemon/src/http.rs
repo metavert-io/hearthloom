@@ -5657,9 +5657,9 @@ async fn calendar_connect(
     axum::Extension(auth): axum::Extension<AuthInfo>,
 ) -> Result<Json<Value>, ApiError> {
     require_owner(&auth, "connect Google Calendar")?;
-    let url = crate::google_calendar::start().map_err(|e| bad_request(format!("{e:#}")))?;
+    let (url, hint) = crate::google_calendar::start().map_err(|e| bad_request(format!("{e:#}")))?;
     Ok(Json(
-        json!({"url": url, "status": crate::google_calendar::status(&state)}),
+        json!({"url": url, "account_hint": hint, "status": crate::google_calendar::status(&state)}),
     ))
 }
 

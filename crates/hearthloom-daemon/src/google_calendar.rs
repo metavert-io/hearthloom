@@ -194,34 +194,42 @@ pub fn reset(state: &AppState) -> Result<()> {
     )
 }
 
-/// The address to open in a browser to connect.
-pub fn start() -> Result<String> {
+/// The address to open in a browser to connect, and the account Google
+/// is asked to suggest: the Gmail this node reads, the likeliest calendar
+/// (the owner can still choose another).
+pub fn start() -> Result<(String, Option<String>)> {
     let (id, _) = client()
         .ok_or_else(|| anyhow!("set up the Google client first (hearthloom calendar setup)"))?;
     let state = random();
     let verifier = random();
     let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(sha2::Sha256::digest(verifier.as_bytes()));
-    let url = reqwest::Url::parse_with_params(
-        AUTH_URL,
-        &[
-            ("client_id", id.as_str()),
-            ("redirect_uri", REDIRECT_URI),
-            ("response_type", "code"),
-            ("scope", SCOPES),
-            ("access_type", "offline"),
-            ("prompt", "consent"),
-            ("state", state.as_str()),
-            ("code_challenge", challenge.as_str()),
-            ("code_challenge_method", "S256"),
-        ],
-    )?;
+    let hint = env("GMAIL_IMAP_USER").filter(|u| u.contains('@'));
+    let url = auth_url(&id, &state, &challenge, hint.as_deref())?;
     *PENDING.lock().unwrap_or_else(|p| p.into_inner()) = Some(Pending {
         state,
         verifier,
         started: Instant::now(),
     });
-    Ok(url.to_string())
+    Ok((url, hint))
+}
+
+fn auth_url(id: &str, state: &str, challenge: &str, hint: Option<&str>) -> Result<String> {
+    let mut params = vec![
+        ("client_id", id),
+        ("redirect_uri", REDIRECT_URI),
+        ("response_type", "code"),
+        ("scope", SCOPES),
+        ("access_type", "offline"),
+        ("prompt", "consent"),
+        ("state", state),
+        ("code_challenge", challenge),
+        ("code_challenge_method", "S256"),
+    ];
+    if let Some(h) = hint {
+        params.push(("login_hint", h));
+    }
+    Ok(reqwest::Url::parse_with_params(AUTH_URL, &params)?.to_string())
 }
 
 /// `code` and `state` from the address the browser ended on.
@@ -289,13 +297,15 @@ pub async fn finish(state: &AppState, pasted: &str) -> Result<String> {
     let status = res.status();
     let body: Value = res.json().await.unwrap_or_default();
     if !status.is_success() {
-        bail!(
-            "Google refused the code: {}",
-            body["error_description"]
-                .as_str()
-                .or(body["error"].as_str())
-                .unwrap_or("unknown")
-        );
+        let said = body["error_description"]
+            .as_str()
+            .or(body["error"].as_str())
+            .unwrap_or("unknown");
+        if body["error"] == json!("invalid_client") {
+            // the sign-in itself worked; it's this node's client Google won't take
+            bail!("Google turned down this node's client (\"{said}\") — run hearthloom calendar setup again");
+        }
+        bail!("Google refused the sign-in code: {said}");
     }
     let refresh = body["refresh_token"]
         .as_str()
@@ -308,6 +318,22 @@ pub async fn finish(state: &AppState, pasted: &str) -> Result<String> {
         .as_str()
         .and_then(jwt_email)
         .unwrap_or_default();
+    // An account without Google Calendar (a Workspace admin account, say)
+    // signs in fine and then fails every read: turn it away now.
+    if let Some(token) = body["access_token"].as_str() {
+        let res = reqwest::Client::new()
+            .get(format!("{API}/users/me/calendarList?maxResults=1"))
+            .bearer_auth(token)
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await?;
+        if !res.status().is_success() {
+            let body: Value = res.json().await.unwrap_or_default();
+            if not_a_calendar_user(&body) {
+                bail!("{} has no Google Calendar — connect again and choose the account whose calendar you use", if account.is_empty() { "that account" } else { &account });
+            }
+        }
+    }
     hearthloom_core::secrets::set_env_vars(
         state.home.root(),
         &[(ENV_REFRESH, refresh), (ENV_ACCOUNT, &account)],
@@ -382,14 +408,36 @@ async fn api_get(path: &str) -> Result<Value> {
     let status = res.status();
     let body: Value = res.json().await.unwrap_or_default();
     if !status.is_success() {
-        bail!(
-            "Google Calendar: {}",
-            body["error"]["message"]
-                .as_str()
-                .unwrap_or("request failed")
-        );
+        return Err(api_error(&body, "request failed"));
     }
     Ok(body)
+}
+
+/// Google's "The user must be signed up for Google Calendar": the account
+/// signed in has no calendar at all.
+fn not_a_calendar_user(body: &Value) -> bool {
+    let e = &body["error"];
+    e["errors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|x| x["reason"] == json!("notACalendarUser"))
+        || e["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("signed up for Google Calendar"))
+}
+
+fn api_error(body: &Value, fallback: &str) -> anyhow::Error {
+    if not_a_calendar_user(body) {
+        return anyhow!(
+            "{} has no Google Calendar — run hearthloom calendar connect and choose the account whose calendar you use",
+            env(ENV_ACCOUNT).unwrap_or_else(|| "the connected account".into())
+        );
+    }
+    anyhow!(
+        "Google Calendar: {}",
+        body["error"]["message"].as_str().unwrap_or(fallback)
+    )
 }
 
 /// The account's calendars: id, name, primary, shown in Google Calendar,
@@ -431,12 +479,7 @@ pub async fn busy(
     let status = res.status();
     let body: Value = res.json().await.unwrap_or_default();
     if !status.is_success() {
-        bail!(
-            "Google Calendar: {}",
-            body["error"]["message"]
-                .as_str()
-                .unwrap_or("free/busy failed")
-        );
+        return Err(api_error(&body, "free/busy failed"));
     }
     let mut out = Vec::new();
     for (_, cal) in body["calendars"].as_object().into_iter().flatten() {
@@ -816,6 +859,37 @@ mod tests {
             "different client",
         );
         refused("", r#"{"installed":{}}"#, None, "no client ID and secret");
+    }
+
+    #[test]
+    fn test_the_sign_in_suggests_the_gmail_account_and_names_a_calendarless_one() {
+        let with = auth_url(
+            "id.apps.googleusercontent.com",
+            "st",
+            "ch",
+            Some("sam@x.example"),
+        )
+        .unwrap();
+        assert!(with.contains("login_hint=sam%40x.example"), "{with}");
+        assert!(with.contains("prompt=consent") && with.contains("access_type=offline"));
+        let without = auth_url("id.apps.googleusercontent.com", "st", "ch", None).unwrap();
+        assert!(!without.contains("login_hint"), "{without}");
+        // what Google says for an account with no Google Calendar (2026-11-06)
+        let body = json!({"error": {"code": 403, "message": "The user must be signed up for Google Calendar.",
+            "errors": [{"reason": "notACalendarUser"}]}});
+        assert!(not_a_calendar_user(&body));
+        assert!(not_a_calendar_user(
+            &json!({"error": {"message": "The user must be signed up for Google Calendar."}})
+        ));
+        assert!(api_error(&body, "x")
+            .to_string()
+            .contains("has no Google Calendar"));
+        let other = json!({"error": {"message": "Rate limit exceeded"}});
+        assert!(!not_a_calendar_user(&other));
+        assert_eq!(
+            api_error(&other, "x").to_string(),
+            "Google Calendar: Rate limit exceeded"
+        );
     }
 
     #[test]

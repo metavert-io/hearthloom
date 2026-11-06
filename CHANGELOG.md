@@ -19,6 +19,13 @@ pin release tags, never a branch.
   turned away with what to fix. A different client forgets the old
   sign-in. `hearthloom calendar status` shows the client ID.
 
+- **Connecting suggests the right account and refuses a calendarless
+  one.** `hearthloom calendar connect` (and the card) says to sign in with
+  the account whose calendar you use and asks Google to suggest the Gmail
+  account the node reads; an account without Google Calendar (a Workspace
+  admin account, say) is turned away at once, by name, instead of failing
+  every read afterwards.
+
 ### Added
 - `hearthloom calendar reset` (and "forget the client" on the card):
   forgets the Google client and the sign-in on this node.
