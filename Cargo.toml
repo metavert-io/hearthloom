@@ -8,7 +8,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.5.90"
+version = "0.5.91"
 edition = "2021"
 # the oldest Rust that builds it (mail-parser 1.0 needs 1.98); the
 # installer updates an older toolchain through rustup

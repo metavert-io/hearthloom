@@ -8,6 +8,8 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.91 — 2026-11-06
+
 ### Fixed
 - **Goals stopped trading places between your machines.** With two
   machines syncing through the hosted one, every sync cycle rewrote your
