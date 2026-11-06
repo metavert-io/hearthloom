@@ -8,6 +8,17 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.99 — 2026-11-06
+
+### Changed
+- **Your other machines hear about a change at once.** When something a
+  machine says about itself changes — a calendar connected, a mailbox
+  added or its watch switched off, a new version after an upgrade — it
+  now tells your other machines straight away, and they sync within
+  seconds instead of at their next five-minute check. Readings that
+  change by themselves (free space, archive sizes) don't count, and a
+  machine sends at most one such notice a minute.
+
 ## 0.5.98 — 2026-11-06
 
 ### Added
