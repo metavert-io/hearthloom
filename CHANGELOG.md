@@ -8,6 +8,8 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.98 — 2026-11-06
+
 ### Added
 - **Several mailboxes on one node.** Connect a personal Gmail and a Google
   Workspace address (or more) — each with its own app password, its own
