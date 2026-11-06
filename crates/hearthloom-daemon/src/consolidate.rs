@@ -117,12 +117,12 @@ pub const AUTOMATIONS: &[Automation] = &[
     Automation {
         key: "gmail_pull",
         label: "Gmail live pull",
-        detail: "Pulls new mail from Gmail over IMAP into the live \
-                 archive (searchable at need); Sent/Personal/Starred \
-                 become episodes. Runs only when GMAIL_IMAP_USER and \
-                 GMAIL_IMAP_PASSWORD are configured. The live watch \
-                 (Integrations → Gmail) pulls within seconds of new \
-                 mail; this pass is its backstop.",
+        detail: "Pulls new mail from each connected Gmail mailbox over \
+                 IMAP into its live archive (searchable at need); \
+                 Sent/Personal/Starred become episodes. Runs only when a \
+                 mailbox is connected (Integrations → Google Mail). The \
+                 live watch pulls within seconds of new mail; this pass \
+                 is its backstop.",
         default_frequency: "cycle",
         llm: false,
         default_tier: Tier::Low,
@@ -379,7 +379,7 @@ pub async fn run_automation(state: &AppState, key: &str, actor: &Actor) -> anyho
         "gmail_pull" => {
             let st = state.clone();
             let (fetched, eps, more) =
-                tokio::task::spawn_blocking(move || crate::gmail_pull::pull_once(&st)).await??;
+                tokio::task::spawn_blocking(move || crate::gmail_pull::pull_all(&st)).await??;
             json!({ "messages_fetched": fetched, "episodes_new": eps, "more_pending": more })
         }
         "health_day_finalize" => {
@@ -908,11 +908,12 @@ pub async fn consolidate(state: &AppState) -> anyhow::Result<Value> {
     clock.lap("contacts_apply");
 
     // 3.97155 Gmail live pull (Tier 3 federation): new mail over IMAP
-    // into the live mbox + sidecar; Core strata materialize as
-    // episodes. A silent no-op until GMAIL_IMAP_* creds are configured.
+    // into each mailbox's live mbox + sidecar; Core strata materialize as
+    // episodes. A silent no-op until a mailbox is connected; one Google
+    // refused isn't tried again until it's saved again (mailboxes.rs).
     if let Some(_g) = due_claim(state, "gmail_pull") {
         let st = state.clone();
-        match tokio::task::spawn_blocking(move || crate::gmail_pull::pull_once(&st))
+        match tokio::task::spawn_blocking(move || crate::gmail_pull::pull_all(&st))
             .await
             .map_err(anyhow::Error::from)
             .and_then(|r| r)

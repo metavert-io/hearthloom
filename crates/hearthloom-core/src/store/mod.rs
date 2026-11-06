@@ -314,7 +314,7 @@ impl Drop for ReadScopeGuard {
     }
 }
 
-const SCHEMA_VERSION: i64 = 65;
+const SCHEMA_VERSION: i64 = 66;
 
 const SCHEMA_V1: &str = "
     -- L2: append-only ground truth. Raw content lives on disk at
@@ -2268,6 +2268,16 @@ impl Store {
                  );
                  CREATE INDEX idx_mail_drafts_thread ON mail_drafts(thread_id);
                  CREATE INDEX idx_mail_drafts_state ON mail_drafts(state, created_at);",
+            )?;
+        }
+        if version < 66 {
+            // v66: several mailboxes per node (0.5.98, daemon mailboxes.rs) —
+            // a draft and an ember's match remember which mailbox they belong
+            // to, so the node that watches it writes the draft. Additive;
+            // "" = unknown (rows from before, or from an older peer).
+            conn.execute_batch(
+                "ALTER TABLE mail_drafts ADD COLUMN account TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE mail_matches ADD COLUMN account TEXT NOT NULL DEFAULT '';",
             )?;
         }
         if version < SCHEMA_VERSION {

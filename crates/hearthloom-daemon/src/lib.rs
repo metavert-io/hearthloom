@@ -32,6 +32,7 @@ mod lookups;
 mod mail_drafts;
 mod mail_embers;
 mod mail_triage;
+mod mailboxes;
 mod mbox_index;
 mod mbox_text;
 mod mcp;

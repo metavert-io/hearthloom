@@ -108,7 +108,24 @@ impl WatchFilter {
         !self.classes.is_empty()
     }
 
+    /// Nothing to look for: never valid (`validate`), so a filter like this
+    /// is one that couldn't be read.
+    pub fn is_empty(&self) -> bool {
+        self.from.is_empty()
+            && self.domains.is_empty()
+            && self.subject.is_empty()
+            && self.words.is_empty()
+            && self.labels.is_empty()
+            && self.classes.is_empty()
+    }
+
     pub fn matches(&self, m: &WatchInput, class: Option<&str>) -> bool {
+        // an empty filter matches nothing (0.5.98): every check below passes
+        // an empty list, so without this an unreadable filter — a newer
+        // node's, mirrored here — would queue every message for its ember
+        if self.is_empty() {
+            return false;
+        }
         let low = |s: &str| s.trim().to_lowercase();
         let any_in = |list: &[String], hay: &str| {
             let hay = hay.to_lowercase();
@@ -191,6 +208,8 @@ pub struct MailMatch {
     pub why: Option<String>,
     pub text: String,
     pub created_at: String,
+    /// the mailbox it arrived in, lowercased (0.5.98; "" before)
+    pub account: String,
 }
 
 pub fn watch_id(plugin: &str, name: &str) -> String {
@@ -215,7 +234,7 @@ fn valid_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || " _.-".contains(c))
 }
 
-const MATCH_COLS: &str = "seq, id, plugin, watch, watch_name, thread_id, message_id, sender, subject, date, labels, class, why, text, created_at";
+const MATCH_COLS: &str = "seq, id, plugin, watch, watch_name, thread_id, message_id, sender, subject, date, labels, class, why, text, created_at, account";
 
 fn row_to_match(r: &rusqlite::Row) -> rusqlite::Result<MailMatch> {
     let labels: String = r.get(10)?;
@@ -239,6 +258,7 @@ fn row_to_match(r: &rusqlite::Row) -> rusqlite::Result<MailMatch> {
         why: r.get(12)?,
         text: r.get(13)?,
         created_at: r.get(14)?,
+        account: r.get(15)?,
     })
 }
 
@@ -257,7 +277,8 @@ impl Store {
                 id: r.get(0)?,
                 plugin: r.get(1)?,
                 name: r.get(2)?,
-                // a filter this build can't read matches nothing
+                // a filter this build can't read is empty, and an empty
+                // filter matches nothing (`WatchFilter::matches`)
                 filter: serde_json::from_str(&filter).unwrap_or_default(),
                 enabled: r.get::<_, i64>(4)? != 0,
                 created_at: r.get(5)?,
@@ -500,8 +521,8 @@ impl Store {
         let n = conn.execute(
             "INSERT OR IGNORE INTO mail_matches
                  (id, plugin, watch, watch_name, thread_id, message_id, sender, subject, date,
-                  labels, class, why, text, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                  labels, class, why, text, created_at, account)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             rusqlite::params![
                 id,
                 m.plugin,
@@ -516,7 +537,8 @@ impl Store {
                 m.class,
                 m.why,
                 text,
-                now_utc()
+                now_utc(),
+                m.account.to_lowercase()
             ],
         )?;
         if n > 0 {
@@ -614,8 +636,8 @@ impl Store {
             let n = tx.execute(
                 "INSERT OR IGNORE INTO mail_matches
                      (id, plugin, watch, watch_name, thread_id, message_id, sender, subject, date,
-                      labels, class, why, text, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                      labels, class, why, text, created_at, account)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 rusqlite::params![
                     id,
                     plugin,
@@ -631,6 +653,8 @@ impl Store {
                     s("why"),
                     text,
                     s("created_at").map(String::from).unwrap_or_else(now_utc),
+                    // the mailbox it came from (0.5.98; absent from older peers)
+                    s("account").unwrap_or("").to_lowercase(),
                 ],
             )?;
             if n > 0 {
@@ -731,6 +755,66 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+
+    /// A filter written by a newer build (a field this one doesn't know)
+    /// reads as empty, and an empty filter matches nothing — before 0.5.98
+    /// it matched every message.
+    #[test]
+    fn test_a_filter_this_build_cannot_read_matches_nothing() {
+        let labels = vec!["Inbox".to_string()];
+        let m = input(
+            "Dana Reyes <dana@deals.fund.example>",
+            "dana@deals.fund.example",
+            "Intro: seed round",
+            "Happy to share the term sheet next week.",
+            &labels,
+        );
+        let unreadable: WatchFilter =
+            serde_json::from_str(r#"{"from":["dana"],"mailboxes":["a@x.example"]}"#)
+                .unwrap_or_default();
+        assert!(unreadable.is_empty());
+        assert!(!unreadable.matches(&m, None));
+        assert!(!unreadable.matches(&m, Some("opportunity")));
+        assert!(!WatchFilter::default().matches(&m, None));
+    }
+
+    /// A match remembers its mailbox (0.5.98), on this node and on a peer
+    /// it syncs to; one from an older peer (no `account`) reads as "".
+    #[test]
+    fn test_a_match_keeps_its_mailbox_across_nodes() {
+        let (s, _t) = store();
+        let m = MailMatch {
+            plugin: "leadfinder".into(),
+            watch: "mw_1".into(),
+            watch_name: "leads".into(),
+            message_id: "m1@x".into(),
+            sender: "Dana <dana@fund.example>".into(),
+            subject: "Intro".into(),
+            text: "Hello".into(),
+            account: "Jon@Work.example".into(),
+            ..Default::default()
+        };
+        assert!(s.mail_match_add(&m).unwrap());
+        let page = s.mail_matches_since("", 10).unwrap();
+        assert_eq!(page["items"][0]["account"], "jon@work.example");
+        let (peer, _t2) = store();
+        assert_eq!(peer.mail_matches_apply(&page).unwrap(), 1);
+        let got = peer.mail_match_for("leadfinder", "m1@x").unwrap().unwrap();
+        assert_eq!(got.account, "jon@work.example");
+        // an older peer's page has no account
+        let mut old = page.clone();
+        old["items"][0].as_object_mut().unwrap().remove("account");
+        old["items"][0]["id"] = json!("mm_other");
+        old["items"][0]["message_id"] = json!("m2@x");
+        assert_eq!(peer.mail_matches_apply(&old).unwrap(), 1);
+        assert_eq!(
+            peer.mail_match_for("leadfinder", "m2@x")
+                .unwrap()
+                .unwrap()
+                .account,
+            ""
+        );
     }
 
     #[test]

@@ -16,35 +16,27 @@
 //! run; a replay can duplicate raw bytes in the live mbox (harmless —
 //! dup index ids fall back to `at:<offset>`, same as the archive's
 //! self-copies) but can never lose or double an episode.
+//!
+//! Each mailbox (mailboxes.rs, 0.5.98) has its own live mbox, sidecar and
+//! cursor: one puller per mailbox, and every pull serialized (`PULL`). The
+//! same message in two mailboxes is one memory (same Message-ID). A
+//! refused sign-in stops that mailbox's pulls until it's saved again.
 
 use std::io::Write;
-use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use hearthloom_adapters::gmail_imap::{self, GmailCursor, ImapFeed, PullOptions};
+use hearthloom_adapters::gmail_imap::{self, is_auth_failure, GmailCursor, ImapFeed, PullOptions};
 use hearthloom_adapters::mbox::LabelFilter;
 use hearthloom_core::store::Actor;
 use hearthloom_core::IngestBatch;
 
+use crate::mailboxes::{self, Mailbox};
 use crate::AppState;
 
-pub(crate) const SOURCE_NAME: &str = "gmail-live";
 const CURSOR_KEY: &str = "gmail_cursor";
 /// Episodes per store-lock hold while materializing (the
 /// refresh_local_sources pattern — THE PASS CONTRACT).
 const APPLY_CHUNK: usize = 200;
-
-pub(crate) fn live_mbox_path(state: &AppState) -> PathBuf {
-    state.home.root().join("archives").join("gmail-live.mbox")
-}
-
-/// Feature-detect: the pass is a silent no-op until both are set (in
-/// `~/.hearthloom/.env`, sealed or plain — the launchd daemon has no
-/// shell env).
-pub(crate) fn credentials() -> Option<(String, String)> {
-    let get = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
-    Some((get("GMAIL_IMAP_USER")?, get("GMAIL_IMAP_PASSWORD")?))
-}
 
 fn pull_options() -> PullOptions {
     let mut opts = PullOptions::default();
@@ -68,26 +60,60 @@ fn read_cursor(mbox: &std::path::Path) -> Option<GmailCursor> {
     })
 }
 
-/// One pull at a time per node: the consolidation pass and the live watch
-/// (gmail_watch.rs) both call `pull_once`, and two at once would race on
-/// the cursor and append the same messages twice.
+/// One pull at a time per node: the consolidation pass and the live
+/// watches (gmail_watch.rs) all call `pull_once`, and two at once on one
+/// mailbox would race on its cursor and append the same messages twice.
 static PULL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// One incremental pull. Blocking (network + file + store IO) — the
-/// caller runs it whole in `spawn_blocking` (THE PASS CONTRACT).
-/// Returns (messages_fetched, episodes_new, more_pending).
-pub(crate) fn pull_once(state: &AppState) -> Result<(usize, usize, bool)> {
+/// One incremental pull of one mailbox. Blocking (network + file + store
+/// IO) — the caller runs it whole in `spawn_blocking` (THE PASS
+/// CONTRACT). Returns (messages_fetched, episodes_new, more_pending). A
+/// mailbox Google refused isn't tried; a refusal now stops it.
+pub(crate) fn pull_once(state: &AppState, mb: &Mailbox) -> Result<(usize, usize, bool)> {
+    mailboxes::check_refused(mb)?;
     let _one_at_a_time = PULL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    pull_once_unserialized(state)
+    pull_once_unserialized(state, mb).inspect_err(|err| {
+        if is_auth_failure(err) {
+            mailboxes::refuse(Some(state), mb, err);
+        }
+    })
 }
 
-fn pull_once_unserialized(state: &AppState) -> Result<(usize, usize, bool)> {
-    let Some((user, password)) = credentials() else {
-        tracing::debug!("gmail pull: GMAIL_IMAP_USER/GMAIL_IMAP_PASSWORD not set — skipping");
-        return Ok((0, 0, false));
-    };
+/// Every mailbox here, one after the other (the six-hour pass and "pull
+/// now"); one Google refused is skipped. The totals, or the first error
+/// when every mailbox failed.
+pub(crate) fn pull_all(state: &AppState) -> Result<(usize, usize, bool)> {
+    let (mut fetched, mut new, mut more) = (0, 0, false);
+    let (mut ok, mut first_err) = (false, None);
+    for mb in mailboxes::all() {
+        if mailboxes::refused(&mb.id) {
+            continue;
+        }
+        match pull_once(state, &mb) {
+            Ok((f, n, m)) => {
+                ok = true;
+                fetched += f;
+                new += n;
+                more |= m;
+            }
+            Err(err) => {
+                tracing::warn!("gmail pull: {}: {err:#}", mb.address);
+                first_err.get_or_insert(err);
+            }
+        }
+    }
+    match first_err {
+        Some(err) if !ok => Err(err),
+        _ => Ok((fetched, new, more)),
+    }
+}
 
-    let mbox_path = live_mbox_path(state);
+fn pull_once_unserialized(state: &AppState, mb: &Mailbox) -> Result<(usize, usize, bool)> {
+    let (user, password) = (mb.address.as_str(), mb.password());
+    // whose mail is the owner's own: every mailbox and alias (mailboxes.rs)
+    let mine = mailboxes::owner_addresses(state);
+
+    let mbox_path = mb.live_mbox_path(state);
     if let Some(dir) = mbox_path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -103,7 +129,7 @@ fn pull_once_unserialized(state: &AppState) -> Result<(usize, usize, bool)> {
     }
     let cursor = read_cursor(&mbox_path);
 
-    let mut feed = ImapFeed::connect(&user, &password)?;
+    let mut feed = ImapFeed::connect(user, password)?;
     let mut file = std::fs::OpenOptions::new().append(true).open(&mbox_path)?;
     let appended_from = file.metadata()?.len();
 
@@ -114,7 +140,7 @@ fn pull_once_unserialized(state: &AppState) -> Result<(usize, usize, bool)> {
     let outcome = gmail_imap::pull_new(&mut feed, cursor, &pull_options(), |msgs| {
         for m in &msgs {
             file.write_all(&gmail_imap::mbox_record(m))?;
-            if let Some(s) = crate::mail_triage::seen(state, &user, &m.labels, &m.raw) {
+            if let Some(s) = crate::mail_triage::seen(state, user, &mine, &m.labels, &m.raw) {
                 seen.push(s);
             }
             match hearthloom_adapters::mbox::draft_from_message_filtered(
@@ -164,17 +190,22 @@ fn pull_once_unserialized(state: &AppState) -> Result<(usize, usize, bool)> {
     )?;
 
     if created {
+        let name = mb.source_name();
         state.store.register_virtual_source(
             &Actor::new("agent:gmail-pull"),
-            SOURCE_NAME,
+            &name,
             "mbox",
             &serde_json::json!({
                 "mount": mbox_path.to_string_lossy(),
                 "trust": "imported",
+                "account": mb.account(),
             }),
             &["search".into(), "fetch".into(), "promote".into()],
         )?;
-        tracing::info!("gmail pull: registered virtual source {SOURCE_NAME}");
+        tracing::info!(
+            "gmail pull: registered virtual source {name} ({})",
+            mb.address
+        );
     }
 
     Ok((outcome.fetched, episodes_new, outcome.more))
@@ -386,10 +417,42 @@ mod tests {
         );
     }
 
+    /// Two mailboxes pull into two archives with two cursors: one's
+    /// progress never moves the other's, and a message both received is
+    /// in both archives.
     #[test]
-    fn test_credentials_feature_detect() {
-        // (env-var poking is process-global; these keys are only read
-        // here and in pull_once, and tests run with them unset.)
-        assert!(credentials().is_none() || std::env::var("GMAIL_IMAP_USER").is_ok());
+    fn test_each_mailbox_keeps_its_own_archive_and_cursor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (home, work) = (
+            tmp.path().join("gmail-live.mbox"),
+            tmp.path().join("gmail-live-1a2b3c4d.mbox"),
+        );
+        for p in [&home, &work] {
+            std::fs::File::create(p).unwrap();
+            crate::mbox_index::build(p).unwrap();
+        }
+        let mut home_feed = FakeFeed {
+            messages: vec![
+                message(1, "a@x", &["Sent"]),
+                message(2, "both@x", &["Starred"]),
+            ],
+        };
+        let mut work_feed = FakeFeed {
+            messages: vec![message(7, "both@x", &[]), message(9, "w@x", &[])],
+        };
+        pull_into(&home, &mut home_feed, None);
+        pull_into(&work, &mut work_feed, None);
+        assert_eq!(read_cursor(&home).unwrap().last_uid, 2);
+        assert_eq!(read_cursor(&work).unwrap().last_uid, 9);
+        // more mail in one mailbox moves only its cursor
+        home_feed.messages.push(message(3, "c@x", &[]));
+        let (_, outcome) = pull_into(&home, &mut home_feed, read_cursor(&home));
+        assert_eq!(outcome.fetched, 1);
+        assert_eq!(read_cursor(&home).unwrap().last_uid, 3);
+        assert_eq!(read_cursor(&work).unwrap().last_uid, 9);
+        for p in [&home, &work] {
+            assert!(crate::mbox_index::fetch(p, "both@x", 100_000).is_ok());
+        }
+        assert!(crate::mbox_index::fetch(&work, "a@x", 100_000).is_err());
     }
 }

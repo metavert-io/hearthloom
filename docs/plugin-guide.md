@@ -312,7 +312,11 @@ don't mint drive episodes yourself.
 
 Register watches; the node that watches the user's Gmail queues each new
 message a watch matches for your ember alone, and the bus says
-`mail.matched`. Read your queue with a cursor.
+`mail.matched`. Read your queue with a cursor. A user with several
+mailboxes chooses which ones embers see (their first mailbox by default;
+one they add only once they allow it), so a watch matches mail of those
+mailboxes only — and never mail the user sent from any of their
+addresses.
 
 | route | purpose |
 |---|---|

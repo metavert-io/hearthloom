@@ -661,14 +661,37 @@ pub fn promote(
 /// The RLM system-prompt fragment describing available virtual sources and
 /// their read handles — None when none are registered (base experience
 /// unchanged; the system stays degraded-but-useful without them).
-/// The live mailbox's line in Ask's instructions (0.5.89).
-fn gmail_line(account: Option<&str>, node: Option<&str>, reachable: bool) -> String {
+/// The mailboxes a `gmail` source searches: `accounts` (0.5.98), else the
+/// one `account` older nodes name.
+fn gmail_accounts(config: &serde_json::Value) -> Vec<String> {
+    match config["accounts"].as_array() {
+        Some(list) => list
+            .iter()
+            .filter_map(|a| a.as_str().map(String::from))
+            .collect(),
+        None => config["account"]
+            .as_str()
+            .map(|a| vec![a.to_string()])
+            .unwrap_or_default(),
+    }
+}
+
+/// The live mailbox's line in Ask's instructions (0.5.89; several
+/// mailboxes 0.5.98).
+fn gmail_line(accounts: &[String], node: Option<&str>, reachable: bool) -> String {
     format!(
         "- gmail [gmail]{} — the WHOLE Gmail mailbox{}, searched live with Gmail's own search: \
          every message the account holds, old and new{}\n",
         node.map(|n| format!(" on node \"{n}\""))
             .unwrap_or_default(),
-        account.map(|a| format!(" of {a}")).unwrap_or_default(),
+        match accounts {
+            [] => String::new(),
+            [one] => format!(" of {one}"),
+            several => format!(
+                "es {} (all searched at once; each hit ends `in <mailbox>`)",
+                several.join(", ")
+            ),
+        },
         if reachable {
             ""
         } else {
@@ -680,7 +703,7 @@ fn gmail_line(account: Option<&str>, node: Option<&str>, reachable: bool) -> Str
 /// How Ask should look for things in mail (0.5.86; message text 0.5.87).
 const MAIL_GUIDANCE: &str = "\
 Finding things in mail: when a `gmail` source is listed, search it FIRST — it is the whole \
-mailbox, current to the minute. Its vsearch takes Gmail search syntax: words anywhere in the \
+mailbox (every one the user connected), current to the minute. Its vsearch takes Gmail search syntax: words anywhere in the \
 message, from:, to:, subject:, after:YYYY/MM/DD, before:, has:attachment, label:, \
 category:, OR, quotes for a phrase; results come newest first (up to 25), so narrow with \
 operators rather than paging; each hit ends with the start of its text, and vfetch reads one \
@@ -750,9 +773,9 @@ pub fn rlm_prompt_section(state: &AppState) -> Option<String> {
     for source in &sources {
         if source.adapter == crate::gmail_search::ADAPTER {
             out.push_str(&gmail_line(
-                source.config["account"].as_str(),
+                &gmail_accounts(&source.config),
                 None,
-                crate::gmail_search::account().is_some(),
+                !crate::gmail_search::accounts().is_empty(),
             ));
             continue;
         }
@@ -807,7 +830,7 @@ pub fn rlm_prompt_section(state: &AppState) -> Option<String> {
         for (_, node, seen, archive) in &elsewhere {
             if archive["adapter"] == crate::gmail_search::ADAPTER {
                 out.push_str(&gmail_line(
-                    archive["account"].as_str(),
+                    &gmail_accounts(archive),
                     Some(node),
                     crate::lookups::recently_seen(seen),
                 ));

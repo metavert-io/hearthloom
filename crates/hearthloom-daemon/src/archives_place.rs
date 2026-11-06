@@ -186,7 +186,11 @@ pub fn file_facts(path: &Path, name: &str) -> Option<(u64, bool)> {
         .ok()
         .and_then(|m| m.elapsed().ok())
         .is_some_and(|age| age >= SETTLED);
-    Some((meta.len(), quiet && name != "gmail-live"))
+    // a mailbox's live archive is still being written (mailboxes.rs)
+    Some((
+        meta.len(),
+        quiet && !crate::mailboxes::is_live_archive(name),
+    ))
 }
 
 /// Serve one checked chunk of an archive this node holds (a `vchunk`

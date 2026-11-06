@@ -492,8 +492,15 @@ seconds** (an IMAP IDLE watch, with a catch-up every 5 minutes by default;
 `hearthloom gmail watch on|off --every N`, or the card) into a rolling
 `archives/gmail-live.mbox` (registered as the `gmail-live` virtual source,
 searchable like the archive); the six-hourly `gmail_pull` pass is its
-backstop. The node list shows which node watches Gmail, and the card warns
-when two nodes watch a mailbox. The same Core strata the
+backstop. Several mailboxes can be connected — a personal Gmail and a
+Google Workspace address alike (`hearthloom gmail connect` again with the
+other address, or "add another mailbox" on the card): each gets its own
+watch, archive (`gmail-live-<id>`) and settings; mail from any of them, or
+from an alias you list on one (`hearthloom gmail set <address> --aliases
+…`), counts as yours, and a reply draft goes out from the address the
+person wrote to. Embers that watch mail see an added mailbox only once you
+allow it. The node list shows which node watches which mailbox, and the
+card warns when two nodes watch the same one. The same Core strata the
 Takeout materialized (Sent ∪ Category Personal ∪ Starred) become
 episodes automatically, deduped against the archive by Message-ID.
 First run backfills the last 90 days (`GMAIL_IMAP_BACKFILL_DAYS` to
@@ -716,7 +723,7 @@ adding one line never loses another.
 | `HEARTHLOOM_REGISTRY_URL` | An ember registry, also used to check for host updates. None by default. Hearthlaunch is one compatible registry. |
 | `HEARTHLOOM_UPDATE_SIGNING_KEY` | A base64 Ed25519 public key; when set, self-update also requires a valid release signature. |
 | `HEARTHLOOM_PROVISIONER_URL`, `HEARTHLOOM_PROVISIONER_SECRET` | Only for nodes run by a hosting provisioner (the control plane). |
-| `GMAIL_IMAP_USER`, `GMAIL_IMAP_PASSWORD` | Live Gmail pull with an app password. |
+| `GMAIL_IMAP_USER`, `GMAIL_IMAP_PASSWORD` | Live Gmail pull with an app password (the first mailbox; others connected later are sealed as `HEARTHLOOM_MAIL_<ID>_USER`/`_PASSWORD` — use the card or `hearthloom gmail connect`). |
 | `HEARTHFS_BIN` | Where the HearthFS binary is, if not on the usual paths. |
 
 **Eval suites** (`hearthloom eval`) are your own ground truth and live in

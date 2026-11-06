@@ -3266,13 +3266,51 @@ async fn health_today(State(state): State<AppState>) -> Result<Json<Value>, ApiE
 
 /* ————— Google Mail live pull ————— */
 
-/// Status for the Google Mail card. The app password never leaves the
-/// sealed store — only presence and the account name are reported.
-async fn gmail_status(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let get = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
-    let user = get("GMAIL_IMAP_USER");
-    let configured = user.is_some() && get("GMAIL_IMAP_PASSWORD").is_some();
-    // the other live nodes watching a mailbox: one mailbox, one puller
+/// One mailbox, as the Integrations card and the CLI show it. The app
+/// password never leaves the sealed store.
+fn mailbox_json(state: &AppState, mb: &crate::mailboxes::Mailbox) -> Value {
+    // the other live nodes watching this mailbox: one mailbox, one puller
+    let me = crate::agents::node_id(state);
+    let account = mb.account();
+    let others: Vec<Value> = state
+        .store
+        .nodes()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| n["node_id"].as_str() != Some(me.as_str()))
+        .filter(|n| {
+            n["roles"]["mailboxes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|m| m["address"].as_str() == Some(account.as_str()) && m["watching"] == true)
+        })
+        .map(|n| n["name"].clone())
+        .collect();
+    json!({
+        "id": mb.id,
+        "address": mb.address,
+        "first": mb.first,
+        "source": mb.source_name(),
+        "live_mbox": mb.live_mbox_path(state).exists(),
+        "watch": crate::gmail_watch::status_json_for(state, mb),
+        "aliases": crate::mailboxes::aliases(state, mb),
+        "embers": crate::mailboxes::embers_see(state, mb),
+        "also_watching": others,
+    })
+}
+
+/// Status for the Google Mail card: every mailbox connected here
+/// (`mailboxes`, 0.5.98), and — as before — the one a caller means
+/// without naming one (the only one, or the first).
+async fn gmail_status(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "see this node's mail connections")?;
+    let all = crate::mailboxes::all();
+    let default = crate::mailboxes::default_one();
+    // other live nodes watching some mailbox (older nodes say only that)
     let me = crate::agents::node_id(&state);
     let others: Vec<Value> = state
         .store
@@ -3283,18 +3321,24 @@ async fn gmail_status(State(state): State<AppState>) -> Result<Json<Value>, ApiE
         .map(|n| n["name"].clone())
         .collect();
     Ok(Json(json!({
-        "configured": configured,
-        "user": user,
+        "configured": !all.is_empty(),
+        "user": default.as_ref().map(|mb| mb.address.clone()),
         "last_ran_at": state.store.consolidation_state("settings.gmail_pull.last_ran_at")?,
-        "live_mbox": crate::gmail_pull::live_mbox_path(&state).exists(),
+        "live_mbox": default.as_ref().is_some_and(|mb| mb.live_mbox_path(&state).exists()),
         "watch": crate::gmail_watch::status_json(&state),
         "also_watching": others,
+        "mailboxes": all.iter().map(|mb| mailbox_json(&state, mb)).collect::<Vec<_>>(),
     })))
 }
 
 #[derive(Deserialize)]
 struct GmailSaveBody {
     actor: String,
+    /// Which mailbox a change or a disconnect is for (address or id); none
+    /// = the only one, or the first.
+    #[serde(default)]
+    address: Option<String>,
+    /// Connect (or reconnect) this address with `password`.
     #[serde(default)]
     user: Option<String>,
     #[serde(default)]
@@ -3307,25 +3351,51 @@ struct GmailSaveBody {
     watch: Option<bool>,
     #[serde(default)]
     every_minutes: Option<u64>,
+    /// Other addresses of the owner's that reach this mailbox (0.5.98).
+    #[serde(default)]
+    aliases: Option<Vec<String>>,
+    /// Whether embers with `mail.watch` see this mailbox (0.5.98).
+    #[serde(default)]
+    embers: Option<bool>,
 }
 
-/// Validate + persist the Gmail IMAP credential. Test-then-store: a
-/// real IMAP login must succeed before anything is written. Persistence
-/// goes through `set_env_vars` (decrypt-merge-reseal + live process
-/// env) — NEVER a raw .env write, which would clobber the sealed file
-/// and lose every other secret on the next boot. No restart needed: the
-/// gmail_pull automation feature-detects the vars each cycle.
+/// The mailbox a change names, or the one meant without a name.
+fn mailbox_named(address: Option<&str>) -> Result<crate::mailboxes::Mailbox, ApiError> {
+    match address.map(str::trim).filter(|a| !a.is_empty()) {
+        Some(a) => crate::mailboxes::find(a)
+            .ok_or_else(|| bad_request(format!("no mailbox {a} is connected on this node"))),
+        None => crate::mailboxes::default_one().ok_or_else(|| {
+            bad_request("say which mailbox (several are connected here, or none is)")
+        }),
+    }
+}
+
+/// Validate + persist a Gmail IMAP credential, or change one mailbox's
+/// settings, or remove it. Test-then-store: a real IMAP login must succeed
+/// before anything is written. Persistence goes through `set_env_vars`
+/// (decrypt-merge-reseal + live process env) — NEVER a raw .env write,
+/// which would clobber the sealed file and lose every other secret on the
+/// next boot. No restart needed: the watch picks a new mailbox up within
+/// seconds.
 async fn gmail_save(
     State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
     Json(body): Json<GmailSaveBody>,
 ) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "change this node's mail connections")?;
     if body.actor.trim().is_empty() {
         return Err(bad_request("actor is required on every write"));
     }
-    if body.watch.is_some() || body.every_minutes.is_some() {
+    let connecting = body.user.is_some() || body.password.is_some();
+    let settings = body.watch.is_some()
+        || body.every_minutes.is_some()
+        || body.aliases.is_some()
+        || body.embers.is_some();
+    if settings && !connecting {
+        let mb = mailbox_named(body.address.as_deref())?;
         if let Some(on) = body.watch {
             state.store.set_consolidation_state(
-                crate::gmail_watch::KEY_WATCH,
+                &mb.key(crate::gmail_watch::KEY_WATCH),
                 if on { "on" } else { "off" },
             )?;
         }
@@ -3333,40 +3403,59 @@ async fn gmail_save(
             if !(1..=60).contains(&minutes) {
                 return Err(bad_request("catch up every 1 to 60 minutes"));
             }
-            state
-                .store
-                .set_consolidation_state(crate::gmail_watch::KEY_EVERY, &minutes.to_string())?;
+            state.store.set_consolidation_state(
+                &mb.key(crate::gmail_watch::KEY_EVERY),
+                &minutes.to_string(),
+            )?;
         }
-        crate::gmail_watch::recheck(false);
+        if let Some(list) = &body.aliases {
+            crate::mailboxes::set_aliases(&state, &mb, list)
+                .map_err(|e| bad_request(format!("{e:#}")))?;
+        }
+        if let Some(on) = body.embers {
+            crate::mailboxes::set_embers(&state, &mb, on)?;
+        }
+        crate::gmail_watch::recheck_mailbox(&mb.id, false);
         crate::agents::publish_self(&state);
-        if body.user.is_none() && body.password.is_none() && !body.disconnect {
-            return Ok(Json(
-                json!({"saved": true, "watch": crate::gmail_watch::status_json(&state)}),
-            ));
+        if !body.disconnect {
+            return Ok(Json(json!({
+                "saved": true,
+                "mailbox": mailbox_json(&state, &mb),
+                "watch": crate::gmail_watch::status_json_for(&state, &mb),
+            })));
         }
     }
     if body.disconnect {
+        let mb = mailbox_named(body.address.as_deref())?;
+        let (user_var, pass_var) = mb.env_names();
         hearthloom_core::secrets::set_env_vars(
             state.home.root(),
-            &[("GMAIL_IMAP_USER", ""), ("GMAIL_IMAP_PASSWORD", "")],
+            &[(user_var.as_str(), ""), (pass_var.as_str(), "")],
         )
         .map_err(|e| bad_request(format!("{e:#}")))?;
-        crate::gmail_watch::recheck(true);
+        crate::gmail_watch::recheck_mailbox(&mb.id, true);
         crate::agents::publish_self(&state);
         crate::monitor::log(
             &state,
             "info",
             "gmail_disconnected",
-            "Google Mail live pull disconnected — the live archive stays",
+            &format!(
+                "Google Mail live pull disconnected ({}) — its live archive stays",
+                mb.address
+            ),
             None,
         );
-        return Ok(Json(json!({"saved": true, "configured": false})));
+        return Ok(Json(json!({
+            "saved": true,
+            "configured": !crate::mailboxes::all().is_empty(),
+            "disconnected": mb.address,
+        })));
     }
     let user = body
         .user
         .as_deref()
         .map(str::trim)
-        .filter(|u| u.contains('@'))
+        .filter(|u| u.contains('@') && !u.chars().any(char::is_whitespace))
         .ok_or_else(|| bad_request("a Gmail address is required"))?
         .to_string();
     // Google renders app passwords in spaced groups of four — accept
@@ -3409,15 +3498,19 @@ async fn gmail_save(
          (myaccount.google.com/apppasswords), not your account password."
         ))
     })?;
+    // an address already here keeps its slot; the first mailbox keeps the
+    // original names (mailboxes.rs)
+    let (first, id, (user_var, pass_var)) =
+        crate::mailboxes::slot_for(&crate::mailboxes::all(), &user);
     hearthloom_core::secrets::set_env_vars(
         state.home.root(),
         &[
-            ("GMAIL_IMAP_USER", user.as_str()),
-            ("GMAIL_IMAP_PASSWORD", password.as_str()),
+            (user_var.as_str(), user.as_str()),
+            (pass_var.as_str(), password.as_str()),
         ],
     )
     .map_err(|e| bad_request(format!("{e:#}")))?;
-    crate::gmail_watch::recheck(true);
+    crate::gmail_watch::recheck_mailbox(&id, true);
     crate::agents::publish_self(&state);
     crate::monitor::log(
         &state,
@@ -3426,9 +3519,14 @@ async fn gmail_save(
         &format!("Google Mail connected ({user}) — new mail is watched live"),
         None,
     );
-    Ok(Json(
-        json!({"saved": true, "configured": true, "user": user}),
-    ))
+    let mailbox = crate::mailboxes::find(&id).map(|mb| mailbox_json(&state, &mb));
+    Ok(Json(json!({
+        "saved": true,
+        "configured": true,
+        "user": user,
+        "first": first,
+        "mailbox": mailbox,
+    })))
 }
 
 /* ————— API keys (PATs) ————— */

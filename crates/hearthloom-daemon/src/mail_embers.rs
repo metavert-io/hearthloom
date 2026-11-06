@@ -66,6 +66,7 @@ fn queue(watch: &MailWatch, seen: &MailSeen, thread: Option<&MailThread>) -> Mai
         class: decided.map(|t| t.state.clone()),
         why: decided.and_then(|t| t.why.clone()),
         text: seen.text.clone(),
+        account: seen.account.to_lowercase(),
         ..Default::default()
     }
 }
@@ -85,6 +86,11 @@ fn input(seen: &MailSeen) -> WatchInput<'_> {
 /// a private one — and nothing is queued then.
 pub fn on_seen(state: &AppState, seen: &MailSeen, thread: Option<Option<&MailThread>>) -> usize {
     if seen.private || seen.from_me {
+        return 0;
+    }
+    // only mailboxes the owner lets embers see (0.5.98: an added one is off
+    // until they turn it on)
+    if !crate::mailboxes::embers_see_account(state, &seen.account) {
         return 0;
     }
     let thread = match thread {
@@ -128,16 +134,21 @@ pub fn on_classified(state: &AppState, thread: &MailThread) -> usize {
     if waiting.is_empty() {
         return 0;
     }
-    let (Some(id), Some(account)) = (&thread.last_message_id, crate::gmail_search::account())
+    let Some(id) = &thread.last_message_id else {
+        return 0;
+    };
+    // the thread's mailbox's archive first, then the others here
+    let Some((mb, raw)) = crate::mailboxes::read_local(state, &thread.account, id, 2_000_000)
     else {
         return 0;
     };
-    let mbox = crate::gmail_pull::live_mbox_path(state);
-    let Ok(raw) = crate::mbox_index::fetch(&mbox, id, 2_000_000) else {
+    if !crate::mailboxes::embers_see(state, &mb) {
         return 0;
-    };
+    }
     let labels = hearthloom_adapters::mbox::gmail_labels(&raw);
-    let Some(seen) = crate::mail_triage::seen(state, &account, &labels, raw.as_bytes()) else {
+    let mine = crate::mailboxes::owner_addresses(state);
+    let Some(seen) = crate::mail_triage::seen(state, &mb.address, &mine, &labels, raw.as_bytes())
+    else {
         return 0;
     };
     if seen.private || seen.from_me {

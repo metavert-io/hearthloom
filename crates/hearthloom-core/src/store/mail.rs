@@ -140,6 +140,49 @@ fn thread_from_row(r: &rusqlite::Row) -> rusqlite::Result<MailThread> {
 }
 
 /// The thread id every node derives from a thread's root message id.
+/// SQL over a row's `account` for the mailboxes one node handles (0.5.98):
+/// the ones in `accounts`, and with `unwatched` also any account not in
+/// that list of watched mailboxes (one no live node watches, or "" from
+/// before 0.5.98). Parameters are numbered from `?{first}`.
+pub(crate) fn account_filter(
+    accounts: &[String],
+    unwatched: Option<&[String]>,
+    first: usize,
+) -> (String, Vec<rusqlite::types::Value>) {
+    fn list(vals: &[String], params: &mut Vec<rusqlite::types::Value>, next: &mut usize) -> String {
+        vals.iter()
+            .map(|v| {
+                params.push(v.trim().to_lowercase().into());
+                *next += 1;
+                format!("?{}", *next - 1)
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+    let mut params = Vec::new();
+    let mut next = first;
+    let mut parts = Vec::new();
+    if !accounts.is_empty() {
+        parts.push(format!(
+            "lower(account) IN ({})",
+            list(accounts, &mut params, &mut next)
+        ));
+    }
+    match unwatched {
+        Some([]) => parts.push("1".into()),
+        Some(watched) => parts.push(format!(
+            "lower(account) NOT IN ({})",
+            list(watched, &mut params, &mut next)
+        )),
+        None => {}
+    }
+    if parts.is_empty() {
+        ("0".into(), params)
+    } else {
+        (format!("({})", parts.join(" OR ")), params)
+    }
+}
+
 pub fn thread_id_for(root: &str) -> String {
     format!(
         "mt_{}",
@@ -355,6 +398,29 @@ impl Store {
              ORDER BY last_at LIMIT ?1"
         ))?;
         let rows = stmt.query_map([limit as i64], thread_from_row)?;
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Threads waiting for triage that this node sorts (0.5.98): those of
+    /// the mailboxes in `accounts`, and with `unwatched` also those of a
+    /// mailbox none of the watched ones (`account_filter`).
+    pub fn mail_threads_to_triage_for(
+        &self,
+        limit: usize,
+        accounts: &[String],
+        unwatched: Option<&[String]>,
+    ) -> Result<Vec<MailThread>> {
+        let conn = self.lock();
+        let (filter, params) = account_filter(accounts, unwatched, 2);
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {THREAD_COLS} FROM mail_threads
+             WHERE state = 'new' AND scope != 'private' AND {filter}
+             ORDER BY last_at LIMIT ?1"
+        ))?;
+        let mut all: Vec<rusqlite::types::Value> = vec![(limit as i64).into()];
+        all.extend(params);
+        let rows = stmt.query_map(rusqlite::params_from_iter(all), thread_from_row)?;
         rows.collect::<std::result::Result<_, _>>()
             .map_err(Into::into)
     }
@@ -610,6 +676,73 @@ mod tests {
         assert_eq!((th.state.as_str(), th.message_count), ("new", 3));
         // the id is the same on every node: a hash of the root
         assert_eq!(t, thread_id_for("m1@x"));
+    }
+
+    /// Several mailboxes (0.5.98): a node sorts only the threads of the
+    /// mailboxes it handles — plus, as the fallback node, those of a
+    /// mailbox nobody watches — and a draft remembers its thread's mailbox.
+    #[test]
+    fn test_each_node_takes_only_its_mailboxes_threads_and_drafts() {
+        let (s, _t) = store();
+        let a = Actor::new("adapter:test");
+        let mut ids = std::collections::BTreeMap::new();
+        for (account, mid) in [
+            ("Me@X.example", "h1@x"),
+            ("jon@work.example", "w1@x"),
+            ("", "o1@x"),
+        ] {
+            let mut m = msg(mid, "Ann", true);
+            m.account = account.into();
+            ids.insert(mid, s.mail_observe(&a, &m).unwrap().unwrap());
+        }
+        let sorted = |mine: &[&str], watched: Option<&[&str]>| -> Vec<String> {
+            let mine: Vec<String> = mine.iter().map(|x| x.to_string()).collect();
+            let watched: Option<Vec<String>> =
+                watched.map(|w| w.iter().map(|x| x.to_string()).collect());
+            let mut got: Vec<String> = s
+                .mail_threads_to_triage_for(10, &mine, watched.as_deref())
+                .unwrap()
+                .into_iter()
+                .map(|t| t.id)
+                .collect();
+            got.sort();
+            got
+        };
+        let want = |list: &[&str]| -> Vec<String> {
+            let mut v: Vec<String> = list.iter().map(|m| ids[m].clone()).collect();
+            v.sort();
+            v
+        };
+        // case doesn't matter
+        assert_eq!(sorted(&["me@x.example"], None), want(&["h1@x"]));
+        // the fallback node also takes what no watched mailbox covers
+        assert_eq!(
+            sorted(
+                &["me@x.example"],
+                Some(&["me@x.example", "jon@work.example"])
+            ),
+            want(&["h1@x", "o1@x"])
+        );
+        assert_eq!(sorted(&[], Some(&[])), want(&["h1@x", "w1@x", "o1@x"]));
+        assert!(sorted(&[], None).is_empty());
+
+        // a draft of the work thread is for the work mailbox
+        let owner = Actor::new("human:owner");
+        let d = s
+            .mail_draft_request(&owner, Some(&ids["w1@x"]), None, None, false, None)
+            .unwrap();
+        assert_eq!(d.account, "jon@work.example");
+        let waiting = |mine: &[&str], watched: Option<&[&str]>| -> usize {
+            let mine: Vec<String> = mine.iter().map(|x| x.to_string()).collect();
+            let watched: Option<Vec<String>> =
+                watched.map(|w| w.iter().map(|x| x.to_string()).collect());
+            s.mail_drafts_waiting_for(10, &mine, watched.as_deref())
+                .unwrap()
+                .len()
+        };
+        assert_eq!(waiting(&["jon@work.example"], None), 1);
+        assert_eq!(waiting(&["me@x.example"], None), 0);
+        assert_eq!(waiting(&["me@x.example"], Some(&["me@x.example"])), 1);
     }
 
     #[test]

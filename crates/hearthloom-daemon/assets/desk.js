@@ -1151,6 +1151,14 @@ let recentExercises = [];
    reply, a time, or a look — each with the words that decided it. ————— */
 let mailPoll = null;
 
+// Gmail in the right account: /u/<address>/ picks it by address (0.5.98;
+// /u/0/ is whichever account the browser signed in to first).
+function gmailBase(account) {
+  return account && account.includes("@")
+    ? `https://mail.google.com/mail/u/${encodeURIComponent(account)}/`
+    : "https://mail.google.com/mail/u/0/";
+}
+
 async function paintMail(host) {
   if (!host) return;
   let data;
@@ -1171,7 +1179,7 @@ async function paintMail(host) {
     const fill = (d.placeholders || []).length
       ? ` · fill in: ${d.placeholders.map((p) => esc(p)).join(", ")}` : "";
     return `<details class="meta"><summary>a reply is in your Gmail Drafts${fill} —
-        <a href="https://mail.google.com/mail/u/0/#drafts" target="_blank" rel="noopener noreferrer">open Drafts ↗</a></summary>
+        <a href="${esc(gmailBase(d.account))}#drafts" target="_blank" rel="noopener noreferrer">open Drafts ↗</a></summary>
         <div style="white-space:pre-wrap; margin-top:var(--s1)">${esc(d.body || "")}</div></details>`;
   };
   const pending = Object.values(latest).some((d) => d.state === "requested" || d.state === "writing");
@@ -1182,8 +1190,8 @@ async function paintMail(host) {
   if (!threads.length && !err) { host.hidden = true; host.innerHTML = ""; return; }
   host.hidden = false;
   const label = { needs_reply: "reply", scheduling: "a time", opportunity: "a look" };
-  const gmail = (id) => id
-    ? `https://mail.google.com/mail/u/0/#search/${encodeURIComponent("rfc822msgid:" + id)}` : null;
+  const gmail = (id, account) => id
+    ? `${gmailBase(account)}#search/${encodeURIComponent("rfc822msgid:" + id)}` : null;
   host.innerHTML = `
     <div class="section-title">Waiting on you <span class="meta">· ${threads.length} email${threads.length === 1 ? "" : "s"}</span></div>
     ${err ? `<p class="meta">Sorting new mail failed last time: ${esc(err)}</p>` : ""}
@@ -1207,7 +1215,7 @@ async function paintMail(host) {
           <button class="btn btn-quiet mail-draft">${latest[t.id] ? "draft again" : "draft a reply"}</button>
           <button class="btn btn-quiet mail-act" data-state="done">done</button>
           <button class="btn btn-quiet mail-act" data-state="fyi">not needed</button>
-          ${gmail(t.last_message_id) ? `<a class="btn btn-quiet" href="${esc(gmail(t.last_message_id))}" target="_blank" rel="noopener noreferrer">open in Gmail ↗</a>` : ""}
+          ${gmail(t.last_message_id, t.account) ? `<a class="btn btn-quiet" href="${esc(gmail(t.last_message_id, t.account))}" target="_blank" rel="noopener noreferrer">open in Gmail ↗</a>` : ""}
         </div>
       </div>`).join("")}`;
   host.querySelectorAll(".mail-draft").forEach((b) => {

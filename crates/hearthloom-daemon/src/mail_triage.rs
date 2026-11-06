@@ -95,8 +95,16 @@ fn set_status(v: Value) {
 
 /* ————— from the pull ————— */
 
-/// What the pull saw of one message, for its thread.
-pub fn seen(state: &AppState, account: &str, labels: &[String], raw: &[u8]) -> Option<MailSeen> {
+/// What the pull saw of one message, for its thread. `account` is the
+/// mailbox it arrived in; `mine` every address of the owner's
+/// (mailboxes::owner_addresses) — mail from any of them is their own.
+pub fn seen(
+    state: &AppState,
+    account: &str,
+    mine: &std::collections::BTreeSet<String>,
+    labels: &[String],
+    raw: &[u8],
+) -> Option<MailSeen> {
     let m = mail_parser::MessageParser::default().parse(raw)?;
     let message_id = m.message_id()?.to_string();
     let ids = |v: Option<mail_parser::TextList>| -> Vec<String> {
@@ -125,7 +133,9 @@ pub fn seen(state: &AppState, account: &str, labels: &[String], raw: &[u8]) -> O
     });
     let (text, _) = crate::mbox_text::message_text(raw);
     let has = |l: &str| labels.iter().any(|x| x.eq_ignore_ascii_case(l));
-    let from_me = has("Sent") || from_addr.eq_ignore_ascii_case(account);
+    let from_me = has("Sent")
+        || from_addr.eq_ignore_ascii_case(account)
+        || mine.contains(&from_addr.trim().to_lowercase());
     let private = state
         .store
         .privacy_rules_match(&format!("{from}\n{subject}\n{text}"))
@@ -182,17 +192,26 @@ pub fn observe(state: &AppState, seen: &[MailSeen]) {
     }
 }
 
-/// The first time this node sorts mail, the last two weeks of its live
-/// archive become threads too — so what already waits on the owner is on
-/// the Desk from day one, not only what arrives next.
+/// The first time this node sorts a mailbox's mail, the last two weeks of
+/// its live archive become threads too — so what already waits on the
+/// owner is on the Desk from day one, not only what arrives next. Per
+/// mailbox (`mail.backfilled`, `.<id>` for an added one).
 pub const KEY_BACKFILLED: &str = "mail.backfilled";
 const BACKFILL_DAYS: i64 = 14;
 
-pub fn backfill(state: &AppState) -> Result<usize> {
-    let Some((account, _)) = crate::gmail_pull::credentials() else {
-        return Ok(0);
-    };
-    let mbox = crate::gmail_pull::live_mbox_path(state);
+pub fn backfilled(state: &AppState, mb: &crate::mailboxes::Mailbox) -> bool {
+    state
+        .store
+        .consolidation_state(&mb.key(KEY_BACKFILLED))
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+pub fn backfill(state: &AppState, mb: &crate::mailboxes::Mailbox) -> Result<usize> {
+    let account = mb.address.clone();
+    let mine = crate::mailboxes::owner_addresses(state);
+    let mbox = mb.live_mbox_path(state);
     if !mbox.exists() || crate::mbox_index::is_stale(&mbox) {
         return Ok(0);
     }
@@ -207,7 +226,7 @@ pub fn backfill(state: &AppState) -> Result<usize> {
         let Ok(raw) = crate::mbox_index::fetch(&mbox, &id, 2_000_000) else {
             continue;
         };
-        if let Some(s) = seen(state, &account, &labels, raw.as_bytes()) {
+        if let Some(s) = seen(state, &account, &mine, &labels, raw.as_bytes()) {
             seen_all.push(s);
         }
     }
@@ -215,21 +234,21 @@ pub fn backfill(state: &AppState) -> Result<usize> {
     observe(state, &seen_all);
     state
         .store
-        .set_consolidation_state(KEY_BACKFILLED, &hearthloom_core::time::now_utc())?;
+        .set_consolidation_state(&mb.key(KEY_BACKFILLED), &hearthloom_core::time::now_utc())?;
     Ok(n)
 }
 
 /* ————— triage ————— */
 
-/// The text of a thread's last message, from this node's live archive.
+/// The text of a thread's last message, from a live archive here (its
+/// mailbox's first).
 fn last_text(state: &AppState, thread: &MailThread) -> String {
     let Some(id) = &thread.last_message_id else {
         return thread.snippet.clone();
     };
-    let mbox = crate::gmail_pull::live_mbox_path(state);
-    crate::mbox_index::fetch(&mbox, id, 200_000)
-        .map(|raw| crate::mbox_text::message_text(raw.as_bytes()).0)
-        .unwrap_or_else(|_| thread.snippet.clone())
+    crate::mailboxes::read_local(state, &thread.account, id, 200_000)
+        .map(|(_, raw)| crate::mbox_text::message_text(raw.as_bytes()).0)
+        .unwrap_or_else(|| thread.snippet.clone())
         .chars()
         .take(TEXT_CHARS)
         .collect()
@@ -500,8 +519,20 @@ async fn ask_api(
 }
 
 /// Sort the threads waiting for it, one batch. Returns how many were sorted.
+/// Sort what waits, of the mailboxes this node handles: each thread is
+/// sorted once, on the node that handles its mailbox (mailboxes::duty).
 pub async fn triage_once(state: &AppState) -> Result<usize> {
-    let threads = state.store.mail_threads_to_triage(BATCH)?;
+    triage_for(state, &crate::mailboxes::duty(state)).await
+}
+
+pub(crate) async fn triage_for(state: &AppState, duty: &crate::mailboxes::Duty) -> Result<usize> {
+    if duty.is_idle() {
+        return Ok(0);
+    }
+    let threads =
+        state
+            .store
+            .mail_threads_to_triage_for(BATCH, &duty.mine, duty.unwatched.as_deref())?;
     if threads.is_empty() {
         return Ok(0);
     }
@@ -610,18 +641,16 @@ pub async fn run_loop(state: AppState) {
     tokio::time::sleep(Duration::from_secs(60)).await;
     loop {
         if enabled(&state) && crate::gmail_watch::watching(&state) && provider(&state) != "none" {
-            let done = state
-                .store
-                .consolidation_state(KEY_BACKFILLED)
-                .ok()
-                .flatten()
-                .is_some();
-            if !done {
-                let st = state.clone();
-                match tokio::task::spawn_blocking(move || backfill(&st)).await {
-                    Ok(Ok(n)) => {
-                        tracing::info!("mail: the last two weeks read into threads ({n} messages)")
-                    }
+            for mb in crate::mailboxes::all() {
+                if backfilled(&state, &mb) || !crate::gmail_watch::watching_mailbox(&state, &mb) {
+                    continue;
+                }
+                let (st, m) = (state.clone(), mb.clone());
+                match tokio::task::spawn_blocking(move || backfill(&st, &m)).await {
+                    Ok(Ok(n)) => tracing::info!(
+                        "mail: the last two weeks of {} read into threads ({n} messages)",
+                        mb.address
+                    ),
                     Ok(Err(err)) => tracing::warn!("mail: reading the last two weeks: {err:#}"),
                     Err(err) => tracing::warn!("mail: reading the last two weeks: {err}"),
                 }
@@ -749,7 +778,13 @@ mod tests {
             .unwrap();
         assert_eq!(provider(&state), "claude-code");
 
-        assert_eq!(triage_once(&state).await.unwrap(), 1);
+        // this node handles every mailbox's mail (no mailbox is connected
+        // in a test, so the real duty would be none)
+        let all = crate::mailboxes::Duty {
+            mine: vec![],
+            unwatched: Some(vec![]),
+        };
+        assert_eq!(triage_for(&state, &all).await.unwrap(), 1);
         state.store.vault_unlock(5);
         let t = state.store.mail_thread(&open).unwrap().unwrap();
         assert_eq!(
@@ -782,7 +817,72 @@ mod tests {
             "{usage}"
         );
         // nothing left to sort: the next round asks nothing
-        assert_eq!(triage_once(&state).await.unwrap(), 0);
+        assert_eq!(triage_for(&state, &all).await.unwrap(), 0);
+    }
+
+    /// Mail from any of the owner's addresses is their own (0.5.98): sent
+    /// from one mailbox and arriving in another, or from an alias, it opens
+    /// no thread — while mail from anyone else still does.
+    #[test]
+    fn test_mail_from_any_of_the_owners_addresses_is_theirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::paths::Home::at(tmp.path());
+        home.init().unwrap();
+        let state = AppState {
+            store: std::sync::Arc::new(
+                hearthloom_core::store::Store::open(&home.db_path()).unwrap(),
+            ),
+            home,
+            embedder: None,
+            llm: None,
+            auth_locked: Default::default(),
+            bus: Default::default(),
+            killswitch: Default::default(),
+            running: Default::default(),
+        };
+        let raw = |from: &str| {
+            format!(
+                "From: Jon <{from}>\r\nTo: me@mail.example\r\nSubject: note\r\n\
+                 Message-ID: <n-{from}>\r\n\r\nhello\r\n"
+            )
+        };
+        let mine: std::collections::BTreeSet<String> =
+            ["me@mail.example", "jon@work.example", "legal@work.example"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        let labels = vec!["Inbox".to_string(), "Category Personal".to_string()];
+        for from in ["jon@work.example", "Legal@Work.example"] {
+            let s = seen(
+                &state,
+                "me@mail.example",
+                &mine,
+                &labels,
+                raw(from).as_bytes(),
+            )
+            .unwrap();
+            assert!(s.from_me, "{from}");
+        }
+        let s = seen(
+            &state,
+            "me@mail.example",
+            &mine,
+            &labels,
+            raw("dana@fund.example").as_bytes(),
+        )
+        .unwrap();
+        assert!(!s.from_me);
+        // before 0.5.98 only the connected address counted
+        let only = std::collections::BTreeSet::new();
+        let s = seen(
+            &state,
+            "me@mail.example",
+            &only,
+            &labels,
+            raw("jon@work.example").as_bytes(),
+        )
+        .unwrap();
+        assert!(!s.from_me);
     }
 
     #[test]

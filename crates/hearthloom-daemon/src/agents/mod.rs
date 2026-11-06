@@ -289,6 +289,9 @@ pub fn publish_self(state: &AppState) {
         "imports": imports_here(state),
         // watching a Gmail mailbox (gmail_watch.rs): two nodes doing it shows
         "mail": crate::gmail_watch::watching(state),
+        // each mailbox connected here: address, watched?, aliases (0.5.98;
+        // mailboxes.rs — who handles which, and the owner's addresses)
+        "mailboxes": crate::mailboxes::published(state),
         // Google Calendar free/busy is connected here (0.5.95)
         "calendar": crate::google_calendar::connected(),
         // the mail archives this node holds, for Ask on any node (0.5.88)

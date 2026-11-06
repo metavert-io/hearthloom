@@ -402,20 +402,30 @@ from your key — scripts can't impersonate the system.
 ```
 hearthloom gmail connect you@gmail.com           # prompts for the app password
 printf '%s' "$APP_PASSWORD" | hearthloom gmail connect you@gmail.com
-hearthloom gmail                                 # status: watching, last check, last new mail
-hearthloom gmail watch off                       # or on
-hearthloom gmail watch --every 2                 # catch up every 2 minutes (1–60)
-hearthloom gmail disconnect
+hearthloom gmail connect you@your-company.example  # another address adds a mailbox
+hearthloom gmail                                 # every mailbox: watching, last check, last new mail
+hearthloom gmail watch off                       # or on (--address A when several are connected)
+hearthloom gmail watch --every 2 --address you@your-company.example
+hearthloom gmail set you@your-company.example --aliases hello@your-company.example,legal@your-company.example
+hearthloom gmail set you@your-company.example --embers on   # let mail-watching embers see it
+hearthloom gmail disconnect you@your-company.example
 ```
 
 Connect Gmail on one node, ideally one that's always on (a hosted node or
-a home server). New mail arrives within seconds: the node keeps an IMAP
-IDLE connection open and pulls as soon as Gmail reports a change, plus a
-catch-up at the interval in case a notice was missed. The app password
-comes from stdin and is tested before it's kept. If Gmail refuses the
-sign-in, the watch stops (and says so) until you connect again — it never
-keeps retrying a bad password. `hearthloom node` shows which node watches
-Gmail.
+a home server). A node can watch several mailboxes — a personal Gmail and
+a Google Workspace address alike, each with its own app password. New
+mail arrives within seconds: the node keeps an IMAP IDLE connection open
+per mailbox and pulls as soon as Gmail reports a change, plus a catch-up
+at the interval in case a notice was missed. The app password comes from
+stdin and is tested before it's kept. If Gmail refuses a sign-in, that
+mailbox stops (and says so) until you connect it again — it never keeps
+retrying a bad password; the others carry on.
+
+`--aliases` lists your other addresses that arrive in a mailbox (a
+Workspace alias, a catch-all): mail from any of them counts as yours, and
+a reply drafted to mail sent to one goes out from it. Embers that watch
+mail see the first mailbox; an added one only after `--embers on`.
+`hearthloom node` shows which node watches which mailbox.
 
 ### `provenance` — how a memory got here
 

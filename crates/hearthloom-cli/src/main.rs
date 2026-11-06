@@ -708,23 +708,44 @@ enum SourceCmd {
 
 #[derive(Subcommand)]
 enum GmailCmd {
-    /// Connect Gmail on this node: the app password is read from stdin
-    /// (prompted without echo at a terminal) and tested before it's kept.
+    /// Connect a Gmail or Google Workspace mailbox on this node (another
+    /// address adds a mailbox; the same one reconnects it). The app password
+    /// is read from stdin (prompted without echo at a terminal) and tested
+    /// before it's kept.
     Connect {
-        /// The Gmail address, e.g. you@gmail.com
+        /// The address, e.g. you@gmail.com or you@your-company.example
         address: String,
     },
-    /// Forget the Gmail sign-in on this node (the archive stays).
-    Disconnect,
-    /// Where the watch stands: on/off, last check, last new mail, errors.
+    /// Forget a mailbox's sign-in on this node (its archive stays).
+    Disconnect {
+        /// Which mailbox (needed when several are connected)
+        address: Option<String>,
+    },
+    /// Every mailbox here: watch on/off, last check, last new mail, errors.
     Status,
-    /// Turn the live watch on or off, and/or set the catch-up interval.
+    /// Turn a mailbox's live watch on or off, and/or set its catch-up interval.
     Watch {
         /// on | off
         state: Option<String>,
         /// Catch up every N minutes (1-60) even without a notice from Gmail.
         #[arg(long)]
         every: Option<u64>,
+        /// Which mailbox (needed when several are connected)
+        #[arg(long)]
+        address: Option<String>,
+    },
+    /// A mailbox's options: the other addresses of yours that reach it,
+    /// and whether embers with mail.watch may see it.
+    Set {
+        /// Which mailbox
+        address: String,
+        /// Your other addresses that arrive here (aliases), comma-separated;
+        /// "" clears them. Mail from any of them counts as yours.
+        #[arg(long)]
+        aliases: Option<String>,
+        /// on | off — whether embers that watch mail see this mailbox
+        #[arg(long)]
+        embers: Option<String>,
     },
 }
 
@@ -1249,32 +1270,57 @@ async fn main() -> Result<()> {
         }
         Cmd::Gmail { cmd } => {
             let client = Client::with_url(home, url.clone())?;
-            let (watch, every) = match cmd {
+            let on_off = |v: Option<&str>, what: &str| -> Result<Option<bool>> {
+                match v {
+                    None => Ok(None),
+                    Some("on") => Ok(Some(true)),
+                    Some("off") => Ok(Some(false)),
+                    Some(other) => anyhow::bail!("{what} takes on or off, not {other:?}"),
+                }
+            };
+            let (watch, every, address) = match cmd {
                 Some(GmailCmd::Connect { address }) => {
                     return ops::gmail_connect(&client, &address).await;
                 }
-                Some(GmailCmd::Disconnect) => {
-                    client
+                Some(GmailCmd::Disconnect { address }) => {
+                    let out = client
                         .post(
                             "/v1/integrations/gmail",
-                            &serde_json::json!({"actor": "human:cli", "disconnect": true}),
+                            &serde_json::json!({"actor": "human:cli", "disconnect": true,
+                                                "address": address}),
                         )
                         .await?;
-                    println!("Gmail disconnected on this node — the mail already pulled stays");
+                    println!(
+                        "{} disconnected on this node — the mail already pulled stays",
+                        out["disconnected"].as_str().unwrap_or("Gmail")
+                    );
                     return Ok(());
                 }
-                None | Some(GmailCmd::Status) => (None, None),
-                Some(GmailCmd::Watch { state, every }) => {
-                    let watch = match state.as_deref() {
-                        None => None,
-                        Some("on") => Some(true),
-                        Some("off") => Some(false),
-                        Some(other) => anyhow::bail!("watch takes on or off, not {other:?}"),
-                    };
-                    (watch, every)
+                Some(GmailCmd::Set {
+                    address,
+                    aliases,
+                    embers,
+                }) => {
+                    let aliases: Option<Vec<String>> = aliases.map(|a| {
+                        a.split(',')
+                            .map(|x| x.trim().to_string())
+                            .filter(|x| !x.is_empty())
+                            .collect()
+                    });
+                    let embers = on_off(embers.as_deref(), "--embers")?;
+                    if aliases.is_none() && embers.is_none() {
+                        anyhow::bail!("say what to set: --aliases and/or --embers");
+                    }
+                    return ops::gmail_set(&client, &address, aliases, embers, as_json).await;
                 }
+                None | Some(GmailCmd::Status) => (None, None, None),
+                Some(GmailCmd::Watch {
+                    state,
+                    every,
+                    address,
+                }) => (on_off(state.as_deref(), "watch")?, every, address),
             };
-            ops::gmail(&client, watch, every, as_json).await?;
+            ops::gmail(&client, address.as_deref(), watch, every, as_json).await?;
         }
         Cmd::Provenance { id } => {
             let client = Client::with_url(home, url.clone())?;

@@ -92,8 +92,10 @@ workspace with `npm i playwright`) — screenshot + pageerror check.
 ## Layout
 
 - `crates/hearthloom-core` — schema (migrations via `PRAGMA user_version`,
-  **currently v65**: v65 reply drafts (`mail_drafts` mirrored +
-  journaled — see DRAFTS NEVER SEND), v64 embers' mail watches (`mail_watches`,
+  **currently v66**: v66 several mailboxes (`mail_drafts.account`,
+  `mail_matches.account`: the mailbox a draft answers from and a match
+  came in — see SEVERAL MAILBOXES), v65 reply drafts (`mail_drafts`
+  mirrored + journaled — see DRAFTS NEVER SEND), v64 embers' mail watches (`mail_watches`,
   `mail_ember_views` mirrored + journaled; `mail_matches` the delivery
   queue, its own id-keyed leg /v1/sync/mail_matches — see EMBERS SEE
   MAIL), v63 mail threads + the owner's mail rules
@@ -611,22 +613,27 @@ error). Big archives can serve BOTH tiers: a Gmail Takeout can be
 Tier-1-materialized for its Core strata (Sent/Personal/Starred, filtered
 ingest) and Tier-2-virtualized for the whole archive (a `gmail-archive`
 source over `~/.hearthloom/archives/`). **The live watch (0.5.81,
-`gmail_watch.rs`)**: one IMAP IDLE session on All Mail per node with
-Gmail connected, re-issued every minute (so settings, a disconnect or a
-fence are noticed within one), runs `gmail_pull::pull_once` on any change
+`gmail_watch.rs`)**: one IMAP IDLE session on All Mail per MAILBOX
+connected on the node (several since 0.5.98 — see SEVERAL MAILBOXES),
+re-issued every minute (so settings, a disconnect or a fence are noticed
+within one), runs `gmail_pull::pull_once(state, mailbox)` on any change
 and at the catch-up interval (`gmail.watch` on|off, `gmail.watch.every_minutes`
-1–60, node-local). `pull_once` is THE one pull path and is serialized
-(`PULL` mutex) — never add a second puller with its own cursor. A refused
-sign-in STOPS the watch until the credential is saved again (`recheck(true)`):
-retrying a bad Gmail password risks Google locking the account. It pauses
-while the node is fenced and publishes `roles.mail` in the node list.
+1–60, node-local; `.<id>` suffixed for an added mailbox). `pull_once` is
+THE one pull path of a mailbox and every pull is serialized (`PULL`
+mutex) — never add a second puller of a mailbox with its own cursor. A
+refused sign-in STOPS that mailbox — its watch, pull, search session and
+drafts all check `mailboxes::refused` — until it's saved again
+(`recheck_mailbox(id, true)`): retrying a bad Gmail password risks Google
+locking the account. It pauses while the node is fenced and publishes
+`roles.mail` (any mailbox watched) and `roles.mailboxes` in the node list.
 **Gmail live federation (Tier 3)
 SHIPPED 2026-08-10** (design log entry same date): the `gmail_pull`
-automation (cycle cadence, silent no-op until `GMAIL_IMAP_USER` +
-`GMAIL_IMAP_PASSWORD` land in `~/.hearthloom/.env`) pulls new mail over
+automation (cycle cadence, `gmail_pull::pull_all`; a silent no-op until a
+mailbox is connected) pulls new mail over
 app-password IMAP (`imap 3.0.0-alpha` DELIBERATELY — the first line
 whose imap-proto parses X-GM-LABELS; don't "upgrade" it back to 2.4)
-into a rolling `archives/gmail-live.mbox` + incrementally-appended
+into each mailbox's rolling live archive (`archives/gmail-live.mbox`
+for the first, `gmail-live-<id>.mbox` for an added one) + incrementally-appended
 sidecar (`mbox_index::append_index` — NEVER append to the Takeout mbox:
 its fingerprint invalidates and a full rebuild follows), annotates
 categories via one ranged X-GM-RAW search (X-GM-LABELS does NOT carry
@@ -907,7 +914,8 @@ the design log 2026-07-14.
   (`keepers`: the owner's `node.archives = keep` nodes, else the
   always-on local node with the most room, the hosted node only when
   there's none) so every node agrees. A keeper pulls settled archives
-  (unchanged 24 h, never `gmail-live`) through the hub with `vchunk`
+  (unchanged 24 h, never a mailbox's live archive —
+  `mailboxes::is_live_archive`) through the hub with `vchunk`
   lookups — sha256-checked, written at the `.part` file's length, so a
   pull resumes anywhere. The releasing node unregisters and records
   `archives.released.<name>` = path; ONLY the owner deletes
@@ -916,8 +924,11 @@ the design log 2026-07-14.
   `gmail_search.rs`).** EXAMINE (never SELECT) on All Mail, BODY.PEEK
   only — a search must never mark mail read or change it — and a session
   separate from the watch's IDLE one. Registered while Gmail is connected
-  (`ensure_registered` from the watch loop); `recheck(true)` resets the
-  session. Its hits carry the decoded text in `VirtualHit::text` (skipped
+  (`ensure_registered` from the watch loop); ONE `gmail` source searches
+  every mailbox here (0.5.98: a warm session per mailbox, hits merged
+  newest first and once per Message-ID, each naming its mailbox; a path
+  without a Message-ID is `uid:<n>` in the first, `uid:<id>:<n>` in an
+  added one); `recheck_mailbox(id, true)` resets that mailbox's session. Its hits carry the decoded text in `VirtualHit::text` (skipped
   on the wire) so the privacy check needs no second fetch; its messages
   are the pull's `mbox` memories (same Message-ID). Ask is told to search
   it first.
@@ -1104,7 +1115,11 @@ the design log 2026-07-14.
   Rules are owner-only (`require_owner`; mail never writes one). Threads
   form only from decision-worthy mail (Primary not from the owner, rule
   matches, replies to an existing thread); thread ids hash the root
-  message id so every node agrees. `/v1/mail` is on the ember deny list;
+  message id so every node agrees. "From the owner" means from ANY of the
+  owner's addresses (`mailboxes::owner_addresses`, passed to `seen` as
+  `mine`) — never compare with one connected address. Each thread is
+  sorted once, on the node that handles its mailbox (`mailboxes::duty`,
+  `mail_threads_to_triage_for`). `/v1/mail` is on the ember deny list;
   embers get mail only through `mail.watch` (below). A new shadow view
   needs its DROP (`test_every_shadow_view_is_dropped`).
 - **EMBERS SEE MAIL ONLY THROUGH `mail.watch`, AS MUCH AS THE OWNER
@@ -1115,21 +1130,46 @@ the design log 2026-07-14.
   DELIVERY (`deliver` → `shown`), never at match time, so the owner's
   change reaches what's queued; delivery re-checks privacy (a rule or a
   private memory added since holds a match back, failing closed). Private
-  or from-the-owner mail never queues. The scope lives on the plugin row
+  or from-the-owner mail never queues, and neither does mail of a mailbox
+  the owner hasn't let embers see (`mailboxes::embers_see`,
+  `mail.embers.<id>`: on for the first mailbox, OFF for an added one —
+  adding a mailbox never widens what an ember sees). An empty watch filter
+  matches NOTHING (0.5.98): a filter this build can't read parses as
+  empty, and before the fix it matched every message. The scope lives on the plugin row
   (`granted_scopes`), not the key — `mail.watch` isn't an API-key scope,
   so the key gets the rest and an ember can't hold `mail.watch` alone.
   The self routes check it in the handler (`mail_watcher`): every plugin
   key passes `/v1/plugins/self/*`. Uninstall forgets the ember's watches,
   view and queue (`mail_watches_forget`). A new route that hands embers
   mail goes through `deliver`.
+- **SEVERAL MAILBOXES (0.5.98, mailboxes.rs).** Never read
+  `GMAIL_IMAP_*` directly — go through `mailboxes::all()`/`find()`. The
+  FIRST mailbox keeps the names it always had (GMAIL_IMAP_USER/PASSWORD,
+  `archives/gmail-live.mbox`, source `gmail-live`, `gmail.watch*`,
+  `mail.backfilled`) so an upgrade re-pulls nothing and an older build
+  still reads it after a rollback; added ones are sealed as
+  HEARTHLOOM_MAIL_<ID>_{USER,PASSWORD} with `gmail-live-<id>` and
+  `.<id>`-suffixed settings (`Mailbox::key`). The id is a hash of the
+  lowercased address (`id_for`), so every node agrees, and a connect of
+  an address already here keeps its slot (`slot_for`). Who handles a
+  mailbox's threads and drafts is `mailboxes::duty`: the smallest live
+  node id among those that watch it; a mailbox nobody live watches (and
+  "" from before 0.5.98) falls to the smallest live node that watches any;
+  a live pre-0.5.98 mail node with a smaller id handles everything, as it
+  does itself. The node list's `roles.mail` stays a boolean (older nodes
+  compare it to `true`); `roles.mailboxes` is additive.
 - **DRAFTS NEVER SEND, AND TOUCH NOTHING ELSE (0.5.94, mail_drafts.rs,
   gmail_imap.rs `save_draft`, adapters mail_compose.rs).** The only write
   to the mailbox is an APPEND of a new message, flagged `\Draft`, into
   the folder marked `\Drafts`. Never add SMTP, a send, or a STORE/EXPUNGE/
   MOVE on another message — asking again adds another draft rather than
-  replacing one the owner may have edited. The drafter is one node (it
-  watches Gmail; the smallest node id among those that do,
-  `drafts_here`), the model has no tools (`mail_triage::ask_structured`),
+  replacing one the owner may have edited. The drafter of a mailbox is
+  one node (`mailboxes::duty`: the smallest live node id among those that
+  watch it; a request records its mailbox in `mail_drafts.account`, from
+  its thread or its ember match), the draft is saved in the mailbox the
+  person wrote to, from that address when it's one of the owner's
+  (`pick_from`: X-Gm-Original-To, To, Cc, Delivered-To — an alias's mail
+  is answered from the alias), the model has no tools (`mail_triage::ask_structured`),
   other people's mail sits in defused `<message>` fences, and any private
   message the draft would read refuses the draft. Headers built from
   other people's mail go through mail_compose's cleaning (no CR/LF, ids

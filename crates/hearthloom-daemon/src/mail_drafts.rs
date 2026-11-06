@@ -12,9 +12,17 @@
 //!
 //! Private mail gets no draft (a privacy rule, or a private memory of any
 //! message the draft would read): it never goes to a model.
+//!
+//! With several mailboxes (0.5.98) a request remembers its mailbox (the
+//! thread's), the node that handles that mailbox writes it
+//! (mailboxes::duty), and the draft goes into the mailbox the person wrote
+//! to — from the address they wrote to when it's one of the owner's (an
+//! alias like legal@), else from the mailbox's own.
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
+use hearthloom_adapters::gmail_imap::is_auth_failure;
 use hearthloom_adapters::mail_compose::{self, Reply};
 use hearthloom_core::store::mail_draft::{DraftOutcome, MailDraft};
 use hearthloom_core::Actor;
@@ -51,19 +59,11 @@ pub fn model(state: &AppState) -> String {
         .unwrap_or_else(|| DEFAULT_MODEL.to_string())
 }
 
-/// One mailbox, one drafter: this node watches Gmail, and no other node
-/// that does (seen in the last 15 minutes) has a smaller node id.
+/// One drafter per mailbox: this node handles some mailbox's mail — it
+/// watches it, and no other live node that does has a smaller node id
+/// (mailboxes::duty).
 pub fn drafts_here(state: &AppState) -> bool {
-    if !crate::gmail_watch::watching(state) {
-        return false;
-    }
-    let me = crate::agents::node_id(state);
-    let cutoff = (chrono::Utc::now() - chrono::Duration::minutes(15)).to_rfc3339();
-    !state.store.nodes().unwrap_or_default().iter().any(|n| {
-        n["roles"]["mail"] == true
-            && n["node_id"].as_str().is_some_and(|id| id < me.as_str())
-            && n["last_seen"].as_str().is_some_and(|t| t > cutoff.as_str())
-    })
+    !crate::mailboxes::duty(state).is_idle()
 }
 
 /// Whether an ember installed here holds `mail.draft`.
@@ -72,7 +72,25 @@ pub fn granted(state: &AppState, plugin: &str) -> bool {
 }
 
 /// (display name, address)
-type Mailbox = (String, String);
+type Party = (String, String);
+
+/// A mailbox here, with the aliases that also reach it.
+#[derive(Clone)]
+pub(crate) struct LocalBox {
+    pub mailbox: crate::mailboxes::Mailbox,
+    pub aliases: Vec<String>,
+}
+
+fn local_boxes(state: &AppState) -> Vec<LocalBox> {
+    crate::mailboxes::all()
+        .into_iter()
+        .filter(|mb| !crate::mailboxes::refused(&mb.id))
+        .map(|mb| LocalBox {
+            aliases: crate::mailboxes::aliases(state, &mb),
+            mailbox: mb,
+        })
+        .collect()
+}
 
 /// One message of the live archive, read for a draft.
 #[derive(Debug, Clone, Default)]
@@ -91,6 +109,12 @@ struct Message {
     private: bool,
     /// the sender's UTC offset in minutes, from their Date header
     offset_minutes: Option<i32>,
+    /// the mailbox here it was read from (lowercased)
+    found_in: String,
+    /// the addresses it was written to, lowercased, in the order a reply
+    /// chooses its From: what a catch-all or alias delivered it as
+    /// (X-Gm-Original-To), then To, Cc, Delivered-To
+    written_to: Vec<String>,
 }
 
 fn addresses(list: Option<mail_parser::AddressList>) -> Vec<(String, String)> {
@@ -105,11 +129,83 @@ fn addresses(list: Option<mail_parser::AddressList>) -> Vec<(String, String)> {
     .unwrap_or_default()
 }
 
-fn read(state: &AppState, account: &str, id: &str) -> Option<Message> {
-    let mbox = crate::gmail_pull::live_mbox_path(state);
-    let raw = crate::mbox_index::fetch(&mbox, id, 2_000_000).ok()?;
+/// The values of one header in a raw message's header block (folded lines
+/// joined).
+fn raw_headers(raw: &str, name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current: Option<String> = None;
+    for line in raw.lines() {
+        if line.trim().is_empty() {
+            break;
+        }
+        if line.starts_with(' ') || line.starts_with('\t') {
+            if let Some(c) = current.as_mut() {
+                c.push(' ');
+                c.push_str(line.trim());
+            }
+            continue;
+        }
+        if let Some(c) = current.take() {
+            out.push(c);
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            if k.trim().eq_ignore_ascii_case(name) {
+                current = Some(v.trim().to_string());
+            }
+        }
+    }
+    out.extend(current);
+    out
+}
+
+/// The addresses in a header value: `Name <a@x>, b@y`.
+fn addresses_in(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .filter_map(|part| {
+            let part = part.trim();
+            let addr = match (part.rfind('<'), part.rfind('>')) {
+                (Some(a), Some(b)) if a < b => &part[a + 1..b],
+                _ => part,
+            };
+            let addr = addr.trim().to_lowercase();
+            addr.contains('@').then_some(addr)
+        })
+        .collect()
+}
+
+/// Who it was written to, in the order a reply picks its From.
+fn written_to(raw: &str, m: &mail_parser::Message) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |a: String| {
+        if !out.contains(&a) {
+            out.push(a);
+        }
+    };
+    for v in raw_headers(raw, "X-Gm-Original-To") {
+        addresses_in(&v).into_iter().for_each(&mut push);
+    }
+    for (_, a) in addresses(m.to()).into_iter().chain(addresses(m.cc())) {
+        push(a.to_lowercase());
+    }
+    for v in raw_headers(raw, "Delivered-To") {
+        addresses_in(&v).into_iter().for_each(&mut push);
+    }
+    out
+}
+
+/// A message of the live archives here (the `prefer` mailbox's first).
+fn read(
+    state: &AppState,
+    local: &[LocalBox],
+    prefer: &str,
+    mine: &BTreeSet<String>,
+    id: &str,
+) -> Option<Message> {
+    let boxes: Vec<crate::mailboxes::Mailbox> = local.iter().map(|l| l.mailbox.clone()).collect();
+    let (mb, raw) = crate::mailboxes::read_local_in(state, &boxes, prefer, id, 2_000_000)?;
     let labels = hearthloom_adapters::mbox::gmail_labels(&raw);
-    let seen = crate::mail_triage::seen(state, account, &labels, raw.as_bytes())?;
+    let seen = crate::mail_triage::seen(state, &mb.address, mine, &labels, raw.as_bytes())?;
     let m = mail_parser::MessageParser::default().parse(raw.as_bytes())?;
     let ids = |v: Option<mail_parser::TextList>| -> Vec<String> {
         v.map(|list| list.iter().map(String::from).collect())
@@ -138,6 +234,8 @@ fn read(state: &AppState, account: &str, id: &str) -> Option<Message> {
                 mins
             }
         }),
+        found_in: mb.account(),
+        written_to: written_to(&raw, &m),
     })
 }
 
@@ -206,20 +304,20 @@ fn domain_of(addr: &str) -> String {
 }
 
 /// Who the reply goes to: Reply-To or the sender; with `all`, the others
-/// on it too — never the owner.
-fn recipients(target: &Message, account: &str, all: bool) -> (Vec<Mailbox>, Vec<Mailbox>) {
-    let me = account.to_lowercase();
+/// on it too — never one of the owner's addresses (`mine`).
+fn recipients(target: &Message, mine: &BTreeSet<String>, all: bool) -> (Vec<Party>, Vec<Party>) {
+    let is_mine = |a: &str| mine.contains(&a.trim().to_lowercase());
     let mut to = if target.reply_to.is_empty() {
         vec![target.from.clone()]
     } else {
         target.reply_to.clone()
     };
-    to.retain(|(_, a)| a.to_lowercase() != me);
+    to.retain(|(_, a)| !is_mine(a));
     let mut cc = Vec::new();
     if all {
         for x in target.to.iter().chain(target.cc.iter()) {
             let a = x.1.to_lowercase();
-            if a != me
+            if !is_mine(&a)
                 && !to.iter().any(|(_, t)| t.to_lowercase() == a)
                 && !cc
                     .iter()
@@ -320,32 +418,67 @@ fn their_zone(
 
 /// Write one draft; the outcome says where it went or why it didn't.
 async fn write(state: &AppState, d: &MailDraft) -> Result<DraftOutcome> {
-    let (account, password) = crate::gmail_pull::credentials()
-        .ok_or_else(|| anyhow!("Gmail isn't connected on this node"))?;
-    let (raw, mut outcome) = compose(state, d, &account).await?;
+    let local = local_boxes(state);
+    if local.is_empty() {
+        bail!("no mailbox is connected on this node (or Gmail refused its sign-in)");
+    }
+    let (raw, mut outcome, mb) = compose(state, d, &local).await?;
+    crate::mailboxes::check_refused(&mb)?;
+    let m = mb.clone();
     let folder = tokio::task::spawn_blocking(move || {
-        hearthloom_adapters::gmail_imap::save_draft(&account, &password, &raw)
+        hearthloom_adapters::gmail_imap::save_draft(&m.address, m.password(), &raw)
     })
-    .await??;
+    .await?
+    .inspect_err(|err| {
+        if is_auth_failure(err) {
+            crate::mailboxes::refuse(Some(state), &mb, err);
+        }
+    })?;
     outcome.folder = Some(folder);
     Ok(outcome)
 }
 
-/// The draft as a message ready to save, and what the row will record.
+/// The mailbox here a reply is saved in, and the address it's from: the
+/// first address it was written to that is one of a mailbox's own or its
+/// aliases, else the mailbox it was found in. Indexes into `local`.
+fn pick_from(written_to: &[String], local: &[LocalBox], found_in: &str) -> Option<(usize, String)> {
+    for a in written_to {
+        if let Some(i) = local
+            .iter()
+            .position(|l| l.mailbox.account() == *a || l.aliases.contains(a))
+        {
+            return Some((i, a.clone()));
+        }
+    }
+    local
+        .iter()
+        .position(|l| l.mailbox.account() == found_in)
+        .map(|i| (i, local[i].mailbox.account()))
+}
+
+/// The draft as a message ready to save, what the row will record, and the
+/// mailbox it goes into. `local` = the mailboxes here, with their aliases.
 async fn compose(
     state: &AppState,
     d: &MailDraft,
-    account: &str,
-) -> Result<(Vec<u8>, DraftOutcome)> {
-    let account = account.to_string();
+    local: &[LocalBox],
+) -> Result<(Vec<u8>, DraftOutcome, crate::mailboxes::Mailbox)> {
+    // the owner's addresses: every mailbox and alias, here and elsewhere
+    let mut mine = crate::mailboxes::owner_addresses(state);
+    for l in local {
+        mine.insert(l.mailbox.account());
+        mine.extend(l.aliases.iter().cloned());
+    }
     // what's answered: the ember's message, else the thread's latest
     // message from someone else
     let st = state.clone();
-    let (acct, draft) = (account.clone(), d.clone());
+    let (boxes, owner_set, draft) = (local.to_vec(), mine.clone(), d.clone());
     let (target, context) =
         tokio::task::spawn_blocking(move || -> Result<(Message, Vec<Message>)> {
+            let prefer = draft.account.clone();
+            let read_one = |id: &str| read(&st, &boxes, &prefer, &owner_set, id);
             let mut msgs: Vec<Message> = match (&draft.reply_to, &draft.thread_id) {
-                (Some(id), _) => vec![read(&st, &acct, id)
+                (Some(id), _) => vec![read_one(id)
                     .ok_or_else(|| anyhow!("that message isn't in this node's mail"))?],
                 (None, Some(t)) => {
                     if st.store.mail_thread(t)?.is_none() {
@@ -354,7 +487,7 @@ async fn compose(
                     st.store
                         .mail_thread_message_ids(t)?
                         .iter()
-                        .filter_map(|id| read(&st, &acct, id))
+                        .filter_map(|id| read_one(id))
                         .collect()
                 }
                 (None, None) => bail!("nothing to answer"),
@@ -377,7 +510,10 @@ async fn compose(
         })
         .await??;
 
-    let (to, cc) = recipients(&target, &account, d.reply_all);
+    let (box_index, account) = pick_from(&target.written_to, local, &target.found_in)
+        .ok_or_else(|| anyhow!("no mailbox on this node can answer this message"))?;
+    let mailbox = local[box_index].mailbox.clone();
+    let (to, cc) = recipients(&target, &mine, d.reply_all);
     if to.is_empty() {
         bail!("nobody to reply to (the message came from you)");
     }
@@ -532,6 +668,7 @@ async fn compose(
             subject: Some(mail_compose::reply_subject(&target.subject)),
             error: None,
         },
+        mailbox,
     ))
 }
 
@@ -551,7 +688,12 @@ pub async fn draft_once(state: &AppState) -> Result<usize> {
         )?;
     }
     let mut done = 0;
-    for d in state.store.mail_drafts_waiting(3)? {
+    // only the mailboxes this node writes for (mailboxes::duty)
+    let duty = crate::mailboxes::duty(state);
+    for d in state
+        .store
+        .mail_drafts_waiting_for(3, &duty.mine, duty.unwatched.as_deref())?
+    {
         if !state.store.mail_draft_take(&actor(), &d.id, &me)? {
             continue;
         }
@@ -671,6 +813,27 @@ pub fn ember_request(
 mod tests {
     use super::*;
 
+    fn set(list: &[&str]) -> BTreeSet<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn mailbox(address: &str, first: bool) -> crate::mailboxes::Mailbox {
+        let (user, pass) = if first {
+            (
+                "GMAIL_IMAP_USER".to_string(),
+                "GMAIL_IMAP_PASSWORD".to_string(),
+            )
+        } else {
+            let id = crate::mailboxes::id_for(address).to_uppercase();
+            (
+                format!("HEARTHLOOM_MAIL_{id}_USER"),
+                format!("HEARTHLOOM_MAIL_{id}_PASSWORD"),
+            )
+        };
+        crate::mailboxes::from_vars(vec![(user, address.to_string()), (pass, "pw".to_string())])
+            .remove(0)
+    }
+
     #[test]
     fn test_a_reply_goes_to_the_sender_and_never_to_the_owner() {
         let m = Message {
@@ -682,13 +845,14 @@ mod tests {
             cc: vec![("Dana".into(), "DANA@fund.example".into())],
             ..Default::default()
         };
-        let (to, cc) = recipients(&m, "me@x.example", false);
+        let me = set(&["me@x.example"]);
+        let (to, cc) = recipients(&m, &me, false);
         assert_eq!(
             to,
             vec![("Dana".to_string(), "dana@fund.example".to_string())]
         );
         assert!(cc.is_empty());
-        let (_, cc) = recipients(&m, "me@x.example", true);
+        let (_, cc) = recipients(&m, &me, true);
         assert_eq!(
             cc,
             vec![("Lee".to_string(), "lee@fund.example".to_string())]
@@ -696,16 +860,79 @@ mod tests {
         // Reply-To wins over From
         let mut r = m.clone();
         r.reply_to = vec![("Desk".into(), "desk@fund.example".into())];
-        assert_eq!(
-            recipients(&r, "me@x.example", false).0[0].1,
-            "desk@fund.example"
-        );
+        assert_eq!(recipients(&r, &me, false).0[0].1, "desk@fund.example");
         // mail from the owner has nobody to answer
         let mine = Message {
             from: ("Me".into(), "me@x.example".into()),
             ..Default::default()
         };
-        assert!(recipients(&mine, "me@x.example", false).0.is_empty());
+        assert!(recipients(&mine, &me, false).0.is_empty());
+        // ...nor to any other address of the owner's, an alias included
+        let both = set(&["me@x.example", "lee@fund.example"]);
+        let (_, cc) = recipients(&m, &both, true);
+        assert!(cc.is_empty(), "{cc:?}");
+    }
+
+    /// A reply leaves from the address it was written to when that reaches
+    /// a mailbox here (its own, or an alias of it), into that mailbox —
+    /// else from the mailbox it was found in.
+    #[test]
+    fn test_a_reply_goes_from_the_address_it_was_written_to() {
+        let local = vec![
+            LocalBox {
+                mailbox: mailbox("me@x.example", true),
+                aliases: vec![],
+            },
+            LocalBox {
+                mailbox: mailbox("jon@work.example", false),
+                aliases: vec!["legal@work.example".into()],
+            },
+        ];
+        let to = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            pick_from(
+                &to(&["legal@work.example", "me@x.example"]),
+                &local,
+                "me@x.example"
+            ),
+            Some((1, "legal@work.example".to_string()))
+        );
+        assert_eq!(
+            pick_from(
+                &to(&["dana@fund.example", "me@x.example"]),
+                &local,
+                "jon@work.example"
+            ),
+            Some((0, "me@x.example".to_string()))
+        );
+        // written to none of them (a Bcc, a list): the mailbox it came in
+        assert_eq!(
+            pick_from(&to(&["list@lists.example"]), &local, "jon@work.example"),
+            Some((1, "jon@work.example".to_string()))
+        );
+        assert_eq!(
+            pick_from(&to(&["a@b.example"]), &local, "gone@x.example"),
+            None
+        );
+
+        // the order: what a catch-all delivered it as, To, Cc, Delivered-To
+        let raw = "X-Gmail-Labels: Inbox\r\nDelivered-To: jon@work.example\r\n\
+X-Gm-Original-To: Legal\r\n <legal@work.example>\r\nFrom: Dana <dana@fund.example>\r\n\
+To: Me <ME@x.example>, lee@fund.example\r\nCc: info@work.example\r\n\
+Subject: Hello\r\nMessage-ID: <h1@fund.example>\r\n\r\nDelivered-To: not@a-header.example\r\n";
+        let m = mail_parser::MessageParser::default()
+            .parse(raw.as_bytes())
+            .unwrap();
+        assert_eq!(
+            written_to(raw, &m),
+            to(&[
+                "legal@work.example",
+                "me@x.example",
+                "lee@fund.example",
+                "info@work.example",
+                "jon@work.example"
+            ])
+        );
     }
 
     /// The whole path but the IMAP save, with a stand-in `claude`: the
@@ -729,7 +956,13 @@ mod tests {
             killswitch: Default::default(),
             running: Default::default(),
         };
-        let mbox = crate::gmail_pull::live_mbox_path(&state);
+        let mb = mailbox("me@x.example", true);
+        let mbox = mb.live_mbox_path(&state);
+        let local = vec![LocalBox {
+            mailbox: mb.clone(),
+            aliases: vec![],
+        }];
+        let mine = set(&["me@x.example"]);
         std::fs::create_dir_all(mbox.parent().unwrap()).unwrap();
         let msg = |id: &str, from: &str, refs: &str, labels: &str, body: &str| {
             format!(
@@ -772,7 +1005,8 @@ mod tests {
             let raw = crate::mbox_index::fetch(&mbox, id, 100_000).unwrap();
             let labels = hearthloom_adapters::mbox::gmail_labels(&raw);
             let seen =
-                crate::mail_triage::seen(&state, "me@x.example", &labels, raw.as_bytes()).unwrap();
+                crate::mail_triage::seen(&state, "me@x.example", &mine, &labels, raw.as_bytes())
+                    .unwrap();
             if let Some(t) = state.store.mail_observe(&a, &seen).unwrap() {
                 thread = Some(t);
             }
@@ -824,7 +1058,12 @@ mod tests {
                 None,
             )
             .unwrap();
-        let (raw, out) = compose(&state, &d, "me@x.example").await.unwrap();
+        let (raw, out, used) = compose(&state, &d, &local).await.unwrap();
+        assert_eq!(
+            used.account(),
+            "me@x.example",
+            "saved in the mailbox it was written to"
+        );
         assert_eq!(
             out.reply_to.as_deref(),
             Some("m3@fund.example"),
@@ -861,7 +1100,7 @@ mod tests {
             .store
             .add_privacy_rule(&Actor::new("human:test"), "term", "the round")
             .unwrap();
-        let err = compose(&state, &d, "me@x.example").await.unwrap_err();
+        let err = compose(&state, &d, &local).await.unwrap_err();
         assert!(format!("{err:#}").contains("private"), "{err:#}");
     }
 

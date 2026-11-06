@@ -59,6 +59,7 @@ mod tests {
             ("LC_CTYPE", "UTF-8"),
             ("ANTHROPIC_API_KEY", "sk-ant-…"),
             ("GMAIL_IMAP_PASSWORD", "app password"),
+            ("HEARTHLOOM_MAIL_1A2B3C4D_PASSWORD", "app password"),
             ("HEARTHLOOM_AGENT_AG1_KEY", "hl_…"),
             ("HEARTHLOOM_PROVISIONER_SECRET", "…"),
             ("HEARTHLOOM_TRUSTED_ISSUER_SECRET", "…"),

@@ -288,7 +288,11 @@ Four ways in:
    archive. Since 0.5.81 the live watch (`gmail_watch.rs`) keeps an IMAP
    IDLE connection open on the node where Gmail is connected and runs that
    same pull within seconds of new mail, with a catch-up every few
-   minutes; the consolidation pass stays as its backstop.
+   minutes; the consolidation pass stays as its backstop. Since 0.5.98 a
+   node can watch several mailboxes (`mailboxes.rs`): each has its own
+   IDLE connection, pull cursor, live archive and settings, and a refused
+   password stops only that mailbox. Mail from any of the owner's
+   mailboxes, or an alias listed on one, is the owner's own.
 
 Adapters mint entities structurally where the source is unambiguous (a
 sender's address, a calendar attendee, a repository). Anything needing
@@ -321,18 +325,23 @@ and rules mirror; the Desk shows what waits on the owner.
 An ember granted `mail.watch` registers watches (sender, domain, words,
 labels, triage class). The node that watches Gmail checks each new
 message against them, and each triage label too, and queues matches per
-ember. The queue syncs on its own leg, so the ember reads it, with a
+ember — only for mailboxes the owner lets embers see (an added mailbox
+starts hidden from them). The queue syncs on its own leg, so the ember reads it, with a
 cursor, on whichever node it runs. The owner's view for that ember
 (headers, a snippet, or the text) and a fresh privacy check are applied
 when it reads. Watches and views mirror like mail rules.
 
 **Reply drafts (v65, `store/mail_draft.rs`, `mail_drafts.rs`).** A
 request (the owner's words, or an ember's finished text) is a mirrored
-row. The node that watches Gmail (the one with the smallest id, when
-several do) takes it, reads the thread from its live archive, has a
+row that remembers its mailbox. The node that handles that mailbox
+(`mailboxes::duty`: of the live nodes that watch it, the one with the
+smallest id) takes it, reads the thread from its live archive, has a
 tool-less model write the reply, and APPENDs it to the folder Gmail marks
-`\Drafts` with the `\Draft` flag (`gmail_imap::save_draft`; the message
-itself from `mail_compose`, 7-bit). Nothing is sent or changed.
+`\Drafts` with the `\Draft` flag in the mailbox the person wrote to,
+from the address they wrote to when it's one of the owner's
+(`gmail_imap::save_draft`; the message itself from `mail_compose`, 7-bit).
+Nothing is sent or changed. Triage works the same way: each thread is
+sorted once, on the node that handles its mailbox.
 
 **Google Calendar free/busy (`google_calendar.rs`).** A PKCE sign-in with
 the owner's own Desktop-app client (`calendar setup`) or, when a registry
@@ -358,8 +367,8 @@ the privacy rules and the caller's vault. Each node lists its archives in
 the node list, and Ask on any node can search an archive another node
 holds (see "Lookups on another node" below). Where Gmail is connected, the `gmail`
 source (`gmail_search.rs`) searches the whole mailbox with Gmail's own
-search, read-only, so no archive file has to travel for Ask to reach old
-mail. An archive file itself has a home: the node that keeps
+search, read-only — every mailbox connected there at once, newest first —
+so no archive file has to travel for Ask to reach old mail. An archive file itself has a home: the node that keeps
 archives (`archives_place.rs`) — always on, chosen from the synced node
 list — brings it in through the hub in checked, resumable chunks, and
 the node it came from stops offering its copy (deleting it is the

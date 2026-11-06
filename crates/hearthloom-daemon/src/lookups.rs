@@ -76,10 +76,14 @@ fn with_queue<T>(f: impl FnOnce(&mut HashMap<String, Entry>) -> T) -> T {
 /// This node's mail archives, as the node list carries them.
 pub fn archives_here(state: &AppState) -> Value {
     let mut out = vec![];
-    // the live mailbox, while Gmail is connected here (0.5.89)
-    if let Some(account) = crate::gmail_search::account() {
+    // the live mailboxes, while Gmail is connected here (0.5.89): one
+    // `gmail` source over all of them (`account` = the first, for older
+    // nodes; `accounts` = every one, 0.5.98)
+    let accounts = crate::gmail_search::accounts();
+    if let Some(first) = accounts.first() {
         out.push(json!({"name": crate::gmail_search::SOURCE,
-                        "adapter": crate::gmail_search::ADAPTER, "account": account}));
+                        "adapter": crate::gmail_search::ADAPTER, "account": first,
+                        "accounts": accounts}));
     }
     for def in state.store.list_virtual_sources().unwrap_or_default() {
         let Some(mbox) = crate::virtual_source::mbox_path_if_online(&def) else {

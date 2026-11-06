@@ -46,9 +46,13 @@ pub struct MailDraft {
     pub subject: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// the mailbox it answers from, lowercased: the thread's, else the
+    /// ember match's (0.5.98). "" = unknown — the node that watches any
+    /// mailbox with the smallest id writes it.
+    pub account: String,
 }
 
-const COLS: &str = "id, thread_id, reply_to, requested_by, say, reply_all, body, placeholders, state, error, node, folder, draft_message_id, recipients, subject, created_at, updated_at";
+const COLS: &str = "id, thread_id, reply_to, requested_by, say, reply_all, body, placeholders, state, error, node, folder, draft_message_id, recipients, subject, created_at, updated_at, account";
 
 fn list(json_text: Option<String>) -> Vec<String> {
     json_text
@@ -75,6 +79,7 @@ fn row_to_draft(r: &rusqlite::Row) -> rusqlite::Result<MailDraft> {
         subject: r.get(14)?,
         created_at: r.get(15)?,
         updated_at: r.get(16)?,
+        account: r.get(17)?,
     })
 }
 
@@ -138,10 +143,23 @@ impl Store {
         let id = format!("md_{}", uuid::Uuid::new_v4().simple());
         let now = now_utc();
         let conn = self.lock();
+        // which mailbox answers: the thread's, else the one an ember's
+        // match came from — so the node that watches it writes the draft
+        let account: String = conn
+            .query_row(
+                "SELECT COALESCE(
+                     (SELECT account FROM mail_threads WHERE id = ?1 AND account != ''),
+                     (SELECT account FROM mail_matches WHERE message_id = ?2 AND account != ''
+                      LIMIT 1),
+                     '')",
+                rusqlite::params![thread_id, reply_to],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
         conn.execute(
             &format!(
                 "INSERT INTO mail_drafts ({COLS}) VALUES
-                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, '[]', 'requested', NULL, NULL, NULL, NULL, '[]', NULL, ?8, ?8)"
+                 (?1, ?2, ?3, ?4, ?5, ?6, ?7, '[]', 'requested', NULL, NULL, NULL, NULL, '[]', NULL, ?8, ?8, ?9)"
             ),
             rusqlite::params![
                 id,
@@ -151,7 +169,8 @@ impl Store {
                 say,
                 reply_all as i64,
                 body,
-                now
+                now,
+                account.to_lowercase()
             ],
         )?;
         record_mutation(
@@ -209,6 +228,28 @@ impl Store {
             "SELECT {COLS} FROM mail_drafts WHERE state = 'requested' ORDER BY created_at LIMIT ?1"
         ))?;
         let rows = stmt.query_map([limit as i64], row_to_draft)?;
+        rows.collect::<std::result::Result<_, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Requests waiting for a node that writes for `accounts`, oldest
+    /// first; with `unwatched`, also those whose mailbox is none of the
+    /// watched ones (no live node watches it, or "" from before 0.5.98).
+    pub fn mail_drafts_waiting_for(
+        &self,
+        limit: usize,
+        accounts: &[String],
+        unwatched: Option<&[String]>,
+    ) -> Result<Vec<MailDraft>> {
+        let conn = self.lock();
+        let (filter, params) = super::mail::account_filter(accounts, unwatched, 2);
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COLS} FROM mail_drafts WHERE state = 'requested' AND {filter}
+             ORDER BY created_at LIMIT ?1"
+        ))?;
+        let mut all: Vec<rusqlite::types::Value> = vec![(limit as i64).into()];
+        all.extend(params);
+        let rows = stmt.query_map(rusqlite::params_from_iter(all), row_to_draft)?;
         rows.collect::<std::result::Result<_, _>>()
             .map_err(Into::into)
     }

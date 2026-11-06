@@ -611,7 +611,7 @@ pub async fn gmail_connect(client: &Client, address: &str) -> Result<()> {
     if password.is_empty() {
         bail!("no app password — type it at the prompt, or pipe it in");
     }
-    client
+    let out = client
         .post(
             "/v1/integrations/gmail",
             &json!({"actor": "human:cli", "user": address.trim(), "password": password}),
@@ -621,7 +621,93 @@ pub async fn gmail_connect(client: &Client, address: &str) -> Result<()> {
         "Gmail connected ({}) — watching for new mail; `hearthloom gmail` shows how it's going",
         address.trim()
     );
+    if out["first"] == false && out["mailbox"]["embers"] == false {
+        println!(
+            "  embers don't see this mailbox until you say so: `hearthloom gmail set {} --embers on`",
+            address.trim()
+        );
+    }
     Ok(())
+}
+
+/// `hearthloom gmail set <address> [--aliases a,b] [--embers on|off]`.
+pub async fn gmail_set(
+    client: &Client,
+    address: &str,
+    aliases: Option<Vec<String>>,
+    embers: Option<bool>,
+    as_json: bool,
+) -> Result<()> {
+    let mut body = json!({"actor": "human:cli", "address": address.trim()});
+    if let Some(list) = aliases {
+        body["aliases"] = json!(list);
+    }
+    if let Some(on) = embers {
+        body["embers"] = json!(on);
+    }
+    let out = client.post("/v1/integrations/gmail", &body).await?;
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+    print_mailbox(&out["mailbox"]);
+    Ok(())
+}
+
+/// One mailbox of `/v1/integrations/gmail`, as the CLI shows it.
+fn print_mailbox(mb: &Value) {
+    let s = |v: &Value| v.as_str().unwrap_or("").to_string();
+    let watch = &mb["watch"];
+    println!(
+        "{}{} — live watch: {}",
+        s(&mb["address"]),
+        if mb["first"] == true { " (first)" } else { "" },
+        s(&watch["state"])
+    );
+    println!(
+        "  {} · catches up every {} min · embers {}",
+        if watch["enabled"] == true {
+            "on"
+        } else {
+            "off"
+        },
+        watch["every_minutes"].as_u64().unwrap_or(0),
+        if mb["embers"] == true {
+            "see it"
+        } else {
+            "don't see it"
+        }
+    );
+    let aliases: Vec<String> = mb["aliases"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|a| a.as_str().map(String::from))
+        .collect();
+    if !aliases.is_empty() {
+        println!("  also yours here: {}", aliases.join(", "));
+    }
+    if let Some(at) = watch["last_check"].as_str() {
+        println!("  last checked {at}");
+    }
+    if let Some(at) = watch["last_new_mail"].as_str() {
+        println!("  last new mail {at}");
+    }
+    if let Some(err) = watch["last_error"].as_str() {
+        println!("  last error: {err}");
+    }
+    let others: Vec<String> = mb["also_watching"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|n| n.as_str().map(String::from))
+        .collect();
+    if !others.is_empty() {
+        println!(
+            "  also watched from: {} — one node per mailbox is enough; turn the others off",
+            others.join(", ")
+        );
+    }
 }
 
 /// `hearthloom gmail status` / `hearthloom gmail watch on|off [--every N]`
@@ -629,6 +715,7 @@ pub async fn gmail_connect(client: &Client, address: &str) -> Result<()> {
 /// Integrations card).
 pub async fn gmail(
     client: &Client,
+    address: Option<&str>,
     watch: Option<bool>,
     every: Option<u64>,
     as_json: bool,
@@ -637,7 +724,8 @@ pub async fn gmail(
         client
             .post(
                 "/v1/integrations/gmail",
-                &json!({"actor": "human:cli", "watch": watch, "every_minutes": every}),
+                &json!({"actor": "human:cli", "address": address, "watch": watch,
+                        "every_minutes": every}),
             )
             .await?;
     }
@@ -649,6 +737,16 @@ pub async fn gmail(
     let s = |v: &Value| v.as_str().unwrap_or("").to_string();
     if status["configured"] != true {
         println!("Gmail isn't connected on this node (Integrations → Gmail in the dashboard)");
+        return Ok(());
+    }
+    // a node from 0.5.98 on lists every mailbox
+    if let Some(list) = status["mailboxes"].as_array().filter(|l| !l.is_empty()) {
+        if list.len() > 1 {
+            println!("{} mailboxes on this node:", list.len());
+        }
+        for mb in list {
+            print_mailbox(mb);
+        }
         return Ok(());
     }
     let watch = &status["watch"];
@@ -913,12 +1011,18 @@ pub async fn node(
             .flatten()
         {
             if a["adapter"] == "gmail" {
+                // every mailbox it searches (0.5.98), else the one older nodes name
+                let accounts: Vec<&str> = match a["accounts"].as_array() {
+                    Some(list) => list.iter().filter_map(|x| x.as_str()).collect(),
+                    None => a["account"].as_str().into_iter().collect(),
+                };
                 println!(
                     "    gmail — the whole mailbox{}, searched live",
-                    a["account"]
-                        .as_str()
-                        .map(|x| format!(" of {x}"))
-                        .unwrap_or_default()
+                    match accounts.as_slice() {
+                        [] => String::new(),
+                        [one] => format!(" of {one}"),
+                        several => format!("es {}", several.join(", ")),
+                    }
                 );
                 continue;
             }

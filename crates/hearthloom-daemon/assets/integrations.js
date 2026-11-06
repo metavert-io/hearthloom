@@ -376,84 +376,134 @@ function watchLine(w) {
     w.last_error ? `<br><span style="color:var(--accent)">${esc(w.last_error)}</span>` : ""}</p>`;
 }
 
+// The app-password steps, for the first mailbox and each one added.
+function appPasswordSteps(open) {
+  return `
+        <details class="meta" style="margin:var(--s2) 0" ${open ? "open" : ""}>
+          <summary>you'll need a Google <b>app password</b> (not your account password)</summary>
+          <ol style="margin:var(--s2) 0 0 1.2em;padding:0">
+            <li>Turn on <b>2-Step Verification</b> for the account if it isn't already
+              (myaccount.google.com → Security). A Google Workspace address works the same
+              way, as long as its admin allows 2-Step Verification (the default).</li>
+            <li>Open <a href="https://myaccount.google.com/apppasswords" target="_blank"
+              rel="noopener">myaccount.google.com/apppasswords</a> while signed in to that
+              account (hidden from the menus, the direct link works), name it e.g.
+              <code>hearthloom</code>, and create.</li>
+            <li>Paste the 16-character code below — spaces are fine. It's stored sealed on
+              this node and never synced anywhere.</li>
+          </ol>
+        </details>`;
+}
+
+// One connected mailbox (http.rs mailbox_json).
+function mailboxBlock(mb, several) {
+  const others = mb.also_watching || [];
+  return `
+      <div class="gm-box" data-mb="${esc(mb.id)}" style="${several ? "border-top:1px solid var(--line,#8883);padding-top:var(--s2);margin-top:var(--s2)" : ""}">
+        ${several ? `<div class="task-row" style="align-items:baseline"><b>${esc(mb.address)}</b></div>` : ""}
+        ${watchLine(mb.watch)}
+        ${others.length ? `<p class="meta" style="color:var(--accent)">
+          ${esc(others.join(", "))} ${others.length === 1 ? "is" : "are"} also watching this mailbox.
+          One node per mailbox is enough — turn the watch off on the others.</p>` : ""}
+        <div class="searchbar" style="flex-wrap:wrap; align-items:center">
+          <label class="meta"><input type="checkbox" class="gm-watch" ${mb.watch?.enabled !== false ? "checked" : ""}>
+            watch for new mail</label>
+          <label class="meta">catch up every
+            <input class="gm-every" type="number" min="1" max="60" value="${esc(mb.watch?.every_minutes ?? 5)}" style="width:4em"> min</label>
+          <label class="meta" title="Embers you allowed to watch mail see matches from this mailbox only when this is on">
+            <input type="checkbox" class="gm-embers" ${mb.embers ? "checked" : ""}> embers that watch mail see it</label>
+          <button class="btn btn-quiet gm-disconnect">disconnect</button>
+        </div>
+        <div class="searchbar" style="flex-wrap:wrap; align-items:center">
+          <label class="meta" style="flex:1">also yours here
+            <input class="gm-aliases" value="${esc((mb.aliases || []).join(", "))}"
+              placeholder="aliases that arrive in this mailbox, e.g. hello@your-company.example"
+              style="width:100%" autocomplete="off"></label>
+        </div>
+      </div>`;
+}
+
 export async function paintGmail(host) {
   const s = await api("/v1/integrations/gmail").catch(() => null);
   if (!s) { host.innerHTML = ""; return; }
-  const dot = s.configured
-    ? `<span class="statchip" style="color:var(--ok,#7a9e7e)">● connected${s.user ? ` — ${esc(s.user)}` : ""}</span>`
+  // a node from 0.5.98 on lists each mailbox; an older one has only one
+  const boxes = s.mailboxes || (s.configured ? [{
+    id: "", address: s.user || "", watch: s.watch, aliases: [], embers: true,
+    also_watching: s.also_watching || [], legacy: true,
+  }] : []);
+  const several = boxes.length > 1;
+  const dot = boxes.length
+    ? `<span class="statchip" style="color:var(--ok,#7a9e7e)">● ${several
+        ? `${boxes.length} mailboxes connected`
+        : `connected${boxes[0].address ? ` — ${esc(boxes[0].address)}` : ""}`}</span>`
     : `<span class="statchip" style="color:var(--ink-faint)">◌ not connected</span>`;
+  const addForm = (first) => `
+        ${appPasswordSteps(first)}
+        <div class="searchbar" style="flex-wrap:wrap">
+          <input id="gm-user" placeholder="${first ? "you@gmail.com" : "another address — e.g. you@your-company.example"}" style="flex:1.2" autocomplete="off">
+          <input id="gm-pass" type="password" placeholder="app password" style="flex:1.2"
+            autocomplete="off">
+          <button class="btn" id="gm-connect">connect</button>
+        </div>`;
   host.innerHTML = `
     <div class="card">
       <div class="task-row" style="align-items:baseline"><b>Google Mail (live)</b> ${dot}</div>
       <p class="meta">Keeps your mail current past the last Takeout: new messages arrive within
         seconds into a live archive (searchable at need), and mail you wrote, personal mail,
         and starred mail become memories — deduped against the Takeout, so connecting after an
-        import never doubles anything. Connect Gmail on one of your nodes, ideally one that's
+        import never doubles anything. Connect several mailboxes if you like (a personal Gmail
+        and a Google Workspace address alike), on one of your nodes, ideally one that's
         always on.</p>
-      ${s.configured ? `
-        ${watchLine(s.watch)}
-        ${(s.also_watching || []).length ? `<p class="meta" style="color:var(--accent)">
-          ${esc(s.also_watching.join(", "))} ${s.also_watching.length === 1 ? "is" : "are"} also watching a mailbox.
-          One node per mailbox is enough — turn the watch off on the others.</p>` : ""}
+      ${boxes.map((mb) => mailboxBlock(mb, several)).join("")}
+      ${boxes.length ? `
         <div class="searchbar" style="flex-wrap:wrap; align-items:center">
-          <label class="meta"><input type="checkbox" id="gm-watch" ${s.watch?.enabled !== false ? "checked" : ""}>
-            watch for new mail</label>
-          <label class="meta">catch up every
-            <input id="gm-every" type="number" min="1" max="60" value="${esc(s.watch?.every_minutes ?? 5)}" style="width:4em"> min</label>
           <button class="btn btn-quiet" id="gm-pull">pull now</button>
-          <button class="btn btn-quiet" id="gm-disconnect">disconnect</button>
-        </div>` : `
-        <details class="meta" style="margin:var(--s2) 0" open>
-          <summary>you'll need a Google <b>app password</b> (not your account password)</summary>
-          <ol style="margin:var(--s2) 0 0 1.2em;padding:0">
-            <li>Turn on <b>2-Step Verification</b> for the account if it isn't already
-              (myaccount.google.com → Security).</li>
-            <li>Open <a href="https://myaccount.google.com/apppasswords" target="_blank"
-              rel="noopener">myaccount.google.com/apppasswords</a> (hidden from the menus,
-              the direct link works), name it e.g. <code>hearthloom</code>, and create.</li>
-            <li>Paste the 16-character code below — spaces are fine. It's stored sealed on
-              this node and never synced anywhere.</li>
-          </ol>
-        </details>
-        <div class="searchbar" style="flex-wrap:wrap">
-          <input id="gm-user" placeholder="you@gmail.com" style="flex:1.2" autocomplete="off">
-          <input id="gm-pass" type="password" placeholder="app password" style="flex:1.2"
-            autocomplete="off">
-          <button class="btn" id="gm-connect">connect</button>
-        </div>`}
+        </div>
+        ${s.mailboxes ? `<details class="meta" style="margin-top:var(--s2)">
+          <summary><b>add another mailbox</b></summary>
+          ${addForm(false)}
+        </details>` : ""}` : addForm(true)}
       <p class="meta" id="gm-note" hidden></p>
     </div>`;
   const note = host.querySelector("#gm-note");
   const say = (msg) => { note.hidden = false; note.textContent = msg; };
-  host.querySelector("#gm-connect")?.addEventListener("click", async () => {
-    say("checking the sign-in with Gmail…");
-    const res = await apiPost("/v1/integrations/gmail", {
-      actor: ACTOR,
-      user: host.querySelector("#gm-user").value.trim(),
-      password: host.querySelector("#gm-pass").value,
-    }).catch((e) => ({ error: e.message }));
-    if (res?.error) { say(`✗ ${res.error}`); return; }
-    say("✓ connected — watching for new mail; the first pull starts in a moment");
-    paintGmail(host);
-  });
-  const saveWatch = async (payload) => {
+  const post = async (payload) => {
     const res = await apiPost("/v1/integrations/gmail", { actor: ACTOR, ...payload })
       .catch((e) => ({ error: e.message }));
-    if (res?.error) { say(`✗ ${res.error}`); return; }
-    paintGmail(host);
+    if (res?.error) { say(`✗ ${res.error}`); return null; }
+    return res;
   };
-  host.querySelector("#gm-watch")?.addEventListener("change", (e) => saveWatch({ watch: e.target.checked }));
-  host.querySelector("#gm-every")?.addEventListener("change", (e) => {
-    const minutes = Number(e.target.value);
-    if (minutes >= 1 && minutes <= 60) saveWatch({ every_minutes: minutes });
-    else say("✗ catch up every 1 to 60 minutes");
-  });
-  host.querySelector("#gm-disconnect")?.addEventListener("click", async () => {
-    say("disconnecting…");
-    const res = await apiPost("/v1/integrations/gmail", { actor: ACTOR, disconnect: true })
-      .catch((e) => ({ error: e.message }));
-    if (res?.error) { say(`✗ ${res.error}`); return; }
+  host.querySelector("#gm-connect")?.addEventListener("click", async () => {
+    say("checking the sign-in with Gmail…");
+    const res = await post({
+      user: host.querySelector("#gm-user").value.trim(),
+      password: host.querySelector("#gm-pass").value,
+    });
+    if (!res) return;
+    say(res.first === false && res.mailbox && !res.mailbox.embers
+      ? "✓ connected — watching for new mail. Embers don't see this mailbox until you tick the box."
+      : "✓ connected — watching for new mail; the first pull starts in a moment");
     paintGmail(host);
+  });
+  host.querySelectorAll(".gm-box").forEach((box) => {
+    // the mailbox it's about (an older node takes no address)
+    const address = box.dataset.mb || undefined;
+    const save = async (payload) => { if (await post({ address, ...payload })) paintGmail(host); };
+    box.querySelector(".gm-watch")?.addEventListener("change", (e) => save({ watch: e.target.checked }));
+    box.querySelector(".gm-every")?.addEventListener("change", (e) => {
+      const minutes = Number(e.target.value);
+      if (minutes >= 1 && minutes <= 60) save({ every_minutes: minutes });
+      else say("✗ catch up every 1 to 60 minutes");
+    });
+    box.querySelector(".gm-embers")?.addEventListener("change", (e) => save({ embers: e.target.checked }));
+    box.querySelector(".gm-aliases")?.addEventListener("change", (e) => {
+      const aliases = e.target.value.split(/[,\s]+/).map((a) => a.trim()).filter(Boolean);
+      save({ aliases });
+    });
+    box.querySelector(".gm-disconnect")?.addEventListener("click", async () => {
+      say("disconnecting…");
+      if (await post({ address, disconnect: true })) paintGmail(host);
+    });
   });
   host.querySelector("#gm-pull")?.addEventListener("click", async () => {
     const btn = host.querySelector("#gm-pull");

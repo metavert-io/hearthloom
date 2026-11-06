@@ -8,6 +8,55 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+### Added
+- **Several mailboxes on one node.** Connect a personal Gmail and a Google
+  Workspace address (or more) — each with its own app password, its own
+  live watch and catch-up, and its own live archive, so one mailbox never
+  moves another's progress. A mailbox you already had keeps everything as
+  it was: nothing is pulled again, and an older build still reads it if
+  you roll back. The Integrations card lists every mailbox with "add
+  another mailbox"; `hearthloom gmail connect <address>` adds one, and
+  `status`, `watch` and `disconnect` take the address.
+
+- **All of your addresses count as yours.** Mail from any connected
+  mailbox, or from an alias you list on one (`hearthloom gmail set
+  <address> --aliases …`, or "also yours here" on the card), is your own
+  mail: it never opens a "waiting on you" thread or reaches an ember, and
+  replies never copy your other addresses.
+
+- **Replies come from the address they were written to.** A draft goes
+  into the mailbox the message arrived in, from the address the person
+  wrote to when it's one of yours — mail to an alias is answered from the
+  alias.
+
+- **Searching mail covers every mailbox.** Ask's `gmail` source searches
+  them all at once, newest first, and says which mailbox each message is
+  in.
+
+### Changed
+- **Embers see an added mailbox only when you say so.** Embers that watch
+  mail keep seeing your first mailbox; a mailbox you add stays out of their
+  view until you tick "embers that watch mail see it" (`hearthloom gmail
+  set <address> --embers on`).
+- **Each email is sorted, and each draft written, once.** With several of
+  your machines watching mail, the one that watches a mailbox (the first
+  of them) sorts its threads and writes its drafts; before, every watching
+  machine sorted everything.
+- **Gmail links open the right account.** "Open in Gmail" and "open
+  Drafts" go to the mailbox the mail belongs to, not to the first account
+  signed in to the browser.
+
+### Fixed
+- **A refused password is no longer retried in the background.** When
+  Gmail refused a sign-in, the live watch stopped, but the six-hourly pull
+  and the mail search kept trying the same password — which risks Google
+  locking the account. Now nothing tries a refused mailbox until you save
+  its password again.
+- **An ember watch that can't be read matches nothing.** A watch this
+  version can't read (one written by a newer version, say) used to match
+  every message instead of none.
+- **The archive mover never takes a live mail archive** of any mailbox.
+
 ## 0.5.97 — 2026-11-06
 
 ### Changed

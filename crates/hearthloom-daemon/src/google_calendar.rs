@@ -420,7 +420,10 @@ pub async fn start(state: &AppState, host: Option<&str>) -> Result<Started> {
     let verifier = random();
     let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(sha2::Sha256::digest(verifier.as_bytes()));
-    let hint = env("GMAIL_IMAP_USER").filter(|u| u.contains('@'));
+    // the mailbox this node reads (the only one, or the first)
+    let hint = crate::mailboxes::default_one()
+        .map(|mb| mb.address)
+        .filter(|u| u.contains('@'));
     // a hosted node without a client of its own signs in through the relay
     let relay = match (
         client(),
