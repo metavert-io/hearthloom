@@ -19,6 +19,7 @@ mod export;
 mod gmail_pull;
 mod gmail_search;
 mod gmail_watch;
+mod google_calendar;
 mod health_index;
 mod http;
 mod inbox;

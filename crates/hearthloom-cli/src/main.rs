@@ -4,6 +4,7 @@
 
 mod accounts;
 mod bench;
+mod calendar;
 mod client;
 mod embers;
 mod eval;
@@ -44,6 +45,12 @@ enum Cmd {
     Mail {
         #[command(subcommand)]
         command: Option<MailCmd>,
+    },
+    /// Google Calendar (free/busy only): set up, connect, your working
+    /// hours, and when you're free — what reply drafts offer for a time.
+    Calendar {
+        #[command(subcommand)]
+        command: Option<CalendarCmd>,
     },
     /// Agents: the Claude accounts Claude Code agents run on.
     Agents {
@@ -387,6 +394,46 @@ enum MailCmd {
         /// the ember goes back to the setting for every ember
         #[arg(long, requires = "ember", conflicts_with_all = ["view", "chars"])]
         reset: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum CalendarCmd {
+    /// Connected? Which account, your working hours.
+    Status,
+    /// Save your Google Cloud Desktop-app client (ID, then secret; read from
+    /// the terminal or stdin, never argv).
+    Setup,
+    /// Sign in: open the address it prints, then paste the address your
+    /// browser ended on.
+    Connect,
+    /// Forget the sign-in here.
+    Disconnect,
+    /// The calendars the account can see.
+    Calendars,
+    /// When you're free in your working hours.
+    Free {
+        #[arg(long, default_value_t = 7)]
+        days: i64,
+        /// the shortest window worth listing
+        #[arg(long, default_value_t = 30)]
+        minutes: i64,
+    },
+    /// Your working hours: --days mon,tue,wed,thu,fri --hours 09:00-18:00
+    /// --tz America/New_York --notice 12 --calendars <id,id> (empty = default).
+    Hours {
+        #[arg(long)]
+        days: Option<String>,
+        #[arg(long)]
+        hours: Option<String>,
+        #[arg(long = "tz")]
+        time_zone: Option<String>,
+        /// hours of notice before the first time it offers
+        #[arg(long)]
+        notice: Option<i64>,
+        /// calendar ids that count as busy (default: primary + those shown)
+        #[arg(long)]
+        calendars: Option<String>,
     },
 }
 
@@ -1520,6 +1567,32 @@ async fn main() -> Result<()> {
         Cmd::Upgrade { check } => {
             let client = Client::with_url(home, url.clone())?;
             ops::upgrade(&client, check).await?;
+        }
+        Cmd::Calendar { command } => {
+            use calendar::Op;
+            let op = match command.unwrap_or(CalendarCmd::Status) {
+                CalendarCmd::Status => Op::Status,
+                CalendarCmd::Setup => Op::Setup,
+                CalendarCmd::Connect => Op::Connect,
+                CalendarCmd::Disconnect => Op::Disconnect,
+                CalendarCmd::Calendars => Op::Calendars,
+                CalendarCmd::Free { days, minutes } => Op::Free { days, minutes },
+                CalendarCmd::Hours {
+                    days,
+                    hours,
+                    time_zone,
+                    notice,
+                    calendars,
+                } => Op::Hours {
+                    days,
+                    hours,
+                    time_zone,
+                    notice,
+                    calendars,
+                },
+            };
+            let client = Client::with_url(home, url.clone())?;
+            calendar::run(&client, op, as_json).await?;
         }
         Cmd::Mail { command } => {
             use mail::Op;

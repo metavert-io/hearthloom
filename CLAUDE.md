@@ -1136,6 +1136,16 @@ the design log 2026-07-14.
   and addresses validated) — the message stays 7-bit. An ember's draft
   (`mail.draft`, plugin row only, like `mail.watch`) answers only a
   message its own queue holds, to the sender, ≤20 a day.
+- **GOOGLE CALENDAR IS FREE/BUSY ONLY (0.5.95, google_calendar.rs).**
+  Scopes stay `calendar.freebusy` + `calendar.calendarlist.readonly`
+  (+ `openid email` for the account's name): never a scope that reads
+  event details or writes, without the owner deciding it. The client is
+  the owner's own (Desktop app); the refresh token is sealed with
+  `set_env_vars`, access tokens live in memory, and the sign-in's PKCE
+  verifier and state never leave this node's memory (`PENDING`, 15 min).
+  `/v1/calendar` is owner-only and on the ember deny list. Drafts get free
+  windows only for replies about a time (`mail_drafts::about_a_time`), and
+  the model may offer only those.
 - **THE OPERATIONAL MIRROR: NODE-LOCAL COLUMNS STAY HOME, TIES SETTLE
   (0.5.91, store/sync.rs).** `NODE_LOCAL_COLUMNS` (a goal's `last_seq` /
   `last_checked` — a position in THAT node's mutations log — and a note's

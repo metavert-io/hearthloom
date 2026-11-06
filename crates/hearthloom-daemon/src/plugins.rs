@@ -909,6 +909,8 @@ pub fn plugin_route_allowed(path: &str, method: &str, scopes: &[String]) -> bool
             "/v1/integrations",
             "/v1/monitor",
             "/v1/agents",
+            // the owner's availability and the Google sign-in (0.5.95)
+            "/v1/calendar",
             // Ask runs as the owner (and may hand work to agents): an
             // ember's read key must never start one (0.5.80)
             "/v1/query",

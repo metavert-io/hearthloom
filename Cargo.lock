@@ -1399,7 +1399,7 @@ dependencies = [
 
 [[package]]
 name = "hearthloom-adapters"
-version = "0.5.94"
+version = "0.5.95"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1418,7 +1418,7 @@ dependencies = [
 
 [[package]]
 name = "hearthloom-cli"
-version = "0.5.94"
+version = "0.5.95"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1441,7 +1441,7 @@ dependencies = [
 
 [[package]]
 name = "hearthloom-core"
-version = "0.5.94"
+version = "0.5.95"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1467,7 +1467,7 @@ dependencies = [
 
 [[package]]
 name = "hearthloom-daemon"
-version = "0.5.94"
+version = "0.5.95"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1475,6 +1475,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chrono",
+ "chrono-tz",
  "ed25519-dalek",
  "futures-core",
  "futures-util",

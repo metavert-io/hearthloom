@@ -334,6 +334,12 @@ tool-less model write the reply, and APPENDs it to the folder Gmail marks
 `\Drafts` with the `\Draft` flag (`gmail_imap::save_draft`; the message
 itself from `mail_compose`, 7-bit). Nothing is sent or changed.
 
+**Google Calendar free/busy (`google_calendar.rs`).** The owner's own
+Desktop-app OAuth client and a PKCE sign-in finished by pasting the
+landing address; the refresh token is sealed on that node. Free windows =
+working hours (node settings) minus free/busy blocks; drafts about a time
+get them in the prompt.
+
 A mail archive's sidecar indexes the headers when it is built, and its
 message text and links in the background afterwards (`mbox_text.rs`; big
 archives wait for the owner). Archives are read in place, so every read

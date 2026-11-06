@@ -107,7 +107,7 @@ fn forget_key(base_url: &str) {
 }
 
 /// Prompt without echo (POSIX stty; good enough for macOS + linux).
-fn prompt_secret(label: &str) -> Result<String> {
+pub(crate) fn prompt_secret(label: &str) -> Result<String> {
     use std::io::Write;
     eprint!("{label}: ");
     std::io::stderr().flush().ok();
@@ -119,7 +119,7 @@ fn prompt_secret(label: &str) -> Result<String> {
     Ok(line.trim().to_string())
 }
 
-fn prompt(label: &str) -> Result<String> {
+pub(crate) fn prompt(label: &str) -> Result<String> {
     use std::io::Write;
     eprint!("{label}: ");
     std::io::stderr().flush().ok();

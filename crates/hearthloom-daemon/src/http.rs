@@ -155,6 +155,13 @@ pub fn router(state: AppState) -> Router {
             get(mail_embers_get).post(mail_embers_set),
         )
         .route("/v1/mail/threads/{id}/draft", post(mail_draft_ask))
+        .route("/v1/calendar", get(calendar_get).post(calendar_set))
+        .route("/v1/calendar/client", post(calendar_client))
+        .route("/v1/calendar/connect", post(calendar_connect))
+        .route("/v1/calendar/connect/finish", post(calendar_connect_finish))
+        .route("/v1/calendar/disconnect", post(calendar_disconnect))
+        .route("/v1/calendar/calendars", get(calendar_calendars))
+        .route("/v1/calendar/free", get(calendar_free))
         .route("/v1/mail/drafts", get(mail_drafts_get))
         .route("/v1/mail/drafts/settings", post(mail_drafts_settings))
         .route("/v1/mail/drafts/{id}", get(mail_draft_get))
@@ -5445,6 +5452,120 @@ async fn mail_triage_set(
         crate::mail_triage::kick();
     }
     Ok(Json(crate::mail_triage::status(&state)))
+}
+
+/// Google Calendar free/busy (google_calendar.rs): the sign-in, the
+/// owner's working hours, and free windows. Owner only; on the ember deny
+/// list.
+async fn calendar_get(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "see the calendar connection")?;
+    Ok(Json(crate::google_calendar::status(&state)))
+}
+
+async fn calendar_set(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "change your working hours")?;
+    crate::google_calendar::set(&state, &body).map_err(|e| bad_request(format!("{e:#}")))?;
+    Ok(Json(crate::google_calendar::status(&state)))
+}
+
+#[derive(Deserialize)]
+struct CalendarClient {
+    client_id: String,
+    client_secret: String,
+}
+
+async fn calendar_client(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(body): Json<CalendarClient>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "set up the Google client")?;
+    crate::google_calendar::set_client(&state, &body.client_id, &body.client_secret)
+        .map_err(|e| bad_request(format!("{e:#}")))?;
+    Ok(Json(crate::google_calendar::status(&state)))
+}
+
+async fn calendar_connect(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "connect Google Calendar")?;
+    let url = crate::google_calendar::start().map_err(|e| bad_request(format!("{e:#}")))?;
+    Ok(Json(
+        json!({"url": url, "status": crate::google_calendar::status(&state)}),
+    ))
+}
+
+#[derive(Deserialize)]
+struct CalendarFinish {
+    /// the address the browser ended on
+    landing: String,
+}
+
+async fn calendar_connect_finish(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(body): Json<CalendarFinish>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "connect Google Calendar")?;
+    let account = crate::google_calendar::finish(&state, &body.landing)
+        .await
+        .map_err(|e| bad_request(format!("{e:#}")))?;
+    Ok(Json(
+        json!({"account": account, "status": crate::google_calendar::status(&state)}),
+    ))
+}
+
+async fn calendar_disconnect(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "disconnect Google Calendar")?;
+    crate::google_calendar::disconnect(&state)?;
+    Ok(Json(crate::google_calendar::status(&state)))
+}
+
+async fn calendar_calendars(
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "see your calendars")?;
+    let cals = crate::google_calendar::calendars()
+        .await
+        .map_err(|e| bad_request(format!("{e:#}")))?;
+    Ok(Json(json!({"calendars": cals})))
+}
+
+#[derive(Deserialize)]
+struct CalendarFreeParams {
+    #[serde(default)]
+    days: Option<i64>,
+    #[serde(default)]
+    minutes: Option<i64>,
+}
+
+async fn calendar_free(
+    State(state): State<AppState>,
+    Query(params): Query<CalendarFreeParams>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "see when you're free")?;
+    let days = params.days.unwrap_or(7).clamp(1, 60);
+    let minutes = params.minutes.unwrap_or(30).clamp(15, 480);
+    let (h, windows) = crate::google_calendar::free(&state, days, minutes)
+        .await
+        .map_err(|e| bad_request(format!("{e:#}")))?;
+    Ok(Json(json!({
+        "time_zone": h.tz.name(),
+        "windows": windows.iter().map(|(s, e)| json!({"start": s.to_rfc3339(), "end": e.to_rfc3339()})).collect::<Vec<_>>(),
+        "lines": crate::google_calendar::describe(&h, &windows),
+    })))
 }
 
 #[derive(Deserialize)]

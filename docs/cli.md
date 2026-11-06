@@ -114,6 +114,24 @@ addresses it links to, indexed in the background. About 9 KB per message
 (measured on real Gmail); it won't start without three times that free.
 Per node, `--json` for scripts.
 
+### `calendar` — Google Calendar free/busy, for drafts that settle a time
+
+```
+hearthloom calendar setup        # your Google Cloud Desktop-app client: ID, then secret (stdin, never argv)
+hearthloom calendar connect      # open the address it prints, then paste the address the browser lands on
+hearthloom calendar              # connected? which account, your working hours
+hearthloom calendar hours --days mon,tue,wed,thu,fri --hours 09:00-18:00 --tz America/New_York --notice 12
+hearthloom calendar calendars    # what the account can see; --calendars <id,id> on `hours` picks the busy ones
+hearthloom calendar free --days 7 --minutes 30
+hearthloom calendar disconnect
+```
+
+Read-only: `calendar.freebusy` and `calendar.calendarlist.readonly` —
+when you're busy and which calendars you have, never what the events are.
+Publish your Google Cloud app ("In production"): in "Testing", Google's
+sign-in expires after 7 days. Connect it on the machine that writes your
+drafts (the one that watches Gmail).
+
 ### `mail` — what waits on you in your mail
 
 ```

@@ -494,6 +494,98 @@ function loadQr() {
 
 /// `visitRule` adds the phone's calendar setting (the Integrations page
 /// passes it; the wizard's pairing step stays lean).
+/* Google Calendar, free/busy only (0.5.95): the owner's own Google Cloud
+   Desktop-app client, a sign-in finished by pasting the address the browser
+   lands on (works on a node with no browser), working hours, free windows. */
+export async function paintCalendar(host) {
+  const s = await api("/v1/calendar").catch(() => null);
+  if (!s) { host.innerHTML = ""; return; }
+  const drafts = await api("/v1/mail/drafts?limit=1").catch(() => null);
+  const elsewhere = drafts?.drafter?.writer && !drafts.drafter.writer_is_me ? drafts.drafter.writer : null;
+  const dot = s.connected
+    ? `<span class="statchip" style="color:var(--ok,#7a9e7e)">● connected${s.account ? ` — ${esc(s.account)}` : ""}</span>`
+    : `<span class="statchip" style="color:var(--ink-faint)">◌ not connected</span>`;
+  host.innerHTML = `
+    <div class="card">
+      <div class="task-row" style="align-items:baseline"><b>Google Calendar (free/busy)</b> ${dot}</div>
+      <p class="meta">Lets reply drafts that settle a time offer times you're actually free. It sees
+        only when you're busy and which calendars you have — never what your events are.
+        ${elsewhere ? `<b>Connect it on ${esc(elsewhere)}</b>, where your drafts are written.` : ""}</p>
+      ${s.connected ? `
+        <p class="meta">working hours: ${esc((s.days || []).join(", "))} · ${esc(s.hours)}
+          ${s.time_zone ? `· ${esc(s.time_zone)}` : ""} · ${esc(s.notice_hours)}h notice
+          (<code>hearthloom calendar hours</code> changes them)</p>
+        <div id="cal-free" class="meta">…</div>
+        <div class="searchbar"><button class="btn btn-quiet" id="cal-disconnect">disconnect</button></div>`
+      : !s.client ? `
+        <details class="meta" style="margin:var(--s2) 0" open>
+          <summary>you'll need your own Google Cloud client (once, about ten minutes)</summary>
+          <ol style="margin:var(--s2) 0 0 1.2em;padding:0">
+            <li>At <a href="https://console.cloud.google.com" target="_blank" rel="noopener">console.cloud.google.com</a>,
+              create a project and enable the <b>Google Calendar API</b>.</li>
+            <li>Google Auth Platform → Branding: an app name and your email; Audience: <b>External</b>,
+              then <b>Publish app</b> (in "Testing", Google signs you out every 7 days).</li>
+            <li>Clients → Create client → <b>Desktop app</b>. Paste its ID and secret here; they're
+              stored sealed on this node.</li>
+          </ol>
+        </details>
+        <div class="searchbar" style="flex-wrap:wrap">
+          <input id="cal-id" placeholder="client ID (….apps.googleusercontent.com)" style="flex:2" autocomplete="off">
+          <input id="cal-secret" type="password" placeholder="client secret" style="flex:1" autocomplete="off">
+          <button class="btn" id="cal-save">save</button>
+        </div>` : `
+        <div class="searchbar" style="flex-wrap:wrap">
+          <button class="btn" id="cal-connect">connect</button>
+          <span class="meta">opens Google in a new tab</span>
+        </div>
+        <div id="cal-finish" hidden>
+          <p class="meta">After you allow it, the tab lands on a page that doesn't load
+            (127.0.0.1:43279) — that's expected. Copy that page's whole address and paste it here:</p>
+          <div class="searchbar">
+            <input id="cal-landing" placeholder="http://127.0.0.1:43279/hearthloom-calendar?…" style="flex:1" autocomplete="off">
+            <button class="btn" id="cal-done">finish</button>
+          </div>
+        </div>`}
+      <p class="meta" id="cal-note" hidden></p>
+    </div>`;
+  const note = host.querySelector("#cal-note");
+  const say = (msg) => { note.hidden = false; note.textContent = msg; };
+  host.querySelector("#cal-save")?.addEventListener("click", async () => {
+    try {
+      await apiPost("/v1/calendar/client", {
+        client_id: host.querySelector("#cal-id").value.trim(),
+        client_secret: host.querySelector("#cal-secret").value.trim(),
+      });
+      paintCalendar(host);
+    } catch (e) { say(e.message); }
+  });
+  host.querySelector("#cal-connect")?.addEventListener("click", async () => {
+    try {
+      const res = await apiPost("/v1/calendar/connect", {});
+      window.open(res.url, "_blank", "noopener,noreferrer");
+      host.querySelector("#cal-finish").hidden = false;
+      say("If no tab opened, open this address yourself: " + res.url);
+    } catch (e) { say(e.message); }
+  });
+  host.querySelector("#cal-done")?.addEventListener("click", async () => {
+    say("finishing with Google…");
+    try {
+      await apiPost("/v1/calendar/connect/finish", { landing: host.querySelector("#cal-landing").value.trim() });
+      paintCalendar(host);
+    } catch (e) { say(e.message); }
+  });
+  host.querySelector("#cal-disconnect")?.addEventListener("click", async () => {
+    try { await apiPost("/v1/calendar/disconnect", {}); paintCalendar(host); } catch (e) { say(e.message); }
+  });
+  const free = host.querySelector("#cal-free");
+  if (free) {
+    api("/v1/calendar/free?days=7").then((r) => {
+      free.innerHTML = `free this week (${esc(r.time_zone)}):<br>` +
+        ((r.lines || []).map((l) => esc(l)).join("<br>") || "nothing of 30 minutes or more");
+    }).catch((e) => { free.textContent = "couldn't read the calendar: " + e.message; });
+  }
+}
+
 export function paintPair(host, { visitRule = false } = {}) {
   host.innerHTML = `
     <div class="card">
@@ -1548,6 +1640,7 @@ export async function mount(view, helpers) {
     <div class="section-title" style="margin-top:var(--s5)">2 · companions</div>
     <div id="int-embeddings"></div>
     <div id="int-gmail"></div>
+    <div id="int-calendar"></div>
     <div id="int-pair"></div>
     <div id="int-hearthfs"><div class="loading">…</div></div>
     <div id="int-agents"><div class="loading">…</div></div>
@@ -1639,6 +1732,7 @@ export async function mount(view, helpers) {
   paintAnthropic(view.querySelector("#int-anthropic")).catch(() => {});
   paintEmbeddings(view.querySelector("#int-embeddings")).catch(() => {});
   paintGmail(view.querySelector("#int-gmail")).catch(() => {});
+  paintCalendar(view.querySelector("#int-calendar")).catch(() => {});
   paintPair(view.querySelector("#int-pair"), { visitRule: true });
   paintHearthfs(view.querySelector("#int-hearthfs")).catch(() => {});
   paintAgentAccess(view.querySelector("#int-agents")).catch(() => {});

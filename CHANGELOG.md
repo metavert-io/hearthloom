@@ -8,6 +8,21 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.95 — 2026-11-06
+
+### Added
+- **Google Calendar, free/busy only.** Connect it with your own Google
+  Cloud "Desktop app" client (`hearthloom calendar setup`, then
+  `hearthloom calendar connect`, or the new card on Integrations). The
+  sign-in finishes by pasting the address your browser lands on, so it
+  works for a machine with no browser. It asks for two read-only
+  permissions: when you're busy, and which calendars you have — never
+  what your events are. Set your working hours (`hearthloom calendar hours
+  --days mon,tue,wed,thu,fri --hours 09:00-18:00 --notice 12`), see when
+  you're free (`hearthloom calendar free`), and reply drafts for mail that
+  needs a time (or when your words ask for one) now offer two or three of
+  your real free times, never a time outside them.
+
 ### Fixed
 - The Desk says why a reply draft waits when none of your machines
   watches Gmail, instead of "drafting…" forever.
