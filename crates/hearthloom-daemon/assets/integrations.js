@@ -516,7 +516,8 @@ export async function paintCalendar(host) {
           ${s.time_zone ? `· ${esc(s.time_zone)}` : ""} · ${esc(s.notice_hours)}h notice
           (<code>hearthloom calendar hours</code> changes them)</p>
         <div id="cal-free" class="meta">…</div>
-        <div class="searchbar"><button class="btn btn-quiet" id="cal-disconnect">disconnect</button></div>`
+        <div class="searchbar"><button class="btn btn-quiet" id="cal-disconnect">disconnect</button>
+          <button class="btn btn-quiet" id="cal-reset">forget the client</button></div>`
       : !s.client ? `
         <details class="meta" style="margin:var(--s2) 0" open>
           <summary>you'll need your own Google Cloud client (once, about ten minutes)</summary>
@@ -525,18 +526,23 @@ export async function paintCalendar(host) {
               create a project and enable the <b>Google Calendar API</b>.</li>
             <li>Google Auth Platform → Branding: an app name and your email; Audience: <b>External</b>,
               then <b>Publish app</b> (in "Testing", Google signs you out every 7 days).</li>
-            <li>Clients → Create client → <b>Desktop app</b>. Paste its ID and secret here; they're
-              stored sealed on this node.</li>
+            <li>Clients → Create client → <b>Desktop app</b>. Choose the JSON file Google lets you
+              download, or paste its ID and secret (or the whole JSON) here. They're checked with
+              Google, then stored sealed on this node.</li>
           </ol>
         </details>
         <div class="searchbar" style="flex-wrap:wrap">
+          <label class="btn">choose the JSON file
+            <input id="cal-file" type="file" accept=".json,application/json" hidden></label>
+          <span class="meta">or</span>
           <input id="cal-id" placeholder="client ID (….apps.googleusercontent.com)" style="flex:2" autocomplete="off">
-          <input id="cal-secret" type="password" placeholder="client secret" style="flex:1" autocomplete="off">
+          <input id="cal-secret" type="password" placeholder="secret, or the whole JSON" style="flex:1" autocomplete="off">
           <button class="btn" id="cal-save">save</button>
         </div>` : `
         <div class="searchbar" style="flex-wrap:wrap">
           <button class="btn" id="cal-connect">connect</button>
-          <span class="meta">opens Google in a new tab</span>
+          <span class="meta">opens Google in a new tab · client ${esc(s.client_id || "")}</span>
+          <button class="btn btn-quiet" id="cal-reset">use a different client</button>
         </div>
         <div id="cal-finish" hidden>
           <p class="meta">After you allow it, the tab lands on a page that doesn't load
@@ -550,14 +556,27 @@ export async function paintCalendar(host) {
     </div>`;
   const note = host.querySelector("#cal-note");
   const say = (msg) => { note.hidden = false; note.textContent = msg; };
-  host.querySelector("#cal-save")?.addEventListener("click", async () => {
+  // the daemon finds the ID and secret in the JSON and checks them with Google
+  const saveClient = async (client_id, client_secret) => {
+    say("checking it with Google…");
     try {
-      await apiPost("/v1/calendar/client", {
-        client_id: host.querySelector("#cal-id").value.trim(),
-        client_secret: host.querySelector("#cal-secret").value.trim(),
-      });
+      await apiPost("/v1/calendar/client", { client_id, client_secret });
       paintCalendar(host);
     } catch (e) { say(e.message); }
+  };
+  host.querySelector("#cal-save")?.addEventListener("click", () => saveClient(
+    host.querySelector("#cal-id").value.trim(), host.querySelector("#cal-secret").value.trim()));
+  host.querySelector("#cal-file")?.addEventListener("change", async (ev) => {
+    const f = ev.target.files?.[0];
+    if (f) saveClient("", await f.text());
+  });
+  host.querySelector("#cal-reset")?.addEventListener("click", async () => {
+    if (s.connected && !(await confirmDanger({
+      title: "Forget the Google client?",
+      body: "This node forgets the client and its sign-in. Drafts stop offering free times until you set it up and connect again.",
+      action: "forget it",
+    }))) return;
+    try { await apiPost("/v1/calendar/reset", {}); paintCalendar(host); } catch (e) { say(e.message); }
   });
   host.querySelector("#cal-connect")?.addEventListener("click", async () => {
     try {

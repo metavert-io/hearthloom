@@ -1,17 +1,22 @@
 //! `hearthloom calendar` (0.5.95): connect Google Calendar (free/busy
 //! only), set your working hours, and see when you're free — what reply
 //! drafts offer when a thread needs a time (daemon google_calendar.rs).
-use anyhow::{bail, Result};
+use std::path::PathBuf;
+
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
 use crate::client::Client;
-use crate::ops::{prompt, prompt_secret};
+use crate::ops::prompt;
 
 pub enum Op {
     Status,
-    Setup,
+    Setup {
+        file: Option<PathBuf>,
+    },
     Connect,
     Disconnect,
+    Reset,
     Calendars,
     Free {
         days: i64,
@@ -36,6 +41,9 @@ fn print_status(s: &Value) {
         println!("Google Calendar: not connected yet — hearthloom calendar connect");
     } else {
         println!("Google Calendar: not set up — hearthloom calendar setup (your Google Cloud Desktop-app client)");
+    }
+    if let Some(id) = s["client_id"].as_str() {
+        println!("  client: {id}");
     }
     println!(
         "  working hours: {} {}{} · at least {} hours' notice",
@@ -68,31 +76,39 @@ pub async fn run(client: &Client, op: Op, as_json: bool) -> Result<()> {
                 print_status(&s);
             }
         }
-        Op::Setup => {
-            use std::io::{IsTerminal, Read};
-            let (id, secret) = if std::io::stdin().is_terminal() {
-                eprintln!("From console.cloud.google.com → Google Auth Platform → Clients → your Desktop app client.");
-                (prompt("Client ID")?, prompt_secret("Client secret")?)
-            } else {
-                // two lines on stdin: the ID, then the secret
-                let mut text = String::new();
-                std::io::stdin().read_to_string(&mut text)?;
-                let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
-                (
-                    lines.next().unwrap_or("").to_string(),
-                    lines.next().unwrap_or("").to_string(),
-                )
-            };
-            if id.is_empty() || secret.is_empty() {
-                bail!("both the client ID and the client secret are needed");
-            }
-            client
+        Op::Setup { file } => {
+            let saved = client.get("/v1/calendar", &[]).await?;
+            let (id, secret, from_file) = setup_input(file, saved["client_id"].as_str())?;
+            eprintln!("Checking it with Google…");
+            let s = client
                 .post(
                     "/v1/calendar/client",
                     &json!({"client_id": id, "client_secret": secret}),
                 )
                 .await?;
-            println!("✓ Google client saved (sealed). Next: hearthloom calendar connect");
+            if as_json {
+                println!("{s}");
+            } else {
+                println!(
+                    "✓ Google accepted the client — saved (sealed): {}\n  Next: hearthloom calendar connect",
+                    s["client_id"].as_str().unwrap_or("?")
+                );
+            }
+            if let Some(path) = from_file {
+                eprintln!(
+                    "{} holds the secret in plain text — delete it once you don't need it.",
+                    path.display()
+                );
+            }
+        }
+        Op::Reset => {
+            let s = client.post("/v1/calendar/reset", &json!({})).await?;
+            if as_json {
+                println!("{s}");
+            } else {
+                println!("✓ forgot the Google client and the sign-in here. Set it up again: hearthloom calendar setup");
+                println!("  (to remove its access on Google's side too: myaccount.google.com/permissions)");
+            }
         }
         Op::Connect => {
             let res = client.post("/v1/calendar/connect", &json!({})).await?;
@@ -198,4 +214,138 @@ pub async fn run(client: &Client, op: Op, as_json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// What `setup` was given, for the daemon to read and check with Google:
+/// the JSON Google lets you download (pasted, dropped into the terminal,
+/// or `--file`), or the secret with the client ID beside it — an empty ID
+/// keeps the one saved on the node.
+fn setup_input(
+    file: Option<PathBuf>,
+    saved_id: Option<&str>,
+) -> Result<(String, String, Option<PathBuf>)> {
+    use std::io::{IsTerminal, Read};
+    let read_file = |path: PathBuf| -> Result<(String, String, Option<PathBuf>)> {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("couldn't read {}", path.display()))?;
+        Ok((String::new(), text, Some(path)))
+    };
+    if let Some(path) = file {
+        return read_file(path);
+    }
+    if !std::io::stdin().is_terminal() {
+        // the JSON; or two lines, the ID then the secret; or the secret alone
+        let mut text = String::new();
+        std::io::stdin().read_to_string(&mut text)?;
+        if text.trim_start().starts_with('{') {
+            return Ok((String::new(), text, None));
+        }
+        let lines: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        return Ok(match lines.as_slice() {
+            [] => bail!("nothing on stdin — the JSON, or the client ID and then the secret"),
+            [secret] => (String::new(), secret.to_string(), None),
+            [id, secret, ..] => (id.to_string(), secret.to_string(), None),
+        });
+    }
+    eprintln!(
+        "From console.cloud.google.com → Google Auth Platform → Clients → your Desktop app client."
+    );
+    eprintln!(
+        "Paste the JSON you downloaded for it (or drop the file here), or just its client secret."
+    );
+    eprintln!("What you paste stays hidden.");
+    let first = read_hidden("Client JSON or secret")?;
+    if first.is_empty() {
+        bail!("nothing pasted — run hearthloom calendar setup again");
+    }
+    if let Some(path) = dropped_file(&first) {
+        return read_file(path);
+    }
+    if first.starts_with('{') {
+        return Ok((String::new(), first, None));
+    }
+    if first.ends_with(".apps.googleusercontent.com") {
+        // the ID came first; now the secret
+        let secret = read_hidden("Client secret")?;
+        return Ok((first, secret, None));
+    }
+    let id = match saved_id {
+        Some(saved) => prompt(&format!("Client ID (Enter keeps {saved})"))?,
+        None => prompt("Client ID")?,
+    };
+    Ok((id, first, None))
+}
+
+/// A prompt that doesn't echo, and takes a JSON file pasted over several
+/// lines: it reads until the JSON is whole (an empty line ends it early).
+fn read_hidden(label: &str) -> Result<String> {
+    use std::io::{BufRead, Write};
+    eprint!("{label}: ");
+    std::io::stderr().flush().ok();
+    let _ = std::process::Command::new("stty").arg("-echo").status();
+    let read = (|| -> Result<String> {
+        let mut stdin = std::io::stdin().lock();
+        let mut text = String::new();
+        stdin.read_line(&mut text)?;
+        let mut lines = 1;
+        while text.trim_start().starts_with('{')
+            && serde_json::from_str::<Value>(&text).is_err()
+            && lines < 400
+        {
+            let mut line = String::new();
+            if stdin.read_line(&mut line)? == 0 || line.trim().is_empty() {
+                break;
+            }
+            text.push_str(&line);
+            lines += 1;
+        }
+        Ok(text.trim().to_string())
+    })();
+    let _ = std::process::Command::new("stty").arg("echo").status();
+    eprintln!();
+    read
+}
+
+/// A file dragged into a terminal arrives as its path — quoted, or with
+/// its spaces escaped.
+fn dropped_file(text: &str) -> Option<PathBuf> {
+    let t = text.trim();
+    let t = t
+        .strip_prefix('\'')
+        .and_then(|s| s.strip_suffix('\''))
+        .or_else(|| t.strip_prefix('"').and_then(|s| s.strip_suffix('"')))
+        .map(str::to_string)
+        .unwrap_or_else(|| t.replace("\\ ", " "));
+    let path = match t.strip_prefix("~/") {
+        Some(rest) => PathBuf::from(std::env::var_os("HOME")?).join(rest),
+        None => PathBuf::from(&t),
+    };
+    (path.is_absolute() && path.is_file()).then_some(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_a_dropped_file_is_read_and_a_secret_is_not_a_path() {
+        let dir = std::env::temp_dir().join(format!("hl-cal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("client secret.json");
+        std::fs::write(&file, "{}").unwrap();
+        let shown = file.display().to_string();
+        assert_eq!(dropped_file(&shown.replace(' ', "\\ ")), Some(file.clone()));
+        assert_eq!(dropped_file(&format!("'{shown}'")), Some(file.clone()));
+        assert_eq!(dropped_file(&format!("\"{shown}\"  ")), Some(file.clone()));
+        assert_eq!(dropped_file("GOCSPX-fake-secret-for-tests"), None);
+        assert_eq!(
+            dropped_file(&dir.join("missing.json").display().to_string()),
+            None
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

@@ -404,14 +404,21 @@ enum MailCmd {
 enum CalendarCmd {
     /// Connected? Which account, your working hours.
     Status,
-    /// Save your Google Cloud Desktop-app client (ID, then secret; read from
-    /// the terminal or stdin, never argv).
-    Setup,
+    /// Save your Google Cloud Desktop-app client, once Google accepts it:
+    /// paste the JSON Google lets you download (or drop the file in), or
+    /// just the secret. Read from the terminal or stdin, never argv.
+    Setup {
+        /// read the downloaded client JSON from this file
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+    },
     /// Sign in: open the address it prints, then paste the address your
     /// browser ended on.
     Connect,
     /// Forget the sign-in here.
     Disconnect,
+    /// Forget the Google client and the sign-in here (then setup again).
+    Reset,
     /// The calendars the account can see.
     Calendars,
     /// When you're free in your working hours.
@@ -1584,9 +1591,10 @@ async fn main() -> Result<()> {
             use calendar::Op;
             let op = match command.unwrap_or(CalendarCmd::Status) {
                 CalendarCmd::Status => Op::Status,
-                CalendarCmd::Setup => Op::Setup,
+                CalendarCmd::Setup { file } => Op::Setup { file },
                 CalendarCmd::Connect => Op::Connect,
                 CalendarCmd::Disconnect => Op::Disconnect,
+                CalendarCmd::Reset => Op::Reset,
                 CalendarCmd::Calendars => Op::Calendars,
                 CalendarCmd::Free { days, minutes } => Op::Free { days, minutes },
                 CalendarCmd::Hours {

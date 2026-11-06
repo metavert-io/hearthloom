@@ -118,14 +118,23 @@ Per node, `--json` for scripts.
 ### `calendar` — Google Calendar free/busy, for drafts that settle a time
 
 ```
-hearthloom calendar setup        # your Google Cloud Desktop-app client: ID, then secret (stdin, never argv)
+hearthloom calendar setup        # your Google Cloud Desktop-app client: paste the JSON Google lets you download
+                                 # (or drop the file in), or just the secret; checked with Google before it's saved
+hearthloom calendar setup --file ~/Downloads/client_secret_….json
 hearthloom calendar connect      # open the address it prints, then paste the address the browser lands on
 hearthloom calendar              # connected? which account, your working hours
 hearthloom calendar hours --days mon,tue,wed,thu,fri --hours 09:00-18:00 --tz America/New_York --notice 12
 hearthloom calendar calendars    # what the account can see; --calendars <id,id> on `hours` picks the busy ones
 hearthloom calendar free --days 7 --minutes 30
-hearthloom calendar disconnect
+hearthloom calendar disconnect   # forget the sign-in; the client stays
+hearthloom calendar reset        # forget the client and the sign-in, then set up again
 ```
+
+`setup` reads the ID and secret out of the downloaded JSON (pasted whole,
+a file dropped into the terminal, or `--file`), or takes the secret alone
+and keeps the client ID saved on the node. It asks Google whether the
+pair belongs together and saves nothing if Google says no. Delete the
+downloaded file afterwards: it holds the secret in plain text.
 
 Read-only: `calendar.freebusy` and `calendar.calendarlist.readonly` —
 when you're busy and which calendars you have, never what the events are.

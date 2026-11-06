@@ -1166,7 +1166,11 @@ the design log 2026-07-14.
   the owner's own (Desktop app); the refresh token is sealed with
   `set_env_vars`, access tokens live in memory, and the sign-in's PKCE
   verifier and state never leave this node's memory (`PENDING`, 15 min).
-  `/v1/calendar` is owner-only and on the ember deny list. Drafts get free
+  `/v1/calendar` is owner-only and on the ember deny list. `set_client`
+  saves nothing Google hasn't accepted (`check_with_google`: a made-up
+  refresh token — `invalid_client` = wrong pair, `invalid_grant` = right
+  pair); the owner's input may be the downloaded JSON, so never log it or
+  echo it back in an error. Drafts get free
   windows only for replies about a time (`mail_drafts::about_a_time`), and
   the model may offer only those.
 - **THE OPERATIONAL MIRROR: NODE-LOCAL COLUMNS STAY HOME, TIES SETTLE

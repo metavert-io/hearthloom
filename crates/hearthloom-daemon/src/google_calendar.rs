@@ -75,18 +75,122 @@ fn random() -> String {
     )
 }
 
-/// Save the owner's Desktop-app client (sealed, live at once).
-pub fn set_client(state: &AppState, id: &str, secret: &str) -> Result<()> {
-    let (id, secret) = (id.trim(), secret.trim());
-    if !id.ends_with(".apps.googleusercontent.com") || id.contains(char::is_whitespace) {
-        bail!("that isn't a Google OAuth client ID (it ends in .apps.googleusercontent.com)");
-    }
-    if secret.len() < 10 || secret.contains(char::is_whitespace) {
-        bail!("that doesn't look like the client secret");
+/// Save the owner's Desktop-app client (sealed, live at once) — only once
+/// Google has accepted the pair. Either field may hold the JSON Google
+/// offers as a download; a bare secret keeps the client ID saved here.
+/// A different client forgets the sign-in, which belonged to the old one.
+pub async fn set_client(state: &AppState, id: &str, secret: &str) -> Result<()> {
+    let saved = env(ENV_CLIENT_ID);
+    let (id, secret) = client_from_input(id, secret, saved.as_deref())?;
+    check_with_google(&id, &secret).await?;
+    if saved.as_deref().is_some_and(|s| s != id) {
+        disconnect(state)?;
     }
     hearthloom_core::secrets::set_env_vars(
         state.home.root(),
-        &[(ENV_CLIENT_ID, id), (ENV_CLIENT_SECRET, secret)],
+        &[(ENV_CLIENT_ID, &id), (ENV_CLIENT_SECRET, &secret)],
+    )
+}
+
+/// The client ID and secret in what the owner pasted: the downloaded JSON
+/// (`{"installed": {…}}`, or just the inside), or the secret alone with
+/// the ID typed beside it or saved here.
+fn client_from_input(id: &str, secret: &str, saved_id: Option<&str>) -> Result<(String, String)> {
+    let (id, secret) = (id.trim(), secret.trim());
+    let (id, secret) = if let Some(text) = [secret, id].into_iter().find(|s| s.starts_with('{')) {
+        let v: Value = serde_json::from_str(text)
+            .context("that looks like the JSON file but doesn't read whole — paste all of it")?;
+        if v.get("web").is_some() {
+            bail!("that JSON is for a Web application client — Hearthloom needs a Desktop app client (Clients → Create client → Desktop app)");
+        }
+        let c = v.get("installed").unwrap_or(&v);
+        let (Some(jid), Some(jsecret)) = (c["client_id"].as_str(), c["client_secret"].as_str())
+        else {
+            bail!("that JSON has no client ID and secret — download it again from Clients → your Desktop app client");
+        };
+        let (jid, jsecret) = (jid.trim(), jsecret.trim());
+        let (other, matches) = if text == secret {
+            (id, id == jid)
+        } else {
+            (secret, secret == jsecret)
+        };
+        if !other.is_empty() && !matches {
+            bail!("the JSON is for a different client than what you typed beside it — paste the JSON alone");
+        }
+        (jid.to_string(), jsecret.to_string())
+    } else {
+        let id = if id.is_empty() {
+            saved_id.unwrap_or("")
+        } else {
+            id
+        };
+        if id.is_empty() {
+            bail!("the client ID is needed too — or paste the whole JSON Google gave you");
+        }
+        (id.to_string(), secret.to_string())
+    };
+    if !id.ends_with(".apps.googleusercontent.com") || id.contains(char::is_whitespace) {
+        bail!("that isn't a Google OAuth client ID (it ends in .apps.googleusercontent.com)");
+    }
+    if secret == id || secret.ends_with(".apps.googleusercontent.com") {
+        bail!("that's the client ID again — paste the client secret (it starts with GOCSPX-) or the whole JSON");
+    }
+    if secret.len() < 10
+        || !secret
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!("that doesn't look like a client secret (it starts with GOCSPX-) — paste it again, or the whole JSON");
+    }
+    Ok((id, secret))
+}
+
+/// Ask Google whether the ID and secret belong together before anything is
+/// saved: a token request with a made-up refresh token. Google checks the
+/// client first, so a wrong pair is `invalid_client` and a right one gets
+/// as far as refusing the made-up token.
+async fn check_with_google(id: &str, secret: &str) -> Result<()> {
+    let res = reqwest::Client::new()
+        .post(TOKEN_URL)
+        .timeout(Duration::from_secs(20))
+        .form(&[
+            ("client_id", id),
+            ("client_secret", secret),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", "1//hearthloom-setup-check"),
+        ])
+        .send()
+        .await
+        .context("couldn't reach Google to check the client — nothing was saved")?;
+    google_verdict(&res.json().await.unwrap_or_default())
+}
+
+fn google_verdict(body: &Value) -> Result<()> {
+    let error = body["error"].as_str().unwrap_or("");
+    let said = body["error_description"].as_str().unwrap_or(error);
+    match error {
+        // the pair passed; only the made-up token was refused
+        "invalid_grant" | "unauthorized_client" => Ok(()),
+        "invalid_client" if said.contains("not found") => bail!(
+            "Google doesn't know that client ID (\"{said}\") — check it, or wait a few minutes if you've just made the client"
+        ),
+        "invalid_client" => bail!(
+            "Google says that isn't the client's secret (\"{said}\") — copy it again from Clients → your Desktop app client, or add a new secret there"
+        ),
+        _ => bail!(
+            "Google gave an unexpected answer (\"{}\") — nothing was saved",
+            if said.is_empty() { "no error" } else { said }
+        ),
+    }
+}
+
+/// Forget the client and the sign-in here, so setup starts over.
+pub fn reset(state: &AppState) -> Result<()> {
+    *PENDING.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    disconnect(state)?;
+    hearthloom_core::secrets::set_env_vars(
+        state.home.root(),
+        &[(ENV_CLIENT_ID, ""), (ENV_CLIENT_SECRET, "")],
     )
 }
 
@@ -533,6 +637,8 @@ pub fn status(state: &AppState) -> Value {
     let h = hours(state, None);
     json!({
         "client": client().is_some(),
+        // not a secret: Google puts it in every sign-in address
+        "client_id": env(ENV_CLIENT_ID),
         "connected": connected(),
         "account": env(ENV_ACCOUNT),
         "days": h.days.iter().map(|d| d.to_string().to_lowercase()).collect::<Vec<_>>(),
@@ -647,5 +753,90 @@ mod tests {
             jwt_email(&format!("h.{payload}.s")).as_deref(),
             Some("sam@x.example")
         );
+    }
+
+    #[test]
+    fn test_the_client_comes_from_the_json_or_the_bare_secret() {
+        let id = "123-abc.apps.googleusercontent.com";
+        let secret = "GOCSPX-fake-secret-for-tests";
+        let want = Ok((id.to_string(), secret.to_string()));
+        let ok = |i: &str, s: &str, saved: Option<&str>| {
+            client_from_input(i, s, saved).map_err(|e| e.to_string())
+        };
+        // the file Google offers, one line, pasted where the secret goes
+        let file = format!(
+            r#"{{"installed":{{"client_id":"{id}","project_id":"p","auth_uri":"https://accounts.google.com/o/oauth2/auth","token_uri":"https://oauth2.googleapis.com/token","client_secret":"{secret}","redirect_uris":["http://localhost"]}}}}"#
+        );
+        assert_eq!(ok("", &file, None), want);
+        assert_eq!(ok(id, &file, None), want, "the same ID typed beside it");
+        assert_eq!(ok(&file, "", None), want, "pasted where the ID goes");
+        // pretty-printed, and just the inside
+        let pretty =
+            serde_json::to_string_pretty(&serde_json::from_str::<Value>(&file).unwrap()).unwrap();
+        assert_eq!(ok("", &pretty, None), want);
+        let inside = format!(r#"{{"client_id":"{id}","client_secret":"{secret}"}}"#);
+        assert_eq!(ok("", &inside, None), want);
+        // the bare secret: with the ID, or keeping the saved one
+        assert_eq!(ok(id, secret, None), want);
+        assert_eq!(ok("", &format!("  {secret}\n"), Some(id)), want);
+        let refused = |i: &str, s: &str, saved: Option<&str>, says: &str| {
+            let e = ok(i, s, saved).unwrap_err();
+            assert!(e.contains(says), "{e}");
+        };
+        refused("", secret, None, "client ID is needed");
+        refused(id, id, None, "client ID again");
+        refused(
+            id,
+            "GOCSPX-abc def",
+            None,
+            "doesn't look like a client secret",
+        );
+        refused(
+            id,
+            "GOCSPX-abcdefghij\u{200b}klm",
+            None,
+            "doesn't look like",
+        );
+        refused(
+            "",
+            "{\"installed\": {\"client_id\"",
+            None,
+            "doesn't read whole",
+        );
+        refused(
+            "",
+            &file.replace("installed", "web"),
+            None,
+            "Web application client",
+        );
+        refused(
+            "999-other.apps.googleusercontent.com",
+            &file,
+            None,
+            "different client",
+        );
+        refused("", r#"{"installed":{}}"#, None, "no client ID and secret");
+    }
+
+    #[test]
+    fn test_googles_answer_decides_whether_the_pair_is_saved() {
+        // what Google said to a real client ID with a made-up secret (2026-11-06)
+        let wrong = json!({"error": "invalid_client", "error_description": "The provided client secret is invalid."});
+        assert!(google_verdict(&wrong)
+            .unwrap_err()
+            .to_string()
+            .contains("isn't the client's secret"));
+        let unknown = json!({"error": "invalid_client", "error_description": "The OAuth client was not found."});
+        assert!(google_verdict(&unknown)
+            .unwrap_err()
+            .to_string()
+            .contains("doesn't know that client ID"));
+        // a right pair gets as far as the made-up refresh token
+        assert!(google_verdict(
+            &json!({"error": "invalid_grant", "error_description": "Bad Request"})
+        )
+        .is_ok());
+        assert!(google_verdict(&json!({})).is_err());
+        assert!(google_verdict(&json!({"error": "invalid_request"})).is_err());
     }
 }

@@ -8,6 +8,21 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+### Changed
+- **Calendar setup takes the file Google gives you, and checks it.**
+  `hearthloom calendar setup` (and the Integrations card) accepts the
+  client JSON Google lets you download — pasted whole, dropped into the
+  terminal, `--file`, or chosen on the card — or the secret alone, which
+  keeps the client ID already saved. Before anything is saved, Google is
+  asked whether the ID and secret belong together; a wrong secret, an
+  unknown client, a Web-application client or the ID pasted twice are
+  turned away with what to fix. A different client forgets the old
+  sign-in. `hearthloom calendar status` shows the client ID.
+
+### Added
+- `hearthloom calendar reset` (and "forget the client" on the card):
+  forgets the Google client and the sign-in on this node.
+
 ## 0.5.96 — 2026-11-06
 
 ### Changed

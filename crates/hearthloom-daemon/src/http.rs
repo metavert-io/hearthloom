@@ -161,6 +161,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/calendar/connect", post(calendar_connect))
         .route("/v1/calendar/connect/finish", post(calendar_connect_finish))
         .route("/v1/calendar/disconnect", post(calendar_disconnect))
+        .route("/v1/calendar/reset", post(calendar_reset))
         .route("/v1/calendar/calendars", get(calendar_calendars))
         .route("/v1/calendar/free", get(calendar_free))
         .route("/v1/mail/drafts", get(mail_drafts_get))
@@ -5620,9 +5621,13 @@ async fn calendar_set(
     Ok(Json(crate::google_calendar::status(&state)))
 }
 
+/// Either field may carry the JSON Google offers as a download; a secret
+/// alone keeps the client ID saved here.
 #[derive(Deserialize)]
 struct CalendarClient {
+    #[serde(default)]
     client_id: String,
+    #[serde(default)]
     client_secret: String,
 }
 
@@ -5633,7 +5638,17 @@ async fn calendar_client(
 ) -> Result<Json<Value>, ApiError> {
     require_owner(&auth, "set up the Google client")?;
     crate::google_calendar::set_client(&state, &body.client_id, &body.client_secret)
+        .await
         .map_err(|e| bad_request(format!("{e:#}")))?;
+    Ok(Json(crate::google_calendar::status(&state)))
+}
+
+async fn calendar_reset(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "forget the Google client")?;
+    crate::google_calendar::reset(&state)?;
     Ok(Json(crate::google_calendar::status(&state)))
 }
 
