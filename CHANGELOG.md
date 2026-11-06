@@ -8,6 +8,10 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+### Fixed
+- The Desk says why a reply draft waits when none of your machines
+  watches Gmail, instead of "drafting…" forever.
+
 ## 0.5.94 — 2026-11-06
 
 ### Added

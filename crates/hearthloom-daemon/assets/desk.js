@@ -1163,7 +1163,9 @@ async function paintMail(host) {
   const draftLine = (d) => {
     if (!d) return "";
     if (d.state === "requested" || d.state === "writing") {
-      return `<div class="meta">drafting a reply${writer ? ` on ${esc(writer)}` : ""}…</div>`;
+      return writer
+        ? `<div class="meta">drafting a reply on ${esc(writer)}…</div>`
+        : `<div class="meta">this waits: none of your machines watches Gmail, and drafts are written where it's watched</div>`;
     }
     if (d.state === "failed") return `<div class="meta">the draft didn't work: ${esc(d.error || "unknown")}</div>`;
     const fill = (d.placeholders || []).length
