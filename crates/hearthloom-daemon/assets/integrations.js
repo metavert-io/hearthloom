@@ -516,6 +516,8 @@ export async function paintCalendar(host) {
           ${s.time_zone ? `· ${esc(s.time_zone)}` : ""} · ${esc(s.notice_hours)}h notice
           (<code>hearthloom calendar hours</code> changes them)</p>
         <div id="cal-free" class="meta">…</div>
+        <p class="meta">${s.link ? `scheduling link offered in drafts: <a href="${esc(s.link)}" target="_blank" rel="noopener">${esc(s.link)}</a>`
+          : `add your scheduling page (Calendly, Cal.com, Google appointments) with <code>hearthloom calendar link https://…</code>`}</p>
         <div class="searchbar"><button class="btn btn-quiet" id="cal-disconnect">disconnect</button>
           <button class="btn btn-quiet" id="cal-reset">forget the client</button></div>`
       : !s.client ? `
@@ -541,12 +543,16 @@ export async function paintCalendar(host) {
         </div>` : `
         <div class="searchbar" style="flex-wrap:wrap">
           <button class="btn" id="cal-connect">connect</button>
-          <span class="meta">opens Google in a new tab · client ${esc(s.client_id || "")}</span>
-          <button class="btn btn-quiet" id="cal-reset">use a different client</button>
+          <span class="meta">${s.client_source === "hosted" ? "through Hearthlaunch — you come back here when it's done"
+            : s.client_source === "shared" ? "with Hearthloom's Google client"
+            : `client ${esc(s.client_id || "")}`}</span>
+          ${s.client_source === "own" ? `<button class="btn btn-quiet" id="cal-reset">use a different client</button>` : ""}
         </div>
+        ${s.sign_in_error ? `<p class="meta">last sign-in: ${esc(s.sign_in_error)}</p>` : ""}
         <div id="cal-finish" hidden>
-          <p class="meta">After you allow it, the tab lands on a page that doesn't load
-            (127.0.0.1:43279) — that's expected. Copy that page's whole address and paste it here:</p>
+          <p class="meta">If the browser you signed in with is on this machine, this finishes by itself.
+            Elsewhere, the tab lands on a page that doesn't load (127.0.0.1:…) — that's expected.
+            Copy that page's whole address and paste it here:</p>
           <div class="searchbar">
             <input id="cal-landing" placeholder="http://127.0.0.1:43279/hearthloom-calendar?…" style="flex:1" autocomplete="off">
             <button class="btn" id="cal-done">finish</button>
@@ -581,8 +587,17 @@ export async function paintCalendar(host) {
   host.querySelector("#cal-connect")?.addEventListener("click", async () => {
     try {
       const res = await apiPost("/v1/calendar/connect", {});
+      // through Hearthlaunch: Google sends this tab back to the dashboard
+      if (res.mode === "relay") { location.assign(res.url); return; }
       window.open(res.url, "_blank", "noopener,noreferrer");
       host.querySelector("#cal-finish").hidden = false;
+      // the loopback listener may finish it: watch for that
+      const watch = setInterval(async () => {
+        const now = await api("/v1/calendar").catch(() => null);
+        if (!host.isConnected || !now) { clearInterval(watch); return; }
+        if (!now.pending) { clearInterval(watch); paintCalendar(host); }
+      }, 2000);
+      setTimeout(() => clearInterval(watch), 15 * 60 * 1000);
       say("Sign in with the Google account whose calendar you use" +
         (res.account_hint ? ` (Google suggests ${res.account_hint}, the Gmail this node reads)` : "") +
         ". If no tab opened, open this address yourself: " + res.url);

@@ -17,6 +17,10 @@ pub enum Op {
     Connect,
     Disconnect,
     Reset,
+    Link {
+        url: Option<String>,
+        clear: bool,
+    },
     Calendars,
     Free {
         days: i64,
@@ -43,7 +47,19 @@ fn print_status(s: &Value) {
         println!("Google Calendar: not set up — hearthloom calendar setup (your Google Cloud Desktop-app client)");
     }
     if let Some(id) = s["client_id"].as_str() {
-        println!("  client: {id}");
+        let whose = match s["client_source"].as_str() {
+            Some("own") => " (yours)",
+            Some("shared") => " (Hearthloom's shared client)",
+            Some("hosted") => " (through Hearthlaunch)",
+            _ => "",
+        };
+        println!("  client: {id}{whose}");
+    }
+    if let (false, Some(err)) = (s["connected"] == json!(true), s["sign_in_error"].as_str()) {
+        println!("  last sign-in: {err}");
+    }
+    if let Some(link) = s["link"].as_str() {
+        println!("  scheduling link: {link}");
     }
     println!(
         "  working hours: {} {}{} · at least {} hours' notice",
@@ -113,6 +129,7 @@ pub async fn run(client: &Client, op: Op, as_json: bool) -> Result<()> {
         Op::Connect => {
             let res = client.post("/v1/calendar/connect", &json!({})).await?;
             let url = res["url"].as_str().unwrap_or("");
+            let mode = res["mode"].as_str().unwrap_or("paste");
             let which = match res["account_hint"].as_str() {
                 Some(gmail) => {
                     format!(" — this node reads mail as {gmail}, so Google suggests that one")
@@ -122,23 +139,70 @@ pub async fn run(client: &Client, op: Op, as_json: bool) -> Result<()> {
             eprintln!(
                 "1. Open this address in a browser and sign in with the Google account whose calendar you use{which}:\n\n{url}\n"
             );
-            eprintln!("2. Allow it. (If Google says it \"hasn't verified this app\", Continue is expected for your own client.)");
-            eprintln!("3. Your browser then lands on a page that doesn't load (127.0.0.1:43279). That's expected:");
-            eprintln!("   copy the whole address from the address bar and paste it here.\n");
-            let landing = prompt("The address it ended on")?;
-            if landing.is_empty() {
-                bail!("nothing pasted — run hearthloom calendar connect again");
-            }
-            let done = client
-                .post("/v1/calendar/connect/finish", &json!({"landing": landing}))
-                .await?;
+            eprintln!("2. Allow it.");
+            let pasted = match mode {
+                "relay" => {
+                    eprintln!(
+                        "3. Google sends you back to your Hearthloom dashboard. Waiting here…\n"
+                    );
+                    None
+                }
+                "loopback" => {
+                    eprintln!("3. If that browser is on this machine, it finishes by itself. Elsewhere, it lands on a");
+                    eprintln!("   page that doesn't load (127.0.0.1:…) — copy that address and paste it here.\n");
+                    eprint!("The address it ended on (or wait): ");
+                    Some(read_line_in_background())
+                }
+                _ => {
+                    eprintln!("3. Your browser then lands on a page that doesn't load (127.0.0.1:…). That's expected:");
+                    eprintln!(
+                        "   copy the whole address from the address bar and paste it here.\n"
+                    );
+                    let landing = prompt("The address it ended on")?;
+                    if landing.is_empty() {
+                        bail!("nothing pasted — run hearthloom calendar connect again");
+                    }
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let _ = tx.send(landing);
+                    Some(rx)
+                }
+            };
+            let account = wait_for_sign_in(client, pasted).await?;
             if as_json {
-                println!("{done}");
+                println!("{}", json!({ "account": account }));
             } else {
                 println!(
-                    "✓ Google Calendar connected ({}). Try: hearthloom calendar free",
-                    done["account"].as_str().unwrap_or("")
+                    "\n✓ Google Calendar connected ({account}). Try: hearthloom calendar free"
                 );
+            }
+        }
+        Op::Link { url, clear } => {
+            let link = if clear {
+                String::new()
+            } else {
+                match url {
+                    Some(u) => u,
+                    None => {
+                        let s = client.get("/v1/calendar", &[]).await?;
+                        match s["link"].as_str() {
+                            Some(l) => println!("scheduling link: {l}"),
+                            None => {
+                                println!("no scheduling link — hearthloom calendar link https://…")
+                            }
+                        }
+                        return Ok(());
+                    }
+                }
+            };
+            let s = client
+                .post("/v1/calendar", &json!({ "link": link }))
+                .await?;
+            if as_json {
+                println!("{s}");
+            } else if let Some(l) = s["link"].as_str() {
+                println!("✓ drafts that settle a time also offer {l}");
+            } else {
+                println!("✓ scheduling link cleared");
             }
         }
         Op::Disconnect => {
@@ -220,6 +284,55 @@ pub async fn run(client: &Client, op: Op, as_json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The sign-in finishes on the node (the loopback listener or the relay)
+/// or with an address pasted here, whichever comes first.
+async fn wait_for_sign_in(
+    client: &Client,
+    pasted: Option<std::sync::mpsc::Receiver<String>>,
+) -> Result<String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15 * 60);
+    loop {
+        let s = client.get("/v1/calendar", &[]).await?;
+        if s["pending"] != json!(true) {
+            if let Some(err) = s["sign_in_error"].as_str() {
+                bail!("{err}");
+            }
+            if s["connected"] == json!(true) {
+                return Ok(s["account"].as_str().unwrap_or("").to_string());
+            }
+            bail!("the sign-in ended without connecting — run hearthloom calendar connect again");
+        }
+        if let Some(line) = pasted.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            let landing = line.trim();
+            if !landing.is_empty() {
+                let done = client
+                    .post(
+                        "/v1/calendar/connect/finish",
+                        &json!({ "landing": landing }),
+                    )
+                    .await?;
+                return Ok(done["account"].as_str().unwrap_or("").to_string());
+            }
+        }
+        if std::time::Instant::now() > deadline {
+            bail!("the sign-in took too long — run hearthloom calendar connect again");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    }
+}
+
+/// One line from the terminal, read on a thread so waiting can go on.
+fn read_line_in_background() -> std::sync::mpsc::Receiver<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).is_ok() {
+            let _ = tx.send(line);
+        }
+    });
+    rx
 }
 
 /// What `setup` was given, for the daemon to read and check with Google:

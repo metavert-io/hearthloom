@@ -26,9 +26,29 @@ pin release tags, never a branch.
   admin account, say) is turned away at once, by name, instead of failing
   every read afterwards.
 
+- **No Google Cloud project needed.** A node that uses a registry signs
+  in with Hearthloom's shared Google client, which the registry publishes
+  (`/.well-known/hearthloom-oauth`); your own client (`calendar setup`)
+  still wins. A sign-in remembers which client made it, so either keeps
+  refreshing.
+- **Signing in finishes by itself** when the browser is on the same
+  machine: the node listens on a loopback port while the sign-in waits.
+  A browser elsewhere still pastes the address. On a hosted node, connect
+  is one click: Google returns through Hearthlaunch, which passes the
+  one-time code to your node and keeps nothing.
+- **Drafts offer times in the other person's zone** when their message's
+  Date header puts them elsewhere ("9:00 AM Halifax time (5:00 AM UTC−8)").
+
 ### Added
 - `hearthloom calendar reset` (and "forget the client" on the card):
   forgets the Google client and the sign-in on this node.
+- `hearthloom calendar link https://…`: your scheduling page (Calendly,
+  Cal.com, Google appointments), offered in drafts beside free times.
+- Ember scope `calendar.availability`: free windows only, never what an
+  event is (`GET /v1/plugins/self/calendar/free`).
+- `POST /v1/plugins/self/oauth/relay`: one redirect address an ember can
+  register with a provider for every node; the relay forwards the sign-in
+  to the node (hosted: from any browser; local: same machine).
 
 ## 0.5.96 — 2026-11-06
 

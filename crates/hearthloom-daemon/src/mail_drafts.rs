@@ -89,6 +89,8 @@ struct Message {
     text: String,
     from_me: bool,
     private: bool,
+    /// the sender's UTC offset in minutes, from their Date header
+    offset_minutes: Option<i32>,
 }
 
 fn addresses(list: Option<mail_parser::AddressList>) -> Vec<(String, String)> {
@@ -128,6 +130,14 @@ fn read(state: &AppState, account: &str, id: &str) -> Option<Message> {
         text: seen.text.clone(),
         from_me: seen.from_me,
         private: seen.private,
+        offset_minutes: m.date().map(|d| {
+            let mins = i32::from(d.tz_hour) * 60 + i32::from(d.tz_minute);
+            if d.tz_before_gmt {
+                -mins
+            } else {
+                mins
+            }
+        }),
     })
 }
 
@@ -258,33 +268,54 @@ fn about_a_time(thread_state: Option<&str>, say: Option<&str>) -> bool {
         })
 }
 
-/// The owner's free windows for the next ten days, when Google Calendar
-/// is connected here and the reply is about a time: (time zone, lines).
-async fn free_times(state: &AppState, d: &MailDraft) -> Option<(String, Vec<String>)> {
-    if !crate::google_calendar::connected() {
-        return None;
-    }
+/// Is this reply about a time (the thread waits on scheduling, or the
+/// owner's words say so)?
+fn timely(state: &AppState, d: &MailDraft) -> bool {
     let thread_state = d
         .thread_id
         .as_deref()
         .and_then(|t| state.store.mail_thread(t).ok().flatten())
         .map(|t| t.state);
-    if !about_a_time(thread_state.as_deref(), d.say.as_deref()) {
+    about_a_time(thread_state.as_deref(), d.say.as_deref())
+}
+
+/// The owner's free windows for the next ten days, when Google Calendar
+/// is connected here (the caller checked the reply is about a time).
+async fn free_times(
+    state: &AppState,
+) -> Option<(
+    crate::google_calendar::Hours,
+    Vec<(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+)> {
+    if !crate::google_calendar::connected() {
         return None;
     }
     match crate::google_calendar::free(state, 10, 30).await {
-        Ok((h, windows)) => {
-            let lines: Vec<String> = crate::google_calendar::describe(&h, &windows)
-                .into_iter()
-                .take(8)
-                .collect();
-            (!lines.is_empty()).then(|| (h.tz.name().to_string(), lines))
-        }
+        Ok((h, windows)) => (!windows.is_empty()).then_some((h, windows)),
         Err(err) => {
             tracing::warn!("mail: free times for a draft: {err:#}");
             None
         }
     }
+}
+
+/// The same windows in the other person's zone, when their message's Date
+/// header puts them somewhere else: (their zone, lines). An offset of zero
+/// is skipped — it's as often a server's clock as a person's.
+fn their_zone(
+    their_offset: Option<i32>,
+    h: &crate::google_calendar::Hours,
+    windows: &[(chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)],
+) -> Option<(String, Vec<String>)> {
+    use chrono::Offset;
+    let theirs = their_offset.filter(|o| *o != 0 && o.abs() <= 14 * 60)?;
+    let first = windows.first()?.0;
+    let ours = first.with_timezone(&h.tz).offset().fix().local_minus_utc() / 60;
+    if ours == theirs {
+        return None;
+    }
+    let lines = crate::google_calendar::describe_offset(windows, theirs);
+    Some((crate::google_calendar::utc_label(theirs), lines))
 }
 
 /// Write one draft; the outcome says where it went or why it didn't.
@@ -393,14 +424,42 @@ async fn compose(
                     )
                 }
             ));
-            if let Some(lines) = free_times(state, d).await {
-                prompt.push_str(&format!(
-                    "\nThe owner's free times, from their calendar ({}). When the reply \
-                     proposes or accepts a time, use only these, and offer two or three:\n",
-                    lines.0
-                ));
-                for l in lines.1 {
-                    prompt.push_str(&format!("- {l}\n"));
+            if timely(state, d) {
+                if let Some((h, windows)) = free_times(state).await {
+                    let ours: Vec<String> = crate::google_calendar::describe(&h, &windows)
+                        .into_iter()
+                        .take(8)
+                        .collect();
+                    prompt.push_str(&format!(
+                        "\nThe owner's free times, from their calendar ({}). When the reply \
+                         proposes or accepts a time, use only these, and offer two or three:\n",
+                        h.tz.name()
+                    ));
+                    for l in &ours {
+                        prompt.push_str(&format!("- {l}\n"));
+                    }
+                    if let Some((zone, lines)) = their_zone(target.offset_minutes, &h, &windows) {
+                        prompt.push_str(&format!(
+                            "\nThe person you're answering seems to be at {zone} (their message's \
+                             Date header). Give each time you offer in both zones, the owner's \
+                             first — e.g. \"9:00 AM {} time (6:00 AM {zone})\". The same \
+                             windows in their zone:\n",
+                            h.tz.name()
+                                .rsplit('/')
+                                .next()
+                                .unwrap_or("the owner's")
+                                .replace('_', " ")
+                        ));
+                        for l in lines.into_iter().take(8) {
+                            prompt.push_str(&format!("- {l}\n"));
+                        }
+                    }
+                }
+                if let Some(link) = crate::google_calendar::scheduling_link(state) {
+                    prompt.push_str(&format!(
+                        "\nThe owner's scheduling page — offer it too, for when none of the \
+                         times suit: {link}\n"
+                    ));
                 }
             }
             match d.say.as_deref() {
@@ -804,6 +863,25 @@ mod tests {
             .unwrap();
         let err = compose(&state, &d, "me@x.example").await.unwrap_err();
         assert!(format!("{err:#}").contains("private"), "{err:#}");
+    }
+
+    #[test]
+    fn test_times_go_in_their_zone_only_when_their_date_says_elsewhere() {
+        let h = crate::google_calendar::hours_for_test("America/Halifax");
+        let at = |s: &str| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        let w = vec![(at("2026-11-09T13:00:00Z"), at("2026-11-09T15:00:00Z"))];
+        // Pacific (UTC−8) in November: shown in both
+        let (zone, lines) = their_zone(Some(-480), &h, &w).unwrap();
+        assert_eq!(zone, "UTC−8");
+        assert_eq!(lines, vec!["Mon Nov 9: 5:00 AM–7:00 AM"]);
+        // the owner's own offset (Halifax is UTC−4 then), zero, none: not shown
+        assert!(their_zone(Some(-240), &h, &w).is_none());
+        assert!(their_zone(Some(0), &h, &w).is_none());
+        assert!(their_zone(None, &h, &w).is_none());
     }
 
     #[test]

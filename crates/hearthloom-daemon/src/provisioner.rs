@@ -38,6 +38,112 @@ pub fn secret() -> Option<String> {
         .filter(|s| !s.trim().is_empty())
 }
 
+/* ————— tokens this node signs for Hearthlaunch (0.5.97) —————
+The control-token shape the other way round: base64url(payload) "."
+base64url(HMAC-SHA256(secret, payload)), with claims {purpose, node,
+exp, jti, …}. Hearthlaunch recomputes this tenant's secret from the
+node's label, checks the purpose and never takes a token for another
+one: `google-relay` (the OAuth state of a calendar sign-in),
+`google-web-client` (fetching the shared Web client), `oauth-relay` (an
+ember's sign-in through the relay). */
+pub fn sign_for_provisioner(purpose: &str, extra: Value, ttl_secs: i64) -> Option<String> {
+    let secret = secret()?;
+    let mut claims = json!({
+        "purpose": purpose,
+        "exp": chrono::Utc::now().timestamp() + ttl_secs,
+        "jti": uuid::Uuid::new_v4().simple().to_string(),
+    });
+    if let (Some(c), Some(e)) = (claims.as_object_mut(), extra.as_object()) {
+        for (k, v) in e {
+            c.insert(k.clone(), v.clone());
+        }
+    }
+    encode_token(&secret, &serde_json::to_vec(&claims).ok()?)
+}
+
+fn encode_token(secret: &str, payload: &[u8]) -> Option<String> {
+    use base64::Engine;
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).ok()?;
+    mac.update(payload);
+    let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    Some(format!(
+        "{}.{}",
+        engine.encode(payload),
+        engine.encode(mac.finalize().into_bytes())
+    ))
+}
+
+/// Hearthlaunch's address on a hosted node (`HEARTHLOOM_PROVISIONER_URL`,
+/// which only counts together with the provisioner secret).
+pub fn provisioner_url() -> Option<String> {
+    secret()?;
+    std::env::var("HEARTHLOOM_PROVISIONER_URL")
+        .ok()
+        .map(|u| u.trim().trim_end_matches('/').to_string())
+        .filter(|u| u.starts_with("https://") || u.starts_with("http://"))
+}
+
+const KEY_PUBLIC_HOST: &str = "provisioner.public_host";
+
+fn provisioner_domain() -> Option<String> {
+    reqwest::Url::parse(&provisioner_url()?)
+        .ok()?
+        .host_str()
+        .map(|h| h.to_ascii_lowercase())
+}
+
+/// `metavertbrain` from `metavertbrain.hearthlaunch.com` (one label).
+fn label_of(host: &str, domain: &str) -> Option<String> {
+    let host = host.split(':').next()?.to_ascii_lowercase();
+    let label = host.strip_suffix(&format!(".{domain}"))?;
+    (!label.is_empty()
+        && label.len() <= 63
+        && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+    .then(|| label.to_string())
+}
+
+/// This hosted node's label under Hearthlaunch's domain: from
+/// `HEARTHLOOM_DASHBOARD_URL` (the provisioner sets it on new nodes), else
+/// the host the owner last opened the dashboard at.
+pub fn public_label(state: &AppState) -> Option<String> {
+    let domain = provisioner_domain()?;
+    let from_env = std::env::var("HEARTHLOOM_DASHBOARD_URL")
+        .ok()
+        .and_then(|u| reqwest::Url::parse(&u).ok())
+        .and_then(|u| u.host_str().and_then(|h| label_of(h, &domain)));
+    from_env.or_else(|| {
+        let host = state
+            .store
+            .consolidation_state(KEY_PUBLIC_HOST)
+            .ok()
+            .flatten()?;
+        label_of(&host, &domain)
+    })
+}
+
+/// Remember the host a signed-in owner reached this hosted node at —
+/// only owner requests call this, so nobody else can plant a host.
+pub fn remember_public_host(state: &AppState, host: &str) {
+    let Some(domain) = provisioner_domain() else {
+        return;
+    };
+    if label_of(host, &domain).is_none() {
+        return;
+    }
+    let host = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+    if state
+        .store
+        .consolidation_state(KEY_PUBLIC_HOST)
+        .ok()
+        .flatten()
+        .as_deref()
+        != Some(host.as_str())
+    {
+        let _ = state.store.set_consolidation_state(KEY_PUBLIC_HOST, &host);
+    }
+}
+
 /// jti replay cache — a control token is single-use within its window.
 static SEEN_JTI: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
 
@@ -246,6 +352,34 @@ pub fn notify_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The same vector hearthsaas's Go test verifies (internal/provisioner/
+    /// node_token_test.go): a token this node signs is one Hearthlaunch reads.
+    #[test]
+    fn test_node_tokens_match_hearthlaunchs_vector() {
+        let payload = br#"{"exp":2000000000,"jti":"j1","node":"demo","purpose":"google-relay"}"#;
+        assert_eq!(
+            encode_token("s3cret", payload).unwrap(),
+            "eyJleHAiOjIwMDAwMDAwMDAsImp0aSI6ImoxIiwibm9kZSI6ImRlbW8iLCJwdXJwb3NlIjoiZ29vZ2xlLXJlbGF5In0.ABmtwVUqmNfsL28CBnUdKIFN_nWSNO76CriTPSi1C9c"
+        );
+    }
+
+    #[test]
+    fn test_a_label_is_one_name_under_the_provisioners_domain() {
+        let d = "hearthlaunch.com";
+        assert_eq!(
+            label_of("metavertbrain.hearthlaunch.com", d).as_deref(),
+            Some("metavertbrain")
+        );
+        assert_eq!(
+            label_of("MetavertBrain.Hearthlaunch.com:443", d).as_deref(),
+            Some("metavertbrain")
+        );
+        assert_eq!(label_of("a.b.hearthlaunch.com", d), None);
+        assert_eq!(label_of("hearthlaunch.com", d), None);
+        assert_eq!(label_of("evil-hearthlaunch.com", d), None);
+        assert_eq!(label_of("hearth-t-x.fly.dev", d), None);
+    }
     use base64::Engine;
     use hmac::{Hmac, Mac};
 

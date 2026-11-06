@@ -39,8 +39,16 @@ use hearthloom_core::store::Actor;
 /// (mail_embers.rs).
 /// `mail.draft` (0.5.94): leave a reply draft for mail its watches
 /// matched (mail_drafts.rs) — saved in Drafts, never sent.
-pub const PLUGIN_ALLOWED_SCOPES: &[&str] =
-    &["read", "ingest", "notify", "mail.watch", "mail.draft"];
+/// `calendar.availability` (0.5.97): the owner's free windows, never what
+/// an event is (/v1/plugins/self/calendar/free).
+pub const PLUGIN_ALLOWED_SCOPES: &[&str] = &[
+    "read",
+    "ingest",
+    "notify",
+    "mail.watch",
+    "mail.draft",
+    "calendar.availability",
+];
 
 pub const PROTOCOL: i64 = 1;
 
@@ -701,9 +709,10 @@ pub fn install_from_dir(
     }
     let name = manifest.name.clone();
     let actor = Actor::new("human:dashboard");
-    // Ember-only grants (`mail.watch`, `mail.draft`) are held by the
-    // plugin row, not the key: the mail surface reads them from the row
-    // (mail_embers.rs, mail_drafts.rs).
+    // Ember-only grants (`mail.watch`, `mail.draft`,
+    // `calendar.availability`) are held by the plugin row, not the key: the
+    // surfaces read them from the row (mail_embers.rs, mail_drafts.rs, the
+    // calendar handler).
     let key_scopes: Vec<String> = granted
         .iter()
         .filter(|s| hearthloom_core::store::API_KEY_SCOPES.contains(&s.as_str()))
@@ -711,7 +720,7 @@ pub fn install_from_dir(
         .collect();
     if key_scopes.is_empty() {
         bail!(
-            "{name} needs read, ingest or notify granted too: the mail permissions alone give its key nothing to hold"
+            "{name} needs read, ingest or notify granted too: the mail and calendar permissions alone give its key nothing to hold"
         );
     }
 

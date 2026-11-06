@@ -14,6 +14,23 @@
 //! `free` turns busy blocks into free windows inside the owner's working
 //! hours (settings on this node: days, hours, time zone, calendars, how
 //! much notice). Reply drafts that settle a time offer only these.
+//!
+//! Which client signs in (0.5.97): the owner's own (`calendar setup`),
+//! else Hearthloom's shared Desktop client, which the configured registry
+//! publishes at `/.well-known/hearthloom-oauth` (Google treats an installed
+//! app's secret as not confidential) — so no Cloud console chore. A sign-in
+//! records the client that made it (`ENV_SIGNIN_CLIENT`); refreshes use
+//! that client. Three ways to finish:
+//! - **loopback**: on a local node the daemon listens on 127.0.0.1 (an
+//!   ephemeral port, while the sign-in is pending) and finishes by itself
+//!   when the browser is on this machine;
+//! - **paste**: a browser elsewhere lands on a loopback address that
+//!   doesn't load, and the owner pastes it (`finish`);
+//! - **relay**: a hosted node signs in with Hearthlaunch's shared Web
+//!   client, Google returns to Hearthlaunch, which checks the state this
+//!   node signed and forwards code + state to this node's own
+//!   `/oauth/google/callback`. Hearthlaunch never sees a token: only this
+//!   node holds the PKCE verifier.
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -29,19 +46,36 @@ pub const ENV_CLIENT_ID: &str = "GOOGLE_OAUTH_CLIENT_ID";
 pub const ENV_CLIENT_SECRET: &str = "GOOGLE_OAUTH_CLIENT_SECRET";
 pub const ENV_REFRESH: &str = "GOOGLE_CALENDAR_REFRESH_TOKEN";
 pub const ENV_ACCOUNT: &str = "GOOGLE_CALENDAR_ACCOUNT";
+/// The client ID the saved sign-in came from (absent before 0.5.97: the
+/// owner's own client).
+pub const ENV_SIGNIN_CLIENT: &str = "GOOGLE_CALENDAR_CLIENT";
+/// The shared clients, kept sealed so a restart without the network still
+/// refreshes: the Desktop one from the registry, the Web one a hosted
+/// node fetches from its provisioner.
+const ENV_SHARED_ID: &str = "GOOGLE_SHARED_CLIENT_ID";
+const ENV_SHARED_SECRET: &str = "GOOGLE_SHARED_CLIENT_SECRET";
+const ENV_WEB_ID: &str = "GOOGLE_WEB_CLIENT_ID";
+const ENV_WEB_SECRET: &str = "GOOGLE_WEB_CLIENT_SECRET";
 const SCOPES: &str = "openid email https://www.googleapis.com/auth/calendar.freebusy https://www.googleapis.com/auth/calendar.calendarlist.readonly";
-/// Where Google sends the browser after consent. Nothing needs to answer
-/// there: the owner copies the address it ended on.
+/// Where Google sends the browser when nothing on this machine can listen:
+/// the owner copies the address it ended on.
 pub const REDIRECT_URI: &str = "http://127.0.0.1:43279/hearthloom-calendar";
+const LOOPBACK_PATH: &str = "/hearthloom-calendar";
 const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const API: &str = "https://www.googleapis.com/calendar/v3";
+/// How long a sign-in may take, start to finish.
+const PENDING_FOR: Duration = Duration::from_secs(15 * 60);
 
 pub const KEY_DAYS: &str = "calendar.days";
 pub const KEY_HOURS: &str = "calendar.hours";
 pub const KEY_TZ: &str = "calendar.tz";
 pub const KEY_CALENDARS: &str = "calendar.calendars";
 pub const KEY_NOTICE: &str = "calendar.notice_hours";
+pub const KEY_LINK: &str = "calendar.link";
+/// The ember scope (0.5.97): free windows only, never events — held on the
+/// plugin row like `mail.watch`.
+pub const EMBER_SCOPE: &str = "calendar.availability";
 const DEFAULT_DAYS: &str = "mon,tue,wed,thu,fri";
 const DEFAULT_HOURS: &str = "09:00-18:00";
 const DEFAULT_NOTICE: i64 = 12;
@@ -50,21 +84,190 @@ struct Pending {
     state: String,
     verifier: String,
     started: Instant,
+    redirect_uri: String,
+    client_id: String,
 }
 
 static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
 static TOKEN: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+/// Why the last loopback or relayed sign-in failed (the CLI and the card
+/// read it from `status`); cleared when a sign-in starts.
+static LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
+/// Bumped by every `start`, so an older sign-in's loopback listener stops.
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SHARED_FETCHED: Mutex<Option<Instant>> = Mutex::new(None);
 
 fn env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.trim().is_empty())
 }
 
+/// The owner's own client (`calendar setup`).
 fn client() -> Option<(String, String)> {
     Some((env(ENV_CLIENT_ID)?, env(ENV_CLIENT_SECRET)?))
 }
 
+fn shared_saved() -> Option<(String, String)> {
+    Some((env(ENV_SHARED_ID)?, env(ENV_SHARED_SECRET)?))
+}
+
+fn web_saved() -> Option<(String, String)> {
+    Some((env(ENV_WEB_ID)?, env(ENV_WEB_SECRET)?))
+}
+
 pub fn connected() -> bool {
-    client().is_some() && env(ENV_REFRESH).is_some()
+    env(ENV_REFRESH).is_some()
+}
+
+fn pending_now() -> bool {
+    PENDING
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .is_some_and(|p| p.started.elapsed() < PENDING_FOR)
+}
+
+fn set_last_error(msg: Option<String>) {
+    *LAST_ERROR.lock().unwrap_or_else(|p| p.into_inner()) = msg;
+}
+
+/// A client as Google issues it: an ID ending in .apps.googleusercontent.com
+/// and a secret of letters, digits, `-` and `_`.
+fn plausible(id: &str, secret: &str) -> bool {
+    id.ends_with(".apps.googleusercontent.com")
+        && !id.contains(char::is_whitespace)
+        && secret.len() >= 10
+        && secret
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Hearthloom's shared Desktop client, as the configured registry publishes
+/// it (`/.well-known/hearthloom-oauth`), fetched at most daily unless
+/// `force`d (a refresh Google refused with the saved secret). No registry,
+/// no shared client: a self-hosted node that configured none uses its own.
+async fn shared(state: &AppState, force: bool) -> Option<(String, String)> {
+    let fresh = SHARED_FETCHED
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .is_some_and(|t| t.elapsed() < Duration::from_secs(24 * 3600));
+    if fresh && !force {
+        return shared_saved();
+    }
+    let Some(base) = crate::registry_client::configured_registry() else {
+        return shared_saved();
+    };
+    let fetched = async {
+        let res = reqwest::Client::new()
+            .get(format!("{base}/.well-known/hearthloom-oauth"))
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await?;
+        if !res.status().is_success() {
+            return Ok::<_, anyhow::Error>(None);
+        }
+        let body: Value = res.json().await?;
+        let d = &body["google"]["desktop"];
+        Ok(
+            match (d["client_id"].as_str(), d["client_secret"].as_str()) {
+                (Some(i), Some(s)) if plausible(i, s) => Some((i.to_string(), s.to_string())),
+                _ => None,
+            },
+        )
+    }
+    .await;
+    *SHARED_FETCHED.lock().unwrap_or_else(|p| p.into_inner()) = Some(Instant::now());
+    match fetched {
+        Ok(Some(pair)) => {
+            if shared_saved().as_ref() != Some(&pair) {
+                let _ = hearthloom_core::secrets::set_env_vars(
+                    state.home.root(),
+                    &[(ENV_SHARED_ID, &pair.0), (ENV_SHARED_SECRET, &pair.1)],
+                );
+            }
+            Some(pair)
+        }
+        Ok(None) => shared_saved(),
+        Err(e) => {
+            tracing::warn!("calendar: the shared Google client: {e:#}");
+            shared_saved()
+        }
+    }
+}
+
+/// The shared Web client a hosted node signs in with through Hearthlaunch's
+/// relay, fetched with a token this node signs (its secret never leaves
+/// Hearthlaunch for anyone else).
+async fn web_client(state: &AppState, force: bool) -> Option<(String, String)> {
+    if !force {
+        if let Some(saved) = web_saved() {
+            return Some(saved);
+        }
+    }
+    let base = crate::provisioner::provisioner_url()?;
+    let label = crate::provisioner::public_label(state)?;
+    let token =
+        crate::provisioner::sign_for_provisioner("google-web-client", json!({"node": label}), 120)?;
+    let res = reqwest::Client::new()
+        .post(format!("{base}/oauth/google/web-client"))
+        .timeout(Duration::from_secs(15))
+        .json(&json!({ "token": token }))
+        .send()
+        .await
+        .ok()?;
+    if !res.status().is_success() {
+        tracing::warn!("calendar: the hosted Google client: {}", res.status());
+        return web_saved();
+    }
+    let body: Value = res.json().await.ok()?;
+    let (i, s) = (body["client_id"].as_str()?, body["client_secret"].as_str()?);
+    if !plausible(i, s) {
+        return web_saved();
+    }
+    let pair = (i.to_string(), s.to_string());
+    if web_saved().as_ref() != Some(&pair) {
+        let _ = hearthloom_core::secrets::set_env_vars(
+            state.home.root(),
+            &[(ENV_WEB_ID, &pair.0), (ENV_WEB_SECRET, &pair.1)],
+        );
+    }
+    Some(pair)
+}
+
+/// The secret of the client that made the saved sign-in (looked up again
+/// when `force`d: a rotated shared secret).
+async fn secret_for(state: &AppState, id: &str, force: bool) -> Option<String> {
+    if !force {
+        for (i, s) in [client(), shared_saved(), web_saved()]
+            .into_iter()
+            .flatten()
+        {
+            if i == id {
+                return Some(s);
+            }
+        }
+    }
+    for (i, s) in [shared(state, true).await, web_client(state, true).await]
+        .into_iter()
+        .flatten()
+    {
+        if i == id {
+            return Some(s);
+        }
+    }
+    client().filter(|(i, _)| i == id).map(|(_, s)| s)
+}
+
+/// Which client a new sign-in here would use: "own", "shared" or "hosted".
+fn source() -> Option<&'static str> {
+    if client().is_some() {
+        Some("own")
+    } else if crate::provisioner::provisioner_url().is_some() {
+        Some("hosted")
+    } else if crate::registry_client::configured_registry().is_some() || shared_saved().is_some() {
+        Some("shared")
+    } else {
+        None
+    }
 }
 
 fn random() -> String {
@@ -83,7 +286,10 @@ pub async fn set_client(state: &AppState, id: &str, secret: &str) -> Result<()> 
     let saved = env(ENV_CLIENT_ID);
     let (id, secret) = client_from_input(id, secret, saved.as_deref())?;
     check_with_google(&id, &secret).await?;
-    if saved.as_deref().is_some_and(|s| s != id) {
+    // a sign-in made with the client being replaced goes with it; one made
+    // with the shared client stays (before 0.5.97 every sign-in was the own client's)
+    let signed_with = env(ENV_SIGNIN_CLIENT).or_else(|| saved.clone());
+    if saved.as_deref().is_some_and(|s| s != id) && signed_with == saved {
         disconnect(state)?;
     }
     hearthloom_core::secrets::set_env_vars(
@@ -194,30 +400,91 @@ pub fn reset(state: &AppState) -> Result<()> {
     )
 }
 
-/// The address to open in a browser to connect, and the account Google
-/// is asked to suggest: the Gmail this node reads, the likeliest calendar
-/// (the owner can still choose another).
-pub fn start() -> Result<(String, Option<String>)> {
-    let (id, _) = client()
-        .ok_or_else(|| anyhow!("set up the Google client first (hearthloom calendar setup)"))?;
-    let state = random();
+/// A sign-in under way: the address to open, the account Google is asked
+/// to suggest (the Gmail this node reads, the likeliest calendar — the
+/// owner can still choose another), and how it finishes: "relay" (back by
+/// itself through Hearthlaunch), "loopback" (by itself when the browser is
+/// on this machine, else pasted) or "paste".
+pub struct Started {
+    pub url: String,
+    pub hint: Option<String>,
+    pub mode: &'static str,
+}
+
+pub async fn start(state: &AppState, host: Option<&str>) -> Result<Started> {
+    if let Some(h) = host {
+        crate::provisioner::remember_public_host(state, h);
+    }
+    let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    set_last_error(None);
     let verifier = random();
     let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(sha2::Sha256::digest(verifier.as_bytes()));
     let hint = env("GMAIL_IMAP_USER").filter(|u| u.contains('@'));
-    let url = auth_url(&id, &state, &challenge, hint.as_deref())?;
+    // a hosted node without a client of its own signs in through the relay
+    let relay = match (
+        client(),
+        crate::provisioner::provisioner_url(),
+        crate::provisioner::public_label(state),
+    ) {
+        (None, Some(base), Some(label)) => match web_client(state, false).await {
+            Some((id, _)) => crate::provisioner::sign_for_provisioner(
+                "google-relay",
+                json!({ "node": label }),
+                PENDING_FOR.as_secs() as i64,
+            )
+            .map(|st| (id, format!("{base}/oauth/google/callback"), st)),
+            None => None,
+        },
+        _ => None,
+    };
+    let (client_id, redirect_uri, st, mode) = match relay {
+        Some((id, redirect, st)) => (id, redirect, st, "relay"),
+        None => {
+            let (id, _) = match client() {
+                Some(own) => own,
+                None => shared(state, false).await.ok_or_else(|| {
+                    anyhow!("set up the Google client first (hearthloom calendar setup)")
+                })?,
+            };
+            let (redirect, mode) = if crate::monitor::node_kind() == "local" {
+                match listen(state.clone(), generation).await {
+                    Ok(port) => (
+                        format!("http://127.0.0.1:{port}{LOOPBACK_PATH}"),
+                        "loopback",
+                    ),
+                    Err(e) => {
+                        tracing::warn!("calendar: no loopback listener ({e:#}); paste instead");
+                        (REDIRECT_URI.to_string(), "paste")
+                    }
+                }
+            } else {
+                (REDIRECT_URI.to_string(), "paste")
+            };
+            (id, redirect, random(), mode)
+        }
+    };
+    let url = auth_url(&client_id, &redirect_uri, &st, &challenge, hint.as_deref())?;
     *PENDING.lock().unwrap_or_else(|p| p.into_inner()) = Some(Pending {
-        state,
+        state: st,
         verifier,
         started: Instant::now(),
+        redirect_uri,
+        client_id,
     });
-    Ok((url, hint))
+    Ok(Started { url, hint, mode })
 }
 
-fn auth_url(id: &str, state: &str, challenge: &str, hint: Option<&str>) -> Result<String> {
+fn auth_url(
+    id: &str,
+    redirect_uri: &str,
+    state: &str,
+    challenge: &str,
+    hint: Option<&str>,
+) -> Result<String> {
     let mut params = vec![
         ("client_id", id),
-        ("redirect_uri", REDIRECT_URI),
+        ("redirect_uri", redirect_uri),
         ("response_type", "code"),
         ("scope", SCOPES),
         ("access_type", "offline"),
@@ -230,6 +497,127 @@ fn auth_url(id: &str, state: &str, challenge: &str, hint: Option<&str>) -> Resul
         params.push(("login_hint", h));
     }
     Ok(reqwest::Url::parse_with_params(AUTH_URL, &params)?.to_string())
+}
+
+/// Listen on an ephemeral loopback port while this sign-in is pending: a
+/// browser on this machine lands here and the sign-in finishes by itself.
+/// Loopback only, this one sign-in, at most PENDING_FOR; a newer `start`
+/// stops it.
+async fn listen(state: AppState, generation: u64) -> Result<u16> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + PENDING_FOR;
+        while GENERATION.load(std::sync::atomic::Ordering::SeqCst) == generation
+            && tokio::time::Instant::now() < deadline
+        {
+            let Ok(Ok((mut conn, _))) =
+                tokio::time::timeout(Duration::from_secs(1), listener.accept()).await
+            else {
+                continue;
+            };
+            if answer(&state, &mut conn).await {
+                break;
+            }
+        }
+    });
+    Ok(port)
+}
+
+/// One browser request on the loopback listener; true once the sign-in is
+/// settled (finished, refused or declined).
+async fn answer(state: &AppState, conn: &mut tokio::net::TcpStream) -> bool {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut buf = vec![0u8; 8192];
+    let mut n = 0;
+    while n < buf.len() {
+        match tokio::time::timeout(Duration::from_secs(5), conn.read(&mut buf[n..])).await {
+            Ok(Ok(k)) if k > 0 => {
+                n += k;
+                if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    let head = String::from_utf8_lossy(&buf[..n]);
+    let target = head
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .unwrap_or("")
+        .to_string();
+    let (status, body, settled) = if target.split('?').next() != Some(LOOPBACK_PATH) {
+        ("404 Not Found", String::new(), false)
+    } else {
+        match parse_landing(&format!("http://127.0.0.1{target}")) {
+            Ok((code, st)) => match complete(state, &code, &st).await {
+                Ok(account) => (
+                    "200 OK",
+                    landing_page(true, &connected_message(&account), None),
+                    true,
+                ),
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    // a stray request (another state) leaves the sign-in
+                    // waiting, and this listener up for the real one
+                    let settled = !pending_now();
+                    if settled {
+                        set_last_error(Some(msg.clone()));
+                    }
+                    let status = if settled { "200 OK" } else { "400 Bad Request" };
+                    (status, landing_page(false, &msg, None), settled)
+                }
+            },
+            Err(e) => {
+                let msg = format!("{e:#}");
+                // Google said no (declined, say): the sign-in is over
+                let over = target.contains("error=");
+                if over {
+                    PENDING.lock().unwrap_or_else(|p| p.into_inner()).take();
+                    set_last_error(Some(msg.clone()));
+                }
+                ("400 Bad Request", landing_page(false, &msg, None), over)
+            }
+        }
+    };
+    let reply = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\
+         Cache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = conn.write_all(reply.as_bytes()).await;
+    let _ = conn.shutdown().await;
+    settled
+}
+
+fn connected_message(account: &str) -> String {
+    if account.is_empty() {
+        "Google Calendar is connected. You can close this tab.".into()
+    } else {
+        format!("Google Calendar is connected ({account}). You can close this tab.")
+    }
+}
+
+/// The page a browser lands on when a sign-in finishes here: plain, no
+/// scripts; `back` links to the dashboard.
+pub fn landing_page(ok: bool, msg: &str, back: Option<&str>) -> String {
+    let esc = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    };
+    format!(
+        "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width\">\
+         <title>Hearthloom</title><body style=\"font:16px system-ui,sans-serif;margin:3em auto;\
+         max-width:32em;padding:0 1em\"><h1 style=\"font-size:1.3em\">{}</h1><p>{}</p>{}",
+        if ok { "Connected" } else { "Not connected" },
+        esc(msg),
+        back.map(|b| format!("<p><a href=\"{}\">Back to Hearthloom</a></p>", esc(b)))
+            .unwrap_or_default()
+    )
 }
 
 /// `code` and `state` from the address the browser ended on.
@@ -269,26 +657,75 @@ fn jwt_email(id_token: &str) -> Option<String> {
 /// account's email.
 pub async fn finish(state: &AppState, pasted: &str) -> Result<String> {
     let (code, got_state) = parse_landing(pasted)?;
-    let pending = PENDING
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .take()
-        .ok_or_else(|| anyhow!("no sign-in is waiting here — start again"))?;
-    if pending.started.elapsed() > Duration::from_secs(15 * 60) {
-        bail!("that sign-in took too long — start again");
+    complete(state, &code, &got_state).await
+}
+
+/// A hosted node's sign-in coming back through Hearthlaunch's relay
+/// (`GET /oauth/google/callback`): the state this node signed and the
+/// verifier only it holds are the credentials — no session needed.
+pub async fn relay_callback(state: &AppState, query: &str) -> (bool, String) {
+    let was_pending = pending_now();
+    let result = match parse_landing(&format!("http://x/?{query}")) {
+        Ok((code, st)) => complete(state, &code, &st).await,
+        Err(e) => {
+            // Google said no (declined, say): the sign-in is over
+            if query.contains("error=") {
+                PENDING.lock().unwrap_or_else(|p| p.into_inner()).take();
+            }
+            Err(e)
+        }
+    };
+    match result {
+        Ok(account) => (true, connected_message(&account)),
+        Err(e) => {
+            let msg = format!("{e:#}");
+            // only a request that used up the sign-in is its outcome: a
+            // stray one (anyone can reach this address) leaves no trace
+            if was_pending && !pending_now() {
+                set_last_error(Some(msg.clone()));
+            }
+            (false, msg)
+        }
     }
-    if pending.state != got_state {
-        bail!("that address belongs to a different sign-in — start again");
-    }
-    let (id, secret) = client().ok_or_else(|| anyhow!("the Google client isn't set up"))?;
+}
+
+fn same(a: &str, b: &str) -> bool {
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
+}
+
+/// Exchange Google's code with this sign-in's verifier and client, check
+/// the account has a calendar, and save the sign-in. The pending sign-in
+/// is used up only by its own state, so a stray request can't cancel it.
+async fn complete(state: &AppState, code: &str, got_state: &str) -> Result<String> {
+    let pending = {
+        let mut guard = PENDING.lock().unwrap_or_else(|p| p.into_inner());
+        match guard.as_ref() {
+            None => bail!("no sign-in is waiting here — start again"),
+            Some(p) if p.started.elapsed() > PENDING_FOR => {
+                *guard = None;
+                bail!("that sign-in took too long — start again")
+            }
+            Some(p) if !same(&p.state, got_state) => {
+                bail!("that address belongs to a different sign-in — start again")
+            }
+            Some(_) => guard.take().expect("checked above"),
+        }
+    };
+    let secret = secret_for(state, &pending.client_id, false)
+        .await
+        .ok_or_else(|| anyhow!("the Google client isn't set up"))?;
     let res = reqwest::Client::new()
         .post(TOKEN_URL)
         .timeout(Duration::from_secs(30))
         .form(&[
-            ("code", code.as_str()),
-            ("client_id", id.as_str()),
+            ("code", code),
+            ("client_id", pending.client_id.as_str()),
             ("client_secret", secret.as_str()),
-            ("redirect_uri", REDIRECT_URI),
+            ("redirect_uri", pending.redirect_uri.as_str()),
             ("grant_type", "authorization_code"),
             ("code_verifier", pending.verifier.as_str()),
         ])
@@ -336,7 +773,11 @@ pub async fn finish(state: &AppState, pasted: &str) -> Result<String> {
     }
     hearthloom_core::secrets::set_env_vars(
         state.home.root(),
-        &[(ENV_REFRESH, refresh), (ENV_ACCOUNT, &account)],
+        &[
+            (ENV_REFRESH, refresh),
+            (ENV_ACCOUNT, &account),
+            (ENV_SIGNIN_CLIENT, &pending.client_id),
+        ],
     )?;
     if let (Some(token), Some(secs)) = (body["access_token"].as_str(), body["expires_in"].as_u64())
     {
@@ -345,6 +786,7 @@ pub async fn finish(state: &AppState, pasted: &str) -> Result<String> {
             Instant::now() + Duration::from_secs(secs.saturating_sub(60)),
         ));
     }
+    set_last_error(None);
     crate::agents::publish_self(state);
     Ok(account)
 }
@@ -353,55 +795,75 @@ pub fn disconnect(state: &AppState) -> Result<()> {
     *TOKEN.lock().unwrap_or_else(|p| p.into_inner()) = None;
     hearthloom_core::secrets::set_env_vars(
         state.home.root(),
-        &[(ENV_REFRESH, ""), (ENV_ACCOUNT, "")],
+        &[
+            (ENV_REFRESH, ""),
+            (ENV_ACCOUNT, ""),
+            (ENV_SIGNIN_CLIENT, ""),
+        ],
     )?;
     crate::agents::publish_self(state);
     Ok(())
 }
 
-async fn access_token() -> Result<String> {
+async fn access_token(state: &AppState) -> Result<String> {
     if let Some((t, until)) = TOKEN.lock().unwrap_or_else(|p| p.into_inner()).clone() {
         if Instant::now() < until {
             return Ok(t);
         }
     }
-    let (id, secret) = client().ok_or_else(|| anyhow!("the Google client isn't set up"))?;
     let refresh = env(ENV_REFRESH).ok_or_else(|| anyhow!("Google Calendar isn't connected"))?;
-    let res = reqwest::Client::new()
-        .post(TOKEN_URL)
-        .timeout(Duration::from_secs(30))
-        .form(&[
-            ("client_id", id.as_str()),
-            ("client_secret", secret.as_str()),
-            ("refresh_token", refresh.as_str()),
-            ("grant_type", "refresh_token"),
-        ])
-        .send()
-        .await?;
-    let status = res.status();
-    let body: Value = res.json().await.unwrap_or_default();
-    if !status.is_success() {
-        bail!(
-            "Google refused the saved sign-in ({}) — connect again",
-            body["error"].as_str().unwrap_or("unknown")
-        );
+    // before 0.5.97 every sign-in was the owner's own client's
+    let id = env(ENV_SIGNIN_CLIENT)
+        .or_else(|| env(ENV_CLIENT_ID))
+        .ok_or_else(|| {
+            anyhow!("this node doesn't know which Google client signed in — connect again")
+        })?;
+    let mut forced = false;
+    loop {
+        let secret = secret_for(state, &id, forced).await.ok_or_else(|| {
+            anyhow!("the Google client that signed in is gone — connect again (hearthloom calendar connect)")
+        })?;
+        let res = reqwest::Client::new()
+            .post(TOKEN_URL)
+            .timeout(Duration::from_secs(30))
+            .form(&[
+                ("client_id", id.as_str()),
+                ("client_secret", secret.as_str()),
+                ("refresh_token", refresh.as_str()),
+                ("grant_type", "refresh_token"),
+            ])
+            .send()
+            .await?;
+        let status = res.status();
+        let body: Value = res.json().await.unwrap_or_default();
+        if !status.is_success() {
+            // a shared secret rotated since it was saved: look it up again, once
+            if body["error"] == json!("invalid_client") && !forced {
+                forced = true;
+                continue;
+            }
+            bail!(
+                "Google refused the saved sign-in ({}) — connect again",
+                body["error"].as_str().unwrap_or("unknown")
+            );
+        }
+        let token = body["access_token"]
+            .as_str()
+            .ok_or_else(|| anyhow!("Google sent no access token"))?
+            .to_string();
+        let secs = body["expires_in"].as_u64().unwrap_or(3600);
+        *TOKEN.lock().unwrap_or_else(|p| p.into_inner()) = Some((
+            token.clone(),
+            Instant::now() + Duration::from_secs(secs.saturating_sub(60)),
+        ));
+        return Ok(token);
     }
-    let token = body["access_token"]
-        .as_str()
-        .ok_or_else(|| anyhow!("Google sent no access token"))?
-        .to_string();
-    let secs = body["expires_in"].as_u64().unwrap_or(3600);
-    *TOKEN.lock().unwrap_or_else(|p| p.into_inner()) = Some((
-        token.clone(),
-        Instant::now() + Duration::from_secs(secs.saturating_sub(60)),
-    ));
-    Ok(token)
 }
 
-async fn api_get(path: &str) -> Result<Value> {
+async fn api_get(state: &AppState, path: &str) -> Result<Value> {
     let res = reqwest::Client::new()
         .get(format!("{API}{path}"))
-        .bearer_auth(access_token().await?)
+        .bearer_auth(access_token(state).await?)
         .timeout(Duration::from_secs(30))
         .send()
         .await?;
@@ -442,9 +904,12 @@ fn api_error(body: &Value, fallback: &str) -> anyhow::Error {
 
 /// The account's calendars: id, name, primary, shown in Google Calendar,
 /// time zone.
-pub async fn calendars() -> Result<Vec<Value>> {
-    let body =
-        api_get("/users/me/calendarList?minAccessRole=freeBusyReader&maxResults=250").await?;
+pub async fn calendars(state: &AppState) -> Result<Vec<Value>> {
+    let body = api_get(
+        state,
+        "/users/me/calendarList?minAccessRole=freeBusyReader&maxResults=250",
+    )
+    .await?;
     Ok(body["items"]
         .as_array()
         .into_iter()
@@ -462,13 +927,14 @@ pub async fn calendars() -> Result<Vec<Value>> {
 
 /// Busy blocks across these calendars between two instants.
 pub async fn busy(
+    state: &AppState,
     ids: &[String],
     from: DateTime<Utc>,
     to: DateTime<Utc>,
 ) -> Result<Vec<(DateTime<Utc>, DateTime<Utc>)>> {
     let res = reqwest::Client::new()
         .post(format!("{API}/freeBusy"))
-        .bearer_auth(access_token().await?)
+        .bearer_auth(access_token(state).await?)
         .timeout(Duration::from_secs(30))
         .json(&json!({
             "timeMin": from.to_rfc3339(), "timeMax": to.to_rfc3339(),
@@ -630,7 +1096,7 @@ pub fn free_windows(
 /// The calendars that count as busy: the owner's choice, else the primary
 /// and every calendar shown in Google Calendar.
 async fn busy_calendars(state: &AppState) -> Result<(Vec<String>, Option<String>)> {
-    let cals = calendars().await?;
+    let cals = calendars(state).await?;
     let tz = cals
         .iter()
         .find(|c| c["primary"] == json!(true))
@@ -655,7 +1121,7 @@ pub async fn free(
     let (ids, tz) = busy_calendars(state).await?;
     let h = hours(state, tz.as_deref());
     let now = Utc::now();
-    let blocks = busy(&ids, now, now + chrono::Duration::days(days + 1)).await?;
+    let blocks = busy(state, &ids, now, now + chrono::Duration::days(days + 1)).await?;
     Ok((h.clone(), free_windows(&h, &blocks, now, days, minutes)))
 }
 
@@ -676,19 +1142,79 @@ pub fn describe(h: &Hours, windows: &[(DateTime<Utc>, DateTime<Utc>)]) -> Vec<St
         .collect()
 }
 
+/// Working hours in a given zone, for tests elsewhere in the crate.
+#[cfg(test)]
+pub fn hours_for_test(tz: &str) -> Hours {
+    Hours {
+        days: parse_days(DEFAULT_DAYS).unwrap(),
+        start: NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+        end: NaiveTime::from_hms_opt(18, 0, 0).unwrap(),
+        tz: tz.parse().unwrap(),
+        notice_hours: 0,
+    }
+}
+
+/// The same windows at a fixed UTC offset (another person's zone, from
+/// their message's Date header), in `describe`'s form.
+pub fn describe_offset(
+    windows: &[(DateTime<Utc>, DateTime<Utc>)],
+    offset_minutes: i32,
+) -> Vec<String> {
+    let Some(tz) = chrono::FixedOffset::east_opt(offset_minutes * 60) else {
+        return Vec::new();
+    };
+    let mut lines: Vec<(chrono::NaiveDate, Vec<String>)> = Vec::new();
+    for (s, e) in windows {
+        let (s, e) = (s.with_timezone(&tz), e.with_timezone(&tz));
+        let span = format!("{}–{}", s.format("%-I:%M %p"), e.format("%-I:%M %p"));
+        match lines.last_mut() {
+            Some((d, spans)) if *d == s.date_naive() => spans.push(span),
+            _ => lines.push((s.date_naive(), vec![span])),
+        }
+    }
+    lines
+        .into_iter()
+        .map(|(d, spans)| format!("{}: {}", d.format("%a %b %-d"), spans.join(", ")))
+        .collect()
+}
+
+/// "UTC−8", "UTC+5:30".
+pub fn utc_label(offset_minutes: i32) -> String {
+    let sign = if offset_minutes < 0 { '−' } else { '+' };
+    let (h, m) = (offset_minutes.abs() / 60, offset_minutes.abs() % 60);
+    if m == 0 {
+        format!("UTC{sign}{h}")
+    } else {
+        format!("UTC{sign}{h}:{m:02}")
+    }
+}
+
 pub fn status(state: &AppState) -> Value {
     let h = hours(state, None);
+    let source = source();
     json!({
-        "client": client().is_some(),
+        "client": source.is_some(),
+        // "own" (calendar setup), "shared" (Hearthloom's, from the registry)
+        // or "hosted" (signs in through Hearthlaunch's relay)
+        "client_source": source,
         // not a secret: Google puts it in every sign-in address
-        "client_id": env(ENV_CLIENT_ID),
+        "client_id": client().map(|c| c.0).or_else(|| match source {
+            Some("hosted") => web_saved().map(|c| c.0),
+            _ => shared_saved().map(|c| c.0),
+        }),
+        "signed_in_with": connected()
+            .then(|| env(ENV_SIGNIN_CLIENT).or_else(|| env(ENV_CLIENT_ID)))
+            .flatten(),
         "connected": connected(),
+        "pending": pending_now(),
+        "sign_in_error": LAST_ERROR.lock().unwrap_or_else(|p| p.into_inner()).clone(),
         "account": env(ENV_ACCOUNT),
         "days": h.days.iter().map(|d| d.to_string().to_lowercase()).collect::<Vec<_>>(),
         "hours": format!("{}-{}", h.start.format("%H:%M"), h.end.format("%H:%M")),
         "time_zone": setting(state, KEY_TZ),
         "calendars": setting(state, KEY_CALENDARS),
         "notice_hours": h.notice_hours,
+        "link": setting(state, KEY_LINK),
         "redirect_uri": REDIRECT_URI,
     })
 }
@@ -723,7 +1249,28 @@ pub fn set(state: &AppState, body: &Value) -> Result<()> {
         }
         put(KEY_NOTICE, &n.to_string())?;
     }
+    if let Some(link) = body["link"].as_str() {
+        let link = link.trim();
+        if !link.is_empty() && !scheduling_link_ok(link) {
+            bail!("a scheduling link is an https address, like https://calendly.com/you");
+        }
+        put(KEY_LINK, link)?;
+    }
     Ok(())
+}
+
+/// The owner's scheduling page (Google appointment schedule, Calendly,
+/// Cal.com…): an https address, offered in drafts beside free times.
+fn scheduling_link_ok(link: &str) -> bool {
+    link.len() <= 300
+        && !link.contains(char::is_whitespace)
+        && reqwest::Url::parse(link)
+            .is_ok_and(|u| u.scheme() == "https" && u.host_str().is_some_and(|h| h.contains('.')))
+}
+
+/// The owner's scheduling link, when one is set.
+pub fn scheduling_link(state: &AppState) -> Option<String> {
+    setting(state, KEY_LINK).filter(|l| scheduling_link_ok(l))
 }
 
 #[cfg(test)]
@@ -865,6 +1412,7 @@ mod tests {
     fn test_the_sign_in_suggests_the_gmail_account_and_names_a_calendarless_one() {
         let with = auth_url(
             "id.apps.googleusercontent.com",
+            REDIRECT_URI,
             "st",
             "ch",
             Some("sam@x.example"),
@@ -872,7 +1420,14 @@ mod tests {
         .unwrap();
         assert!(with.contains("login_hint=sam%40x.example"), "{with}");
         assert!(with.contains("prompt=consent") && with.contains("access_type=offline"));
-        let without = auth_url("id.apps.googleusercontent.com", "st", "ch", None).unwrap();
+        let without = auth_url(
+            "id.apps.googleusercontent.com",
+            REDIRECT_URI,
+            "st",
+            "ch",
+            None,
+        )
+        .unwrap();
         assert!(!without.contains("login_hint"), "{without}");
         // what Google says for an account with no Google Calendar (2026-11-06)
         let body = json!({"error": {"code": 403, "message": "The user must be signed up for Google Calendar.",
@@ -890,6 +1445,69 @@ mod tests {
             api_error(&other, "x").to_string(),
             "Google Calendar: Rate limit exceeded"
         );
+    }
+
+    #[test]
+    fn test_times_in_their_zone_the_link_and_the_landing_page() {
+        let at = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let w = vec![(at("2026-11-09T13:00:00Z"), at("2026-11-09T15:00:00Z"))];
+        assert_eq!(
+            describe_offset(&w, -8 * 60),
+            vec!["Mon Nov 9: 5:00 AM–7:00 AM"]
+        );
+        assert_eq!(describe_offset(&w, 330), vec!["Mon Nov 9: 6:30 PM–8:30 PM"]);
+        assert_eq!(utc_label(-480), "UTC−8");
+        assert_eq!(utc_label(330), "UTC+5:30");
+        assert!(scheduling_link_ok("https://calendly.com/sam/30min"));
+        assert!(!scheduling_link_ok("http://calendly.com/sam"));
+        assert!(!scheduling_link_ok("https://cal com/sam"));
+        assert!(!scheduling_link_ok("javascript:alert(1)"));
+        let page = landing_page(false, "<b>no</b> & \"x\"", Some("/#/integrations"));
+        assert!(
+            page.contains("&lt;b&gt;no&lt;/b&gt; &amp; &quot;x&quot;"),
+            "{page}"
+        );
+        assert!(page.contains("href=\"/#/integrations\"") && !page.contains("<script"));
+        assert!(same("abc", "abc") && !same("abc", "abd") && !same("abc", "ab"));
+    }
+
+    /// A stray request (a wrong state) is refused without using up the
+    /// pending sign-in; only its own state takes it.
+    #[tokio::test]
+    async fn test_only_the_sign_ins_own_state_can_finish_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::paths::Home::at(tmp.path());
+        home.init().unwrap();
+        let state = AppState {
+            store: std::sync::Arc::new(
+                hearthloom_core::store::Store::open(&home.db_path()).unwrap(),
+            ),
+            home,
+            embedder: None,
+            llm: None,
+            auth_locked: Default::default(),
+            bus: Default::default(),
+            killswitch: Default::default(),
+            running: Default::default(),
+        };
+        *PENDING.lock().unwrap() = Some(Pending {
+            state: "the-real-state".into(),
+            verifier: "v".into(),
+            started: Instant::now(),
+            redirect_uri: REDIRECT_URI.into(),
+            client_id: "nobody.apps.googleusercontent.com".into(),
+        });
+        let e = complete(&state, "code", "a-forged-state")
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("different sign-in"), "{e}");
+        assert!(pending_now(), "a stray request must not cancel the sign-in");
+        // its own state takes it (the exchange then fails: no such client here)
+        let e = complete(&state, "code", "the-real-state")
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("isn't set up"), "{e}");
+        assert!(!pending_now());
     }
 
     #[test]

@@ -419,6 +419,15 @@ enum CalendarCmd {
     Disconnect,
     /// Forget the Google client and the sign-in here (then setup again).
     Reset,
+    /// Your scheduling page (Google appointment schedule, Calendly,
+    /// Cal.com…), offered in drafts that settle a time: `link <https://…>`,
+    /// `link` to show it, `link --clear`.
+    Link {
+        /// https://… (not `url`: that's the global --url, the node to talk to)
+        address: Option<String>,
+        #[arg(long)]
+        clear: bool,
+    },
     /// The calendars the account can see.
     Calendars,
     /// When you're free in your working hours.
@@ -1595,6 +1604,10 @@ async fn main() -> Result<()> {
                 CalendarCmd::Connect => Op::Connect,
                 CalendarCmd::Disconnect => Op::Disconnect,
                 CalendarCmd::Reset => Op::Reset,
+                CalendarCmd::Link { address, clear } => Op::Link {
+                    url: address,
+                    clear,
+                },
                 CalendarCmd::Calendars => Op::Calendars,
                 CalendarCmd::Free { days, minutes } => Op::Free { days, minutes },
                 CalendarCmd::Hours {

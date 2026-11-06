@@ -87,8 +87,8 @@ Field notes:
   namespace, and your URL segment. `self` and `ui` are reserved.
 - `scopes` — what you *request*; the user (not you) decides what's
   granted. Plugins may request only `read`, `ingest`, `notify`,
-  `mail.watch` and `mail.draft` (the mail ones come with at least one of
-  the first three).
+  `mail.watch`, `mail.draft` and `calendar.availability` (the mail and
+  calendar ones come with at least one of the first three).
   Infrastructure scopes (`admin`, `peer`, `friend`, `write`, `mcp`) are
   never grantable to plugins.
 - `launch` — optional, relative path to an executable per platform.
@@ -263,6 +263,26 @@ as the redirect URI with the provider, then:
 
 Pending sign-ins live in the memory of the node the redirect address
 points at — tell users to sign in from that node's dashboard.
+
+**One redirect address for every node (the relay, 0.5.97).** A provider
+that needs every redirect address registered can't list each user's
+node. Ask the daemon first: `POST /v1/plugins/self/oauth/relay` →
+`{"redirect_uri", "state", "works_from"}`. Register that one
+`redirect_uri` (Hearthlaunch's `/oauth/relay/callback`) with the
+provider, build your authorize URL with that `state`, and continue at
+step 1. On a hosted node the state is signed by the node, and the relay
+forwards the sign-in to this node's `/plugins/<name>/oauth/callback`
+from any browser. On a local node with a registry configured, the relay
+can only bounce the browser to this machine's own loopback, so the user
+signs in from a browser on the same machine (`works_from` says which).
+A node with neither answers 409: use the node's own callback address.
+
+### Free time (with `calendar.availability`)
+
+`GET /v1/plugins/self/calendar/free?days=7&minutes=30` → `{"time_zone",
+"windows": [{"start", "end"}], "lines"}`: when the person is free inside
+their working hours, from the Google Calendar connected on this node
+(409 when none is). Free windows only — never what an event is.
 
 ### Movement (with `ingest`)
 

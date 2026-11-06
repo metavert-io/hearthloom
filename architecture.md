@@ -334,11 +334,21 @@ tool-less model write the reply, and APPENDs it to the folder Gmail marks
 `\Drafts` with the `\Draft` flag (`gmail_imap::save_draft`; the message
 itself from `mail_compose`, 7-bit). Nothing is sent or changed.
 
-**Google Calendar free/busy (`google_calendar.rs`).** The owner's own
-Desktop-app OAuth client and a PKCE sign-in finished by pasting the
-landing address; the refresh token is sealed on that node. Free windows =
-working hours (node settings) minus free/busy blocks; drafts about a time
-get them in the prompt.
+**Google Calendar free/busy (`google_calendar.rs`).** A PKCE sign-in with
+the owner's own Desktop-app client (`calendar setup`) or, when a registry
+is configured, Hearthloom's shared one (published at the registry's
+`/.well-known/hearthloom-oauth`). On a local node a loopback listener
+(ephemeral port, only while a sign-in is pending) finishes it when the
+browser is on the same machine; elsewhere the landing address is pasted.
+A hosted node signs in with Hearthlaunch's Web client: Google returns to
+Hearthlaunch, which checks the state the node signed with its provisioner
+secret and forwards code + state to the node's own
+`/oauth/google/callback`; only the node holds the PKCE verifier and the
+tokens. The refresh token is sealed with the client that made it. Free
+windows = working hours (node settings) minus free/busy blocks; drafts
+about a time get them in the prompt (in the other person's zone too, from
+their Date header, and the owner's scheduling link). Embers get free
+windows only, through `calendar.availability`.
 
 A mail archive's sidecar indexes the headers when it is built, and its
 message text and links in the background afterwards (`mbox_text.rs`; big

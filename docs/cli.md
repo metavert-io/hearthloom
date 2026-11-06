@@ -122,7 +122,9 @@ hearthloom calendar setup        # your Google Cloud Desktop-app client: paste t
                                  # (or drop the file in), or just the secret; checked with Google before it's saved
 hearthloom calendar setup --file ~/Downloads/client_secret_….json
 hearthloom calendar connect      # sign in with the account whose calendar you use (it suggests the Gmail this node
-                                 # reads), then paste the address the browser lands on
+                                 # reads); finishes by itself when the browser is on this machine (or on a hosted node),
+                                 # else paste the address the browser lands on
+hearthloom calendar link https://calendly.com/you   # your scheduling page, offered in drafts beside free times
 hearthloom calendar              # connected? which account, your working hours
 hearthloom calendar hours --days mon,tue,wed,thu,fri --hours 09:00-18:00 --tz America/New_York --notice 12
 hearthloom calendar calendars    # what the account can see; --calendars <id,id> on `hours` picks the busy ones
@@ -131,6 +133,9 @@ hearthloom calendar disconnect   # forget the sign-in; the client stays
 hearthloom calendar reset        # forget the client and the sign-in, then set up again
 ```
 
+A node that uses a registry (Hearthlaunch) needs no `setup`: it signs in
+with Hearthloom's shared Google client, and a hosted node signs in through
+Hearthlaunch in one click. `setup` is for your own client, which wins.
 `setup` reads the ID and secret out of the downloaded JSON (pasted whole,
 a file dropped into the terminal, or `--file`), or takes the secret alone
 and keeps the client ID saved on the node. It asks Google whether the

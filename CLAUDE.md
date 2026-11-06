@@ -1159,6 +1159,22 @@ the design log 2026-07-14.
   a dot-segment (plain or `%2e`), a backslash or `//` — views build paths
   from the address bar, so keep every request on `api`/`apiPost`/
   `apiDelete`. An ember page opens only a page the ember declared.
+- **A CALENDAR SIGN-IN BELONGS TO ITS CLIENT; CODES ONLY TRAVEL (0.5.97).**
+  The refresh token is sealed with the client ID that made it
+  (`GOOGLE_CALENDAR_CLIENT`; absent = the own client, pre-0.5.97) and
+  refreshes use that client's secret (`secret_for`: own, shared Desktop
+  from the registry's `/.well-known/hearthloom-oauth`, hosted Web from the
+  provisioner) — never "the current client". A pending sign-in is used up
+  only by its own state (`complete` checks before taking), so the loopback
+  listener and `/oauth/google/callback` ignore stray requests and record no
+  error for them. `/oauth/google/callback` is pre-auth AND static-class (a
+  same-site navigation from Hearthlaunch): its credentials are the state
+  this node signed and the PKCE verifier only it holds — never add cookie
+  or session logic to it, and never forward or log the code. Tokens this
+  node signs for Hearthlaunch (`provisioner::sign_for_provisioner`) carry a
+  purpose (`google-relay`, `google-web-client`, `oauth-relay`) that
+  Hearthlaunch checks; `test_node_tokens_match_hearthlaunchs_vector` pins
+  the format to hearthsaas's Go verifier.
 - **GOOGLE CALENDAR IS FREE/BUSY ONLY (0.5.95, google_calendar.rs).**
   Scopes stay `calendar.freebusy` + `calendar.calendarlist.readonly`
   (+ `openid email` for the account's name): never a scope that reads

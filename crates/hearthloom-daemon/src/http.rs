@@ -162,6 +162,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/calendar/connect/finish", post(calendar_connect_finish))
         .route("/v1/calendar/disconnect", post(calendar_disconnect))
         .route("/v1/calendar/reset", post(calendar_reset))
+        // Hearthlaunch's relay brings a hosted node's sign-in back here (pre-auth)
+        .route("/oauth/google/callback", get(google_relay_callback))
         .route("/v1/calendar/calendars", get(calendar_calendars))
         .route("/v1/calendar/free", get(calendar_free))
         .route("/v1/mail/drafts", get(mail_drafts_get))
@@ -324,6 +326,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/plugins/self/oauth/pending", post(plugin_oauth_pending))
         .route("/v1/plugins/self/oauth/take", post(plugin_oauth_take))
+        .route("/v1/plugins/self/oauth/relay", post(plugin_oauth_relay))
+        .route("/v1/plugins/self/calendar/free", get(plugin_calendar_free))
         .route(
             "/v1/plugins/self/mail/watches",
             get(plugin_mail_watches).post(plugin_mail_watch_set),
@@ -1539,6 +1543,9 @@ fn is_pre_auth_path(path: &str) -> bool {
         // self-authenticating via X-Provisioner-Token (higher-than-admin;
         // the session gate must never run first — a provisioner requirement, 2026-07-17)
         || path.starts_with("/v1/provisioner/")
+        // a calendar sign-in back from Hearthlaunch's relay: its signed state
+        // and this node's PKCE verifier are the credentials (google_calendar.rs)
+        || path == "/oauth/google/callback"
 }
 
 /// Static files only — the dashboard shell, its assets, plugin page
@@ -1548,6 +1555,9 @@ fn is_static_path(path: &str) -> bool {
         || path == "/health"
         || path.starts_with("/assets/")
         || path.starts_with("/plugins/")
+        // a top-level navigation from Hearthlaunch's relay (same-site), like
+        // an ember's /plugins/<name>/oauth/callback: it needs no cookie
+        || path == "/oauth/google/callback"
 }
 
 /// Did a web page on ANOTHER site make this request? Browsers say so in
@@ -4030,6 +4040,17 @@ async fn auth_me(
 ) -> Result<Json<Value>, ApiError> {
     let locked = state.auth_locked.load(std::sync::atomic::Ordering::Relaxed);
     let user = session_cookie(&req).and_then(|t| state.store.session_user(&t).ok().flatten());
+    // a signed-in owner's dashboard host tells a hosted node its own name
+    // under Hearthlaunch's domain (for the sign-in relays)
+    if user.is_some() {
+        if let Some(host) = req
+            .headers()
+            .get(axum::http::header::HOST)
+            .and_then(|v| v.to_str().ok())
+        {
+            crate::provisioner::remember_public_host(&state, host);
+        }
+    }
     // A provisioner-managed node (hearthlaunch tenant): the sign-in UI
     // hands the user back to the provisioner's own login/handoff instead
     // of the local password form — the provisioner re-enters via the
@@ -5655,12 +5676,51 @@ async fn calendar_reset(
 async fn calendar_connect(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthInfo>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     require_owner(&auth, "connect Google Calendar")?;
-    let (url, hint) = crate::google_calendar::start().map_err(|e| bad_request(format!("{e:#}")))?;
-    Ok(Json(
-        json!({"url": url, "account_hint": hint, "status": crate::google_calendar::status(&state)}),
-    ))
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok());
+    let started = crate::google_calendar::start(&state, host)
+        .await
+        .map_err(|e| bad_request(format!("{e:#}")))?;
+    Ok(Json(json!({
+        "url": started.url,
+        "account_hint": started.hint,
+        // relay | loopback | paste: how this sign-in comes back
+        "mode": started.mode,
+        "status": crate::google_calendar::status(&state),
+    })))
+}
+
+/// A hosted node's calendar sign-in coming back through Hearthlaunch's
+/// relay. Pre-auth by design (THE BROWSER RULE's static class): the state
+/// this node signed and the PKCE verifier only it holds authenticate it,
+/// never a cookie — a forged or replayed request finds no pending sign-in.
+async fn google_relay_callback(
+    State(state): State<AppState>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> Response {
+    let (ok, msg) =
+        crate::google_calendar::relay_callback(&state, query.as_deref().unwrap_or("")).await;
+    let page = crate::google_calendar::landing_page(ok, &msg, Some("/#/integrations"));
+    let mut res = if ok {
+        // the address with the code leaves the bar; the card shows it connected
+        axum::response::Redirect::to("/#/integrations").into_response()
+    } else {
+        (StatusCode::BAD_REQUEST, axum::response::Html(page)).into_response()
+    };
+    let h = res.headers_mut();
+    h.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    h.insert(
+        axum::http::header::REFERRER_POLICY,
+        axum::http::HeaderValue::from_static("no-referrer"),
+    );
+    res
 }
 
 #[derive(Deserialize)]
@@ -5693,10 +5753,11 @@ async fn calendar_disconnect(
 }
 
 async fn calendar_calendars(
+    State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthInfo>,
 ) -> Result<Json<Value>, ApiError> {
     require_owner(&auth, "see your calendars")?;
-    let cals = crate::google_calendar::calendars()
+    let cals = crate::google_calendar::calendars(&state)
         .await
         .map_err(|e| bad_request(format!("{e:#}")))?;
     Ok(Json(json!({"calendars": cals})))
@@ -14318,6 +14379,103 @@ async fn plugin_oauth_pending(
         "pending": true,
         // where the provider must send the user back
         "callback_path": format!("/plugins/{plugin}/oauth/callback"),
+    })))
+}
+
+/// A redirect address + state an ember can register with a provider when
+/// it can't list every node's own callback address: Hearthlaunch's relay
+/// forwards the sign-in to `/plugins/<name>/oauth/callback` here. A hosted
+/// node signs the state (the relay checks it against this tenant); a local
+/// node's relay can only bounce the browser to its own loopback, so it
+/// works when the browser runs on this machine. The ember then registers
+/// the pending sign-in with this state as usual.
+async fn plugin_oauth_relay(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    let plugin = bound_plugin(&state, &auth)?;
+    let hosted = crate::provisioner::provisioner_url()
+        .zip(crate::provisioner::public_label(&state))
+        .and_then(|(base, label)| {
+            crate::provisioner::sign_for_provisioner(
+                "oauth-relay",
+                json!({ "node": label, "plugin": plugin }),
+                3600,
+            )
+            .map(|st| (base, st))
+        });
+    let (base, st, reach) = match hosted {
+        Some((base, st)) => (base, st, "any browser"),
+        None => {
+            let base = crate::registry_client::configured_registry().ok_or_else(|| {
+                ApiError(
+                    StatusCode::CONFLICT,
+                    "no relay here: this node isn't hosted and has no registry configured — register this node's own /plugins/<name>/oauth/callback address with the provider".into(),
+                )
+            })?;
+            let port = std::env::var("HEARTHLOOM_PORT")
+                .ok()
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(43278);
+            let nonce = uuid::Uuid::new_v4().simple().to_string();
+            (
+                base,
+                format!("l.{port}.{plugin}.{nonce}"),
+                "a browser on this machine",
+            )
+        }
+    };
+    Ok(Json(json!({
+        "redirect_uri": format!("{base}/oauth/relay/callback"),
+        "state": st,
+        "works_from": reach,
+        "callback_path": format!("/plugins/{plugin}/oauth/callback"),
+    })))
+}
+
+#[derive(Deserialize)]
+struct PluginFreeParams {
+    #[serde(default)]
+    days: Option<i64>,
+    #[serde(default)]
+    minutes: Option<i64>,
+}
+
+/// `calendar.availability` (0.5.97): when the owner is free inside their
+/// working hours — free windows only, never what an event is. Held on the
+/// plugin row like `mail.watch`, so the handler checks it.
+async fn plugin_calendar_free(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<PluginFreeParams>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    let plugin = bound_plugin(&state, &auth)?;
+    let granted = matches!(state.store.plugin(&plugin), Ok(Some(row))
+        if row.granted_scopes.iter().any(|s| s == crate::google_calendar::EMBER_SCOPE));
+    if !granted {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            format!(
+                "{plugin} wasn't given {} — the owner grants it when installing",
+                crate::google_calendar::EMBER_SCOPE
+            ),
+        ));
+    }
+    if !crate::google_calendar::connected() {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "Google Calendar isn't connected on this node".into(),
+        ));
+    }
+    let days = q.days.unwrap_or(7).clamp(1, 14);
+    let minutes = q.minutes.unwrap_or(30).clamp(15, 240);
+    let (h, windows) = crate::google_calendar::free(&state, days, minutes)
+        .await
+        .map_err(|e| bad_request(format!("{e:#}")))?;
+    Ok(Json(json!({
+        "time_zone": h.tz.name(),
+        "windows": windows.iter().map(|(s, e)| json!({"start": s.to_rfc3339(), "end": e.to_rfc3339()})).collect::<Vec<_>>(),
+        "lines": crate::google_calendar::describe(&h, &windows),
     })))
 }
 
