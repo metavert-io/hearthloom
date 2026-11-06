@@ -317,6 +317,15 @@ decide first, and a tool-less model sorts what is new (needs a reply, a
 time, a look; fyi; ignore), quoting the words that decided it. Threads
 and rules mirror; the Desk shows what waits on the owner.
 
+**Embers watching mail (v64, `store/mail_watch.rs`, `mail_embers.rs`).**
+An ember granted `mail.watch` registers watches (sender, domain, words,
+labels, triage class). The node that watches Gmail checks each new
+message against them, and each triage label too, and queues matches per
+ember. The queue syncs on its own leg, so the ember reads it, with a
+cursor, on whichever node it runs. The owner's view for that ember
+(headers, a snippet, or the text) and a fresh privacy check are applied
+when it reads. Watches and views mirror like mail rules.
+
 A mail archive's sidecar indexes the headers when it is built, and its
 message text and links in the background afterwards (`mbox_text.rs`; big
 archives wait for the owner). Archives are read in place, so every read

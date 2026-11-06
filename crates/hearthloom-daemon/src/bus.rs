@@ -233,7 +233,9 @@ pub fn offered(claims: &hearthloom_core::store::ApiKeyClaims, event: &BusEvent) 
 
 /// What an ember's key hears on /v1/bus/stream: topics published through
 /// `touch` (no refs attached) — never ones whose refs name episodes.
-pub const PLUGIN_TOPICS: &[&str] = &["plugin.oauth", "operational.changed"];
+/// `mail.matched` (0.5.93): an ember's mail watch matched something —
+/// every ember hears it and reads its own queue.
+pub const PLUGIN_TOPICS: &[&str] = &["plugin.oauth", "operational.changed", "mail.matched"];
 
 /// Debounced publish for local writes: the first write in a window
 /// schedules one event; the burst rides along. Fire-and-forget — the

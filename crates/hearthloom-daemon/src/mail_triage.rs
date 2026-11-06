@@ -149,6 +149,11 @@ pub fn seen(state: &AppState, account: &str, labels: &[String], raw: &[u8]) -> O
         list_id,
         snippet: text.chars().take(300).collect(),
         private,
+        labels: labels.to_vec(),
+        text: text
+            .chars()
+            .take(hearthloom_core::store::mail_watch::STORED_CHARS)
+            .collect(),
     })
 }
 
@@ -160,8 +165,15 @@ pub fn observe(state: &AppState, seen: &[MailSeen]) {
             .store
             .mail_observe(&Actor::new("adapter:gmail-imap"), s)
         {
-            Ok(Some(_)) => changed = true,
-            Ok(None) => {}
+            Ok(Some(id)) => {
+                changed = true;
+                // a thread this (viewerless) read can't see is private
+                let thread = state.store.mail_thread(&id).ok().flatten();
+                crate::mail_embers::on_seen(state, s, Some(thread.as_ref()));
+            }
+            Ok(None) => {
+                crate::mail_embers::on_seen(state, s, None);
+            }
             Err(err) => tracing::warn!("mail: a thread didn't update: {err:#}"),
         }
     }
@@ -233,10 +245,14 @@ pub fn instructions(plain_rules: &[String]) -> String {
     let mut s = String::from(
         "You sort the owner's incoming email threads. For EACH thread pick one class:\n\
          - needs_reply: the sender asks the owner something, or expects an answer or an action from them\n\
-         - scheduling: it is about finding, confirming or changing a time to meet\n\
+         - scheduling: someone is settling a time with the owner, or an invitation still waits for \
+         the owner's answer\n\
          - opportunity: an offer, introduction, invitation or lead worth the owner's look, with no direct question\n\
          - fyi: information only; nobody expects an answer\n\
          - ignore: automated, bulk or irrelevant\n\
+         A calendar notice that only reports something (an update, a cancellation, an event \
+         already accepted) is fyi, and so is anything about a time already past: compare with \
+         today's date, given before the threads.\n\
          In \"span\" copy, word for word, the words from the thread that decided it. If nothing \
          decides it, answer fyi with a confidence below 0.5. Give due_by (YYYY-MM-DD) only when the \
          thread names a date the owner must answer or act by; otherwise null. \"why\" is one short \
@@ -467,7 +483,10 @@ pub async fn triage_once(state: &AppState) -> Result<usize> {
         .collect();
     let system = instructions(&plain);
     let mut texts = std::collections::HashMap::new();
-    let mut prompt = String::from("The threads:\n");
+    let mut prompt = format!(
+        "Today is {}.\nThe threads:\n",
+        chrono::Local::now().format("%A %Y-%m-%d")
+    );
     for t in &threads {
         let st = state.clone();
         let th = t.clone();
@@ -502,6 +521,16 @@ pub async fn triage_once(state: &AppState) -> Result<usize> {
             .mail_classify(&actor(), id, &class, &why, confidence, due.as_deref())?
         {
             sorted += 1;
+            // embers waiting for this class look at it now
+            if let Some(t) = threads.iter().find(|t| t.id == id) {
+                let mut t = t.clone();
+                t.state = class.clone();
+                t.why = Some(why.clone());
+                let st = state.clone();
+                let _ =
+                    tokio::task::spawn_blocking(move || crate::mail_embers::on_classified(&st, &t))
+                        .await;
+            }
             if OPEN_STATES.contains(&class.as_str()) {
                 newly_open += 1;
             }

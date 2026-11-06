@@ -29,6 +29,7 @@ mod lint;
 mod llm_usage;
 mod locations;
 pub mod mail;
+pub mod mail_watch;
 mod movements;
 mod network;
 mod notes;
@@ -312,7 +313,7 @@ impl Drop for ReadScopeGuard {
     }
 }
 
-const SCHEMA_VERSION: i64 = 63;
+const SCHEMA_VERSION: i64 = 64;
 
 const SCHEMA_V1: &str = "
     -- L2: append-only ground truth. Raw content lives on disk at
@@ -2183,6 +2184,62 @@ impl Store {
                      updated_at TEXT NOT NULL
                  );",
             )?;
+        }
+        if version < 64 {
+            // v64: embers watching the owner's mail (0.5.93, store/mail_watch.rs).
+            // `mail_watches` (what each ember asked to see) and
+            // `mail_ember_views` (how much of a message the owner lets each
+            // ember see) mirror + journal like mail_rules, so the node that
+            // watches Gmail knows every ember's watches and every node
+            // shows an ember the same. `mail_matches` is the delivery
+            // queue: filled where the mail is seen, carried to the other
+            // nodes by its own leg (id-keyed, relay-stamped), read by the
+            // ember with a cursor over this node's `seq`.
+            conn.execute_batch(
+                "CREATE TABLE mail_watches (
+                     id TEXT PRIMARY KEY,
+                     plugin TEXT NOT NULL,
+                     name TEXT NOT NULL,
+                     filter TEXT NOT NULL,
+                     enabled INTEGER NOT NULL DEFAULT 1,
+                     created_at TEXT NOT NULL,
+                     updated_at TEXT NOT NULL
+                 );
+                 CREATE INDEX idx_mail_watches_plugin ON mail_watches(plugin);
+                 CREATE TABLE mail_ember_views (
+                     id TEXT PRIMARY KEY,
+                     view TEXT NOT NULL,
+                     chars INTEGER NOT NULL,
+                     created_at TEXT NOT NULL,
+                     updated_at TEXT NOT NULL
+                 );
+                 CREATE TABLE mail_matches (
+                     seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                     id TEXT NOT NULL UNIQUE,
+                     plugin TEXT NOT NULL,
+                     watch TEXT NOT NULL,
+                     watch_name TEXT NOT NULL,
+                     thread_id TEXT,
+                     message_id TEXT NOT NULL,
+                     sender TEXT NOT NULL DEFAULT '',
+                     subject TEXT NOT NULL DEFAULT '',
+                     date TEXT,
+                     labels TEXT NOT NULL DEFAULT '',
+                     class TEXT,
+                     why TEXT,
+                     text TEXT NOT NULL DEFAULT '',
+                     created_at TEXT NOT NULL
+                 );
+                 CREATE INDEX idx_mail_matches_plugin ON mail_matches(plugin, seq);",
+            )?;
+            // the relay stamp the sync leg pages by (not in RELAY_STAMPED:
+            // that list is replayed by the v57 step, before this table exists)
+            conn.execute_batch(&relay_stamp_sql(
+                "mail_matches",
+                "synced_at",
+                "created_at",
+                "",
+            ))?;
         }
         if version < SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;

@@ -352,6 +352,22 @@ enum MailCmd {
         #[arg(long)]
         now: bool,
     },
+    /// Embers that watch your mail, and how much of a message they see:
+    /// --view headers|snippet|full (for every ember, or one with --ember).
+    Embers {
+        /// one ember (default: every ember without its own setting)
+        #[arg(long)]
+        ember: Option<String>,
+        /// headers (sender, subject, date) · snippet (plus the start of the text) · full (the text)
+        #[arg(long, value_parser = ["headers", "snippet", "full"])]
+        view: Option<String>,
+        /// a snippet's length (40–4000; default 300)
+        #[arg(long)]
+        chars: Option<i64>,
+        /// the ember goes back to the setting for every ember
+        #[arg(long, requires = "ember", conflicts_with_all = ["view", "chars"])]
+        reset: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1524,6 +1540,17 @@ async fn main() -> Result<()> {
                     },
                     model,
                     now,
+                },
+                MailCmd::Embers {
+                    ember,
+                    view,
+                    chars,
+                    reset,
+                } => Op::Embers {
+                    ember,
+                    view,
+                    chars,
+                    reset,
                 },
             };
             let client = Client::with_url(home, url.clone())?;

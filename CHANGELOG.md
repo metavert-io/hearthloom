@@ -8,6 +8,26 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.93 — 2026-11-06
+
+### Added
+- **Embers can watch your mail, with your say over how much they see.**
+  A new permission, `mail.watch`, shown when you install an ember: it can
+  ask to hear about mail from certain senders or domains, with certain
+  words or labels, or that the sorter called an opportunity, a reply
+  needed or a time to settle. Each match reaches that ember alone. By
+  default it sees who sent it, the subject and the first 300 characters;
+  `hearthloom mail embers` changes that for every ember or one (just the
+  sender and subject, a longer snippet, or the whole text), and the change
+  applies to what's already waiting. Private mail never reaches an ember,
+  even mail that became private after it matched. Matches follow the
+  ember to whichever of your machines runs it.
+
+### Changed
+- The mail sorter knows today's date: calendar notices that only report
+  something (an update, a cancellation) and anything about a time already
+  past are "just so you know", not "settle a time".
+
 ## 0.5.92 — 2026-11-06
 
 ### Added

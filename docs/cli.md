@@ -125,6 +125,11 @@ hearthloom mail rules add domain mylawfirm.example --action needs_reply
 hearthloom mail rules add plain "Anything from my accountant needs a reply"
 hearthloom mail rules                       # list (rm <id> removes one)
 hearthloom mail triage                      # how new mail is sorted; --off, --model haiku, --now
+hearthloom mail embers                      # embers that watch your mail, and what they see
+hearthloom mail embers --view headers       # every ember: sender, subject, date only
+hearthloom mail embers --ember my-ember --view full      # one ember: the readable text
+hearthloom mail embers --ember my-ember --view snippet --chars 600
+hearthloom mail embers --ember my-ember --reset          # back to the setting for every ember
 ```
 
 New mail from people becomes a thread; a model with no tools sorts each

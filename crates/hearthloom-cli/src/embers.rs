@@ -342,6 +342,13 @@ fn gate(staged: &Value, grants: &Grants, from_version: Option<&str>) -> String {
     if !grants.withheld.is_empty() {
         lines.push(format!("  withheld: {}", grants.withheld.join(", ")));
     }
+    if grants.granted.iter().any(|s| s == "mail.watch") {
+        lines.push(
+            "  mail.watch: it sees the mail its watches match — sender, subject and the first \
+             300 characters, unless you change that (hearthloom mail embers). Never private mail."
+                .to_string(),
+        );
+    }
     if !grants.dropped.is_empty() {
         lines.push(format!(
             "  no longer asks for: {} (its key loses that access)",

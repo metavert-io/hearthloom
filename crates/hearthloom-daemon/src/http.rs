@@ -150,6 +150,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/mail/triage",
             get(mail_triage_get).post(mail_triage_set),
         )
+        .route(
+            "/v1/mail/embers",
+            get(mail_embers_get).post(mail_embers_set),
+        )
         .route("/v1/sync/lookup", post(sync_lookup))
         .route("/v1/sync/lookup/pending", get(sync_lookup_pending))
         .route("/v1/sync/lookup/{id}/answer", post(sync_lookup_answer))
@@ -167,6 +171,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/sync/llm_usage",
             get(sync_llm_usage_get).post(sync_llm_usage_post),
+        )
+        .route(
+            "/v1/sync/mail_matches",
+            get(sync_mail_matches_get).post(sync_mail_matches_post),
         )
         .route(
             "/v1/sync/locations",
@@ -303,6 +311,15 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/plugins/self/oauth/pending", post(plugin_oauth_pending))
         .route("/v1/plugins/self/oauth/take", post(plugin_oauth_take))
+        .route(
+            "/v1/plugins/self/mail/watches",
+            get(plugin_mail_watches).post(plugin_mail_watch_set),
+        )
+        .route(
+            "/v1/plugins/self/mail/watches/{name}",
+            axum::routing::delete(plugin_mail_watch_remove),
+        )
+        .route("/v1/plugins/self/mail/matches", get(plugin_mail_matches))
         .route("/v1/plugins/self/files", get(plugin_file_list))
         .route(
             "/v1/plugins/self/files/{*path}",
@@ -738,6 +755,8 @@ const KEY_ROUTES: &[(&str, &str, &[&str])] = &[
     ("POST", "/v1/sync/telemetry", &["peer"]),
     ("GET", "/v1/sync/llm_usage", &["peer"]),
     ("POST", "/v1/sync/llm_usage", &["peer"]),
+    ("GET", "/v1/sync/mail_matches", &["peer"]),
+    ("POST", "/v1/sync/mail_matches", &["peer"]),
     ("GET", "/v1/sync/locations", &["peer"]),
     ("POST", "/v1/sync/locations", &["peer"]),
     ("GET", "/v1/sync/contacts", &["peer"]),
@@ -5420,6 +5439,62 @@ async fn mail_triage_set(
     Ok(Json(crate::mail_triage::status(&state)))
 }
 
+/// Embers that watch the owner's mail: what each watches and how much of
+/// a message it sees (mail_embers.rs).
+async fn mail_embers_get(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "see which embers watch your mail")?;
+    Ok(Json(crate::mail_embers::overview(&state)?))
+}
+
+#[derive(Deserialize)]
+struct MailEmberViewBody {
+    /// an ember's name; absent = every ember without its own setting
+    #[serde(default)]
+    ember: Option<String>,
+    #[serde(default)]
+    view: Option<String>,
+    #[serde(default)]
+    chars: Option<i64>,
+    /// back to the setting for every ember
+    #[serde(default)]
+    reset: bool,
+}
+
+async fn mail_embers_set(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(body): Json<MailEmberViewBody>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "change what embers see of your mail")?;
+    let actor = Actor::new("human:owner");
+    let ember = body
+        .ember
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .unwrap_or(hearthloom_core::store::mail_watch::ALL_EMBERS);
+    if body.reset {
+        if ember == hearthloom_core::store::mail_watch::ALL_EMBERS {
+            return Err(bad_request("name the ember to reset"));
+        }
+        state.store.mail_ember_view_clear(&actor, ember)?;
+    } else {
+        let view = body
+            .view
+            .as_deref()
+            .ok_or_else(|| bad_request("say what it sees: headers, snippet or full"))?;
+        state
+            .store
+            .mail_ember_view_set(&actor, ember, view, body.chars)
+            .map_err(|e| bad_request(format!("{e:#}")))?;
+    }
+    crate::bus::touch(&state, "operational.changed");
+    Ok(Json(crate::mail_embers::overview(&state)?))
+}
+
 /// A lookup one of the owner's nodes wants from an archive another holds
 /// (lookups.rs). Run here when this node holds it; otherwise queue it for
 /// the spoke that does and wait for its answer.
@@ -5817,6 +5892,30 @@ async fn sync_llm_usage_post(
     Ok(Json(
         json!({"applied": state.store.apply_llm_usage(&batch)?}),
     ))
+}
+
+/// v64: what embers' mail watches matched travels to every node, so an
+/// ember reads its queue wherever it runs (telemetry pattern).
+async fn sync_mail_matches_get(
+    State(state): State<AppState>,
+    Query(params): Query<TelemetrySinceParams>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    require_scope(&auth, "peer")?;
+    Ok(Json(state.store.mail_matches_since(&params.since, 500)?))
+}
+
+async fn sync_mail_matches_post(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(batch): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    require_scope(&auth, "peer")?;
+    let applied = state.store.mail_matches_apply(&batch)?;
+    if applied > 0 {
+        crate::bus::touch(&state, crate::mail_embers::TOPIC);
+    }
+    Ok(Json(json!({"applied": applied})))
 }
 
 /// v51 unified-location peer legs (telemetry pattern) — the phone posts
@@ -13486,6 +13585,99 @@ async fn well_known_asset(
 
 /* —— plugin self-storage: the ONLY way a plugin persists anything ——
 (law #4 — the daemon writes; the plugin never opens files or the db) */
+
+/// An ember's own mail surface needs the `mail.watch` scope it was
+/// granted at install (every plugin key reaches /v1/plugins/self/*).
+fn mail_watcher(state: &AppState, auth: &AuthInfo) -> Result<String, ApiError> {
+    let plugin = bound_plugin(state, auth)?;
+    if !crate::mail_embers::granted(state, &plugin) {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            format!(
+                "{plugin} wasn't given {} — the owner grants it when installing",
+                crate::mail_embers::SCOPE
+            ),
+        ));
+    }
+    Ok(plugin)
+}
+
+async fn plugin_mail_watches(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    let plugin = mail_watcher(&state, &auth)?;
+    let view = state.store.mail_ember_view(&plugin)?;
+    Ok(Json(json!({
+        "watches": state.store.mail_watches(Some(&plugin))?,
+        "view": view.view,
+        "chars": if view.view == "snippet" { json!(view.chars) } else { Value::Null },
+    })))
+}
+
+#[derive(Deserialize)]
+struct MailWatchBody {
+    name: String,
+    filter: hearthloom_core::store::mail_watch::WatchFilter,
+}
+
+async fn plugin_mail_watch_set(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(body): Json<MailWatchBody>,
+) -> Result<Json<Value>, ApiError> {
+    let plugin = mail_watcher(&state, &auth)?;
+    let watch = state
+        .store
+        .mail_watch_set(
+            &Actor::new(format!("plugin:{plugin}")),
+            &plugin,
+            &body.name,
+            &body.filter,
+        )
+        .map_err(|e| bad_request(format!("{e:#}")))?;
+    crate::bus::touch(&state, "operational.changed");
+    Ok(Json(json!({"watch": watch})))
+}
+
+async fn plugin_mail_watch_remove(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    let plugin = mail_watcher(&state, &auth)?;
+    let removed =
+        state
+            .store
+            .mail_watch_remove(&Actor::new(format!("plugin:{plugin}")), &plugin, &name)?;
+    if removed {
+        crate::bus::touch(&state, "operational.changed");
+    }
+    Ok(Json(json!({"removed": removed})))
+}
+
+#[derive(Deserialize)]
+struct MailMatchesParams {
+    #[serde(default)]
+    after: i64,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn plugin_mail_matches(
+    State(state): State<AppState>,
+    Query(params): Query<MailMatchesParams>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    let plugin = mail_watcher(&state, &auth)?;
+    let st = state.clone();
+    let out = crate::scoped::spawn_blocking(move || {
+        crate::mail_embers::deliver(&st, &plugin, params.after, params.limit.unwrap_or(50))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))??;
+    Ok(Json(out))
+}
 
 async fn plugin_kv_list(
     State(state): State<AppState>,

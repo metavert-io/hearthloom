@@ -1261,7 +1261,7 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
     // on the OTHER node need them too. Feature-detect degrade: 404 on
     // an older peer skips the leg, never fails the exchange.
     {
-        let legs: [(&str, &str, &str); 5] = [
+        let legs: [(&str, &str, &str); 6] = [
             ("locations", "peer_locations", "location observations"),
             ("contacts", "peer_contacts", "contact cards"),
             ("device_state", "peer_device_state", "device states"),
@@ -1269,6 +1269,8 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
             // settings and Tend answers (LWW) — both nodes reconcile trips
             ("movements", "peer_movements", "movements"),
             ("vehicles", "peer_vehicles", "vehicle settings"),
+            // v64: what embers' mail watches matched, to wherever they run
+            ("mail_matches", "peer_mail_matches", "mail matches"),
         ];
         for (path, wm, _label) in legs {
             let since = state
@@ -1280,6 +1282,7 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
                 "contacts" => state.store.contacts_since(&since, 1000),
                 "movements" => state.store.movements_since(&since, 2000),
                 "vehicles" => state.store.vehicles_since(&since, 500),
+                "mail_matches" => state.store.mail_matches_since(&since, 500),
                 _ => state.store.device_states_since(&since, 2000),
             };
             if let Ok(batch) = batch {
@@ -1319,13 +1322,17 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
                             .and_then(|n| n.as_str())
                             .unwrap_or("")
                             .to_string();
-                        let _ = match path {
+                        let applied = match path {
                             "locations" => state.store.observations_apply(&batch),
                             "contacts" => state.store.contacts_apply(&batch),
                             "movements" => state.store.movements_apply(&batch),
                             "vehicles" => state.store.vehicles_apply(&batch),
+                            "mail_matches" => state.store.mail_matches_apply(&batch),
                             _ => state.store.device_states_apply(&batch),
                         };
+                        if path == "mail_matches" && applied.is_ok_and(|n| n > 0) {
+                            crate::bus::touch(state, crate::mail_embers::TOPIC);
+                        }
                         if next > since_pull {
                             state
                                 .store

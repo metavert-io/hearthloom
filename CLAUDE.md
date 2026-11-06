@@ -92,7 +92,10 @@ workspace with `npm i playwright`) — screenshot + pageerror check.
 ## Layout
 
 - `crates/hearthloom-core` — schema (migrations via `PRAGMA user_version`,
-  **currently v63**: v63 mail threads + the owner's mail rules
+  **currently v64**: v64 embers' mail watches (`mail_watches`,
+  `mail_ember_views` mirrored + journaled; `mail_matches` the delivery
+  queue, its own id-keyed leg /v1/sync/mail_matches — see EMBERS SEE
+  MAIL), v63 mail threads + the owner's mail rules
   (`mail_threads`, `mail_rules` mirrored + journaled; `mail_thread_messages`
   the observing node's index — see MAIL TRIAGE), v62 goals carry `updated_at` (`intents`; bumped by
   every write to a mirrored column, never by the node-local watch
@@ -1101,8 +1104,23 @@ the design log 2026-07-14.
   form only from decision-worthy mail (Primary not from the owner, rule
   matches, replies to an existing thread); thread ids hash the root
   message id so every node agrees. `/v1/mail` is on the ember deny list;
-  embers will get mail through their own scope. A new shadow view needs
-  its DROP (`test_every_shadow_view_is_dropped`).
+  embers get mail only through `mail.watch` (below). A new shadow view
+  needs its DROP (`test_every_shadow_view_is_dropped`).
+- **EMBERS SEE MAIL ONLY THROUGH `mail.watch`, AS MUCH AS THE OWNER
+  SAYS (0.5.93, mail_embers.rs, store/mail_watch.rs).** An ember's
+  watches are checked where Gmail is watched (`on_seen`; class-waiting
+  watches at `on_classified`) and matches queue per ember. The view
+  (`headers` | `snippet` default 300 chars | `full`) is applied at
+  DELIVERY (`deliver` → `shown`), never at match time, so the owner's
+  change reaches what's queued; delivery re-checks privacy (a rule or a
+  private memory added since holds a match back, failing closed). Private
+  or from-the-owner mail never queues. The scope lives on the plugin row
+  (`granted_scopes`), not the key — `mail.watch` isn't an API-key scope,
+  so the key gets the rest and an ember can't hold `mail.watch` alone.
+  The self routes check it in the handler (`mail_watcher`): every plugin
+  key passes `/v1/plugins/self/*`. Uninstall forgets the ember's watches,
+  view and queue (`mail_watches_forget`). A new route that hands embers
+  mail goes through `deliver`.
 - **THE OPERATIONAL MIRROR: NODE-LOCAL COLUMNS STAY HOME, TIES SETTLE
   (0.5.91, store/sync.rs).** `NODE_LOCAL_COLUMNS` (a goal's `last_seq` /
   `last_checked` — a position in THAT node's mutations log — and a note's

@@ -72,6 +72,10 @@ pub struct MailSeen {
     pub snippet: String,
     /// a privacy rule covers it
     pub private: bool,
+    /// Gmail's labels for it (what an ember's watch can name)
+    pub labels: Vec<String>,
+    /// its readable text, for embers' watches (not stored on the thread)
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

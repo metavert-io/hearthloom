@@ -34,7 +34,10 @@ use hearthloom_core::store::Actor;
 /// Scopes a plugin may REQUEST. Deliberately small; grows with real
 /// plugins, never speculatively. admin/peer/friend are infrastructure
 /// scopes — never grantable to a plugin.
-pub const PLUGIN_ALLOWED_SCOPES: &[&str] = &["read", "ingest", "notify"];
+/// `mail.watch` (0.5.93): register mail watches and read what they
+/// matched, as much of each message as the owner's view allows
+/// (mail_embers.rs).
+pub const PLUGIN_ALLOWED_SCOPES: &[&str] = &["read", "ingest", "notify", "mail.watch"];
 
 pub const PROTOCOL: i64 = 1;
 
@@ -695,6 +698,18 @@ pub fn install_from_dir(
     }
     let name = manifest.name.clone();
     let actor = Actor::new("human:dashboard");
+    // An ember-only grant (`mail.watch`) is held by the plugin row, not
+    // the key: the mail surface reads it from the row (mail_embers.rs).
+    let key_scopes: Vec<String> = granted
+        .iter()
+        .filter(|s| hearthloom_core::store::API_KEY_SCOPES.contains(&s.as_str()))
+        .cloned()
+        .collect();
+    if key_scopes.is_empty() {
+        bail!(
+            "{name} needs read, ingest or notify granted too: mail.watch alone gives its key nothing to hold"
+        );
+    }
 
     // Upgrade keeps the existing key (the sidecar's key file stays
     // valid); fresh install mints one.
@@ -708,14 +723,14 @@ pub fn install_from_dir(
         Some(row) => {
             state
                 .store
-                .set_api_key_scopes(&actor, &row.api_key_id, &granted)?;
+                .set_api_key_scopes(&actor, &row.api_key_id, &key_scopes)?;
             (row.api_key_id, None)
         }
         None => {
             let (row, secret) =
                 state
                     .store
-                    .create_api_key(&actor, &format!("plugin:{name}"), &granted, None)?;
+                    .create_api_key(&actor, &format!("plugin:{name}"), &key_scopes, None)?;
             (row.id, Some(secret))
         }
     };
@@ -785,6 +800,8 @@ pub fn uninstall(state: &AppState, name: &str) -> Result<PathBuf> {
     let actor = Actor::new("human:dashboard");
     let _ = state.store.revoke_api_key(&actor, &row.api_key_id);
     revoke_ui_tokens(state, name);
+    // its mail watches and queue go with it (the removal syncs)
+    let _ = state.store.mail_watches_forget(&actor, name);
     state.store.uninstall_plugin(&actor, name)?;
     Ok(plugin_dir(state, name).join("data"))
 }

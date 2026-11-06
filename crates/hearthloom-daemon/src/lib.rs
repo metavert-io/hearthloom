@@ -28,6 +28,7 @@ mod live_ingest;
 mod live_photos;
 pub mod llm;
 mod lookups;
+mod mail_embers;
 mod mail_triage;
 mod mbox_index;
 mod mbox_text;

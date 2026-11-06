@@ -22,6 +22,80 @@ pub enum Op {
         model: Option<String>,
         now: bool,
     },
+    Embers {
+        ember: Option<String>,
+        view: Option<String>,
+        chars: Option<i64>,
+        reset: bool,
+    },
+}
+
+fn view_words(view: &Value, chars: &Value) -> String {
+    match view.as_str() {
+        Some("headers") => "sender, subject and date".into(),
+        Some("snippet") => format!(
+            "sender, subject, date and the first {} characters",
+            chars.as_i64().unwrap_or(300)
+        ),
+        Some("full") => "the whole readable text".into(),
+        _ => "?".into(),
+    }
+}
+
+fn print_embers(res: &Value) {
+    println!(
+        "embers see: {} (unless set per ember)",
+        view_words(&res["default"]["view"], &res["default"]["chars"])
+    );
+    let embers = res["embers"].as_array().cloned().unwrap_or_default();
+    if embers.is_empty() {
+        println!("no ember watches your mail");
+    }
+    for e in embers {
+        let name = e["name"].as_str().unwrap_or("?");
+        let mut notes = vec![];
+        if e["own_view"] == json!(true) {
+            notes.push(format!("sees {}", view_words(&e["view"], &e["chars"])));
+        }
+        if e["granted"] == json!(false) {
+            notes.push("installed here without mail.watch: gets nothing".into());
+        } else if e["installed_here"] == json!(false) {
+            notes.push("runs on another node".into());
+        }
+        println!(
+            "{name}{}",
+            if notes.is_empty() {
+                String::new()
+            } else {
+                format!("  ({})", notes.join("; "))
+            }
+        );
+        for w in e["watches"].as_array().into_iter().flatten() {
+            let f = &w["filter"];
+            let parts: Vec<String> = ["from", "domains", "subject", "words", "labels", "classes"]
+                .iter()
+                .filter_map(|k| {
+                    let vals: Vec<&str> = f[*k]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|v| v.as_str())
+                        .collect();
+                    (!vals.is_empty()).then(|| format!("{k}: {}", vals.join(" | ")))
+                })
+                .collect();
+            println!(
+                "  · {} — {}{}",
+                w["name"].as_str().unwrap_or("?"),
+                parts.join("; "),
+                if w["enabled"] == json!(false) {
+                    " (off)"
+                } else {
+                    ""
+                }
+            );
+        }
+    }
 }
 
 fn print_threads(threads: &[Value]) {
@@ -188,6 +262,31 @@ pub async fn run(client: &Client, op: Op, as_json: bool) -> Result<()> {
                 if now {
                     println!("  sorting what's waiting now");
                 }
+            }
+        }
+        Op::Embers {
+            ember,
+            view,
+            chars,
+            reset,
+        } => {
+            let res = if view.is_some() || chars.is_some() || reset {
+                if !reset && view.is_none() {
+                    bail!("say what it sees: --view headers|snippet|full");
+                }
+                client
+                    .post(
+                        "/v1/mail/embers",
+                        &json!({"ember": ember, "view": view, "chars": chars, "reset": reset}),
+                    )
+                    .await?
+            } else {
+                client.get("/v1/mail/embers", &[]).await?
+            };
+            if as_json {
+                println!("{res}");
+            } else {
+                print_embers(&res);
             }
         }
     }

@@ -891,8 +891,14 @@ async function paintPlugins(host) {
   const plugins = data?.plugins || [];
   const available = (reg?.embers || []).filter(
     (e) => !plugins.some((p) => p.name === e.name));
+  const SCOPE_WORDS = {
+    read: "read your memories (never private ones)",
+    ingest: "add memories",
+    notify: "send you notifications",
+    "mail.watch": "watch your mail for what it asks (sender, subject and the start of the text, unless you change that) — never private mail",
+  };
   const scopeChips = (scopes) =>
-    (scopes || []).map((s) => `<span class="chip">${esc(s)}</span>`).join(" ") || "<span class='meta'>no access</span>";
+    (scopes || []).map((s) => `<span class="chip" title="${esc(SCOPE_WORDS[s] || s)}">${esc(s)}</span>`).join(" ") || "<span class='meta'>no access</span>";
   const semverGt = (a, b) => {
     const pa = String(a || "").replace(/^v/, "").split(/[.\-+]/).map((n) => Number(n) || 0);
     const pb = String(b || "").replace(/^v/, "").split(/[.\-+]/).map((n) => Number(n) || 0);
@@ -1017,6 +1023,7 @@ async function paintPlugins(host) {
         ${info.publisher ? `by ${esc(info.publisher)}` : ""} ${
         info.reviewed ? "\u00b7 \u2713 reviewed by the registry" : "\u00b7 <b>unreviewed</b>"}</p>
       <p class="meta">it will be able to: ${scopeChips(scopes)}</p>
+      ${scopes.includes("mail.watch") ? `<p class="meta">With <b>mail.watch</b> it sees the mail its watches match: who sent it, the subject and the first 300 characters, unless you change that (<code>hearthloom mail embers</code>). Private mail never reaches it.</p>` : ""}
       ${(info.publishes || []).length ? `<p class="meta">it will publish ${
         info.publishes.length === 1 ? "this file" : "these files"} openly at your address (anyone can read ${
         info.publishes.length === 1 ? "it" : "them"}): ${

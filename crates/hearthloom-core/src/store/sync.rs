@@ -127,6 +127,9 @@ const OPERATIONAL_TABLES: &[&str] = &[
     // v63: what waits on the owner in their mail, and their mail rules
     "mail_threads",
     "mail_rules",
+    // v64: what embers watch for in the mail, and how much of it they see
+    "mail_watches",
+    "mail_ember_views",
     // v46: item shares mirror between a user's own peers so a share
     // flagged on either node is served by the always-on one (shares
     // name the friend; they bite wherever a grant by that name lives).
@@ -170,6 +173,16 @@ const JOURNALED_KINDS: &[(&str, &str, &str)] = &[
     (
         "mail_rule",
         "mail_rules",
+        "COALESCE(updated_at, created_at, '')",
+    ),
+    (
+        "mail_watch",
+        "mail_watches",
+        "COALESCE(updated_at, created_at, '')",
+    ),
+    (
+        "mail_ember_view",
+        "mail_ember_views",
         "COALESCE(updated_at, created_at, '')",
     ),
     ("privacy_rule", "privacy_rules", "COALESCE(created_at, '')"),

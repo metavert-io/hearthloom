@@ -70,7 +70,7 @@ impl LabelFilter {
 /// Pull the `X-Gmail-Labels` values out of a raw message without a full
 /// header parse — the filter rejects most of a Takeout archive, so this
 /// runs 600k+ times and must stay cheap. Handles RFC 5322 folding.
-fn gmail_labels(message: &str) -> Vec<String> {
+pub fn gmail_labels(message: &str) -> Vec<String> {
     let mut value: Option<String> = None;
     for line in message.lines() {
         if line.trim().is_empty() {

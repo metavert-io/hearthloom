@@ -91,6 +91,12 @@ pub const TABLE_CLASSES: &[(&str, TableClass)] = &[
     ("mail_threads", TableClass::Exported),
     ("mail_rules", TableClass::Exported),
     ("mail_thread_messages", TableClass::Exported),
+    ("mail_watches", TableClass::Exported),
+    ("mail_ember_views", TableClass::Exported),
+    (
+        "mail_matches",
+        TableClass::Excluded("a delivery queue to embers, refilled by new mail; the messages stay in the mail archive"),
+    ),
     ("standing_queries", TableClass::Exported),
     ("opportunities", TableClass::Exported),
     ("self_model", TableClass::Exported),
