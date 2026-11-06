@@ -294,6 +294,9 @@ enum AuthCmd {
     Status,
     /// Forget (and revoke) this node's CLI key.
     Logout,
+    /// This machine's node has no login yet: print its one-time setup code
+    /// (the first login asks for it).
+    SetupCode,
 }
 
 #[derive(Subcommand)]
@@ -1504,6 +1507,15 @@ async fn main() -> Result<()> {
             AuthCmd::Status => {
                 let client = Client::with_url(home, url.clone())?;
                 ops::auth_status(&client).await?;
+            }
+            AuthCmd::SetupCode => {
+                local_only("the setup code", &url)?;
+                match std::fs::read_to_string(home.root().join("setup-code")) {
+                    Ok(code) if !code.trim().is_empty() => println!("{}", code.trim()),
+                    _ => anyhow::bail!(
+                        "no setup code here: this node already has a login, or its daemon hasn't started yet"
+                    ),
+                }
             }
             AuthCmd::Logout => {
                 let client = Client::with_url(home, url.clone())?;

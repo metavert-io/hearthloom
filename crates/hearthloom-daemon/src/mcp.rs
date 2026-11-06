@@ -107,6 +107,37 @@ fn call_tool(
             );
         }
     }
+    // An ORDINARY key (no grants, not the owner's) gets what its scopes
+    // say: `read` or `mcp` to read; proposing — into quarantine, for the
+    // owner to decide — needs `mcp` or `write`; committing a task or a
+    // note straight to the Desk needs `write`. The owner (no key on an
+    // open node, a session, an owner key) may do all four.
+    if let Some(c) = auth
+        .0
+        .as_ref()
+        .filter(|c| c.grants.is_none() && !crate::http::is_owner_key(&c.scopes, false))
+    {
+        let has = |s: &str| c.scopes.iter().any(|x| x == s);
+        let commit = args.get("mode").and_then(|m| m.as_str()) == Some("commit");
+        let allowed = match name {
+            "search" | "traverse" | "recall" => has("read") || has("mcp"),
+            "propose_memory" if commit => has("write"),
+            "propose_memory" => has("mcp") || has("write"),
+            _ => true,
+        };
+        if !allowed {
+            return Err(match name {
+                "propose_memory" if commit => {
+                    "this key can't write to the Desk (it needs the write scope) — use mode \"propose\""
+                        .to_string()
+                }
+                "propose_memory" => {
+                    "this key can only read (proposing needs the mcp scope)".to_string()
+                }
+                _ => format!("this key can't read ({name} needs the read or mcp scope)"),
+            });
+        }
+    }
     let outcome = match name {
         "search" => tool_search(state, &args),
         "traverse" => tool_traverse(state, &args),
@@ -264,16 +295,17 @@ fn tool_propose_memory(
     let claims = auth.0.as_ref();
     let grants = claims.and_then(|c| c.grants.as_ref());
     let actor = Actor {
-        // A scoped key's actor is fixed by the server — the activity list
-        // and Undo depend on it; other callers keep naming themselves.
-        actor: match claims {
-            Some(c) if c.grants.is_some() => c.agent_actor(),
-            _ => args
-                .get("actor")
+        // Fixed by the server for every key that isn't the owner's — the
+        // activity list and Undo depend on it; only the owner names the
+        // agent it speaks for.
+        actor: crate::http::write_actor(
+            auth,
+            args.get("actor")
                 .and_then(|a| a.as_str())
                 .unwrap_or("agent:mcp")
                 .to_string(),
-        },
+        )
+        .actor,
         session_id: args
             .get("session_id")
             .and_then(|s| s.as_str())
@@ -455,6 +487,68 @@ mod tests {
     /// human actor: it is filed under the `agent` origin, so it settles
     /// with agent trust and can't pass as an Ask recipe. (A runtime for
     /// the bus touch the commit fires.)
+    /// An ordinary key gets what its scopes say — read to read, mcp to
+    /// propose, write to commit — and never names the writer.
+    #[tokio::test]
+    async fn test_an_ordinary_key_gets_what_its_scopes_say() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::Home::at(tmp.path().to_path_buf());
+        home.init().unwrap();
+        let store = hearthloom_core::Store::open(&home.db_path()).unwrap();
+        let state = AppState {
+            store: std::sync::Arc::new(store),
+            home,
+            embedder: None,
+            llm: None,
+            auth_locked: Default::default(),
+            bus: Default::default(),
+            killswitch: Default::default(),
+            running: Default::default(),
+        };
+        let key = |scopes: &[&str]| {
+            crate::http::AuthInfo(Some(hearthloom_core::store::ApiKeyClaims {
+                id: "ak_9".into(),
+                name: "tool".into(),
+                scopes: scopes.iter().map(|s| s.to_string()).collect(),
+                grants: None,
+            }))
+        };
+        let search = json!({"name": "search", "arguments": {"query": "invoice"}});
+        let propose = json!({"name": "propose_memory", "arguments": {
+            "actor": "human:owner", "entries": [{"content": "the invoice is paid"}]}});
+        let commit = json!({"name": "propose_memory", "arguments": {
+            "kind": "task", "mode": "commit", "actor": "human:owner",
+            "entries": [{"description": "pay the invoice"}]}});
+        assert!(call_tool(&state, &key(&["read"]), &search).is_ok());
+        assert!(call_tool(&state, &key(&["read"]), &propose).is_err());
+        assert!(call_tool(&state, &key(&["read"]), &commit).is_err());
+        assert!(call_tool(&state, &key(&["ingest"]), &search).is_err());
+        assert!(call_tool(&state, &key(&["mcp"]), &commit).is_err());
+        call_tool(&state, &key(&["mcp"]), &propose).unwrap();
+        call_tool(&state, &key(&["write"]), &commit).unwrap();
+        // both land under the key's name, never the claimed owner
+        let q = state.store.quarantine_pending(10).unwrap();
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].actor, "agent:key:tool");
+        let actors: Vec<String> = state
+            .store
+            .mutations_since(0, 100)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.actor)
+            .collect();
+        assert!(actors.iter().any(|a| a == "agent:key:tool"));
+        assert!(!actors.iter().any(|a| a == "human:owner"), "{actors:?}");
+        // the owner (no key) may commit, under the name it gives
+        call_tool(&state, &crate::http::AuthInfo(None), &commit).unwrap();
+        assert!(state
+            .store
+            .mutations_since(0, 100)
+            .unwrap()
+            .iter()
+            .any(|m| m.actor == "human:owner"));
+    }
+
     #[tokio::test]
     async fn test_committed_note_is_filed_as_an_agents() {
         let tmp = tempfile::tempdir().unwrap();

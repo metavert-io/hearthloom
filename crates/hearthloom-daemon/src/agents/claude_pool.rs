@@ -328,7 +328,17 @@ fn readings(state: &AppState, pool: &Pool) -> HashMap<String, Reading> {
 
 /// The Claude Code home of an extra account (None: the usual sign-in).
 pub fn config_dir(state: &AppState, account: &Account) -> Option<PathBuf> {
-    (account.id != MAIN).then(|| state.home.root().join("claude-accounts").join(&account.id))
+    // Only an id this module made (`ca_` + hex, `new_id`) names a folder:
+    // whatever else reaches here — a hand-edited pool, a future bug — gets
+    // none, so nothing outside claude-accounts/ is ever created or removed.
+    (account.id != MAIN && valid_id(&account.id))
+        .then(|| state.home.root().join("claude-accounts").join(&account.id))
+}
+
+fn valid_id(id: &str) -> bool {
+    id.strip_prefix("ca_").is_some_and(|rest| {
+        (8..=32).contains(&rest.len()) && rest.bytes().all(|b| b.is_ascii_hexdigit())
+    })
 }
 
 /// This node's Anthropic API key, for the fallback only.
@@ -790,6 +800,23 @@ async fn check_usage(state: &AppState, account: &Account) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_only_an_id_this_module_made_names_a_folder() {
+        assert!(valid_id(&new_id()));
+        for bad in [
+            "",
+            "ca_",
+            "main",
+            "../x",
+            "ca_../../etc",
+            "ca_abc",
+            "ca_ABCDEFGH/..",
+            "ca_12345678/x",
+        ] {
+            assert!(!valid_id(bad), "{bad:?}");
+        }
+    }
 
     fn acct(id: &str, cap_5h: u8, cap_7d: u8) -> Account {
         Account {

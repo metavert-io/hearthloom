@@ -47,7 +47,10 @@ with the first.
 
 Remote access requires a **PAT** (☰ → API Keys): SHA-256-hashed, scoped,
 shown once, revocable to the second. Scopes are narrow (`read`, `peer`,
-`friend`, `admin`); the `/brain` manifest surface requires `read` ALWAYS
+`friend`, `admin`). Over MCP, `read` or `mcp` reads, `propose_memory`
+needs `mcp` (or `write`), and its `commit` mode (a task or note straight
+to the Desk) needs `write`; whatever a key writes is recorded under the
+key's own name, never an actor the request names; the `/brain` manifest surface requires `read` ALWAYS
 and serves the vault-**locked** view ALWAYS — no key ever exposes `private`
 through it. Loopback needs no key on an un-bootstrapped install; once an
 admin user exists, everything authenticates.

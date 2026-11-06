@@ -86,9 +86,15 @@ if [ "$HL_PASS" != "$HL_PASS2" ]; then echo "passwords differ — aborting."; ex
 
 COOKIES=$(mktemp)
 trap 'rm -f "$COOKIES"' EXIT
-RESP=$(printf '{"email":%s,"password":%s}' \
+# the node's one-time setup code: proof that this is the machine it runs on
+SETUP_CODE=$(cat "$HL_HOME/setup-code" 2>/dev/null || true)
+if [ -z "$SETUP_CODE" ]; then
+  echo "no setup code in $HL_HOME/setup-code — is the daemon running (it writes one while there's no login)?"; exit 1
+fi
+RESP=$(printf '{"email":%s,"password":%s,"setup_code":%s}' \
   "$(printf '%s' "$HL_USER" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')" \
   "$(printf '%s' "$HL_PASS" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')" \
+  "$(printf '%s' "$SETUP_CODE" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read().strip()))')" \
   | curl -s -c "$COOKIES" -X POST "http://127.0.0.1:$PORT/v1/auth/bootstrap" \
       -H 'Content-Type: application/json' -d @-)
 case "$RESP" in

@@ -30,14 +30,32 @@ const KIND_LABEL = {
 
 const view = document.getElementById("view");
 
-/* If a key is stored (☰ → API Keys → "use in this browser"), send it —
-   required when the daemon runs with HEARTHLOOM_REQUIRE_KEYS=1. */
-const authHeaders = () => {
-  const key = localStorage.getItem("hl-api-key");
-  return key ? { Authorization: `Bearer ${key}` } : {};
-};
+/* The dashboard holds no API key: a signed-in session is an HttpOnly
+   cookie scripts can't read. A key an older build stored in this browser
+   is traded once for a session (owner keys only) and erased either way. */
+(async () => {
+  let key = null;
+  try { key = localStorage.getItem("hl-api-key"); localStorage.removeItem("hl-api-key"); } catch { /* storage off */ }
+  if (!key) return;
+  try {
+    await fetch("/v1/auth/session-from-key", { method: "POST", headers: { Authorization: `Bearer ${key}` } });
+  } catch { /* the sign-in screen covers it */ }
+})();
+
+/* Every request stays on this node's API. Paths are built by the page —
+   and some from the address bar — so refuse anything that could climb out
+   of /v1 (a dot-segment, plain or encoded, a backslash, an empty segment). */
+function apiPath(path) {
+  const p = String(path ?? "");
+  const pathname = p.split(/[?#]/)[0];
+  const ok = (pathname === "/health" || pathname.startsWith("/v1/"))
+    && !/(^|\/)(\.|%2e){1,2}(\/|$)/i.test(pathname)
+    && !/[\\\u0000-\u001f]|\/\//.test(pathname);
+  if (!ok) throw new Error("that address isn't one this page asks for");
+  return API + p;
+}
 async function api(path) {
-  const response = await fetch(API + path, { headers: authHeaders() });
+  const response = await fetch(apiPath(path));
   if (!response.ok) throw new Error((await response.json()).error || response.statusText);
   return response.json();
 }
@@ -372,16 +390,16 @@ async function refreshVersion() {
 
 /* generic POST helper for curation actions */
 async function apiPost(path, body) {
-  const response = await fetch(API + path, {
+  const response = await fetch(apiPath(path), {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   if (!response.ok) throw new Error((await response.json()).error || response.statusText);
   return response.json();
 }
 async function apiDelete(path) {
-  const response = await fetch(API + path, { method: "DELETE", headers: authHeaders() });
+  const response = await fetch(apiPath(path), { method: "DELETE" });
   if (!response.ok) throw new Error((await response.json()).error || response.statusText);
   return response.json();
 }
@@ -671,12 +689,15 @@ async function renderUpgrade() {
 async function renderPluginPage(arg) {
   const slash = arg.indexOf("/");
   const name = slash < 0 ? arg : arg.slice(0, slash);
-  const page = slash < 0 ? "index.html" : arg.slice(slash + 1);
+  const asked = slash < 0 ? "index.html" : arg.slice(slash + 1);
   setNav(`plugin-${name}`);
   const ui = window.__pluginUi || {};
   const entry = ["nav", "visualize", "hamburger", "card"]
     .flatMap((k) => ui[k] || [])
-    .find((e) => e.plugin === name && e.page === page);
+    .find((e) => e.plugin === name && e.page === asked);
+  // the address bar picks among the pages the ember declared — a path
+  // that isn't one of them (or climbs out of its folder) opens its index
+  const page = entry && !/(^|\/)\.\.?(\/|$)|\\|%2e/i.test(asked) ? asked : "index.html";
   const wantsDial = !!entry?.dial;
   const dISO = (n) => new Date(n).toISOString().slice(0, 10);
   let span = { from: dISO(Date.now() - 30 * 86400000), to: dISO(Date.now()) };
@@ -2867,6 +2888,8 @@ async function renderWelcome() {
         <input id="wz-admin-email" type="email" placeholder="your email" autocomplete="email" style="flex:1.4; min-width:180px">
         <input id="wz-admin-pass" type="password" placeholder="password (min 8 chars)" autocomplete="new-password" style="flex:1">
         <input id="wz-admin-pass2" type="password" placeholder="again" autocomplete="new-password" style="flex:1">
+        <input id="wz-admin-code" placeholder="setup code" autocomplete="off" style="flex:1" hidden
+          title="on the machine this node runs on: hearthloom auth setup-code">
         <button class="btn" id="wz-admin-create">create my login</button>
         <button class="btn btn-quiet" id="wz-admin-skip">skip</button>
       </div>
@@ -3143,6 +3166,21 @@ async function renderWelcome() {
   // The UI bootstrap: creates the admin and signs them straight in (the
   // endpoint sets the session cookie), so the wizard just continues —
   // but from here on, this record requires the login.
+  // The first login needs the node's one-time setup code: on the machine
+  // itself the node hands it over; from anywhere else it's typed in.
+  let setupCode = null;
+  if (view.querySelector("#wz-admin-create")) {
+    fetch("/v1/auth/setup-code").then((r) => (r.ok ? r.json() : null)).then((d) => {
+      setupCode = d?.setup_code || null;
+      if (!setupCode) {
+        const field = view.querySelector("#wz-admin-code");
+        if (field) field.hidden = false;
+        const note = view.querySelector("#wz-admin-note");
+        note.hidden = false;
+        note.textContent = "From another computer you'll need this node's setup code: on the machine it runs on, `hearthloom auth setup-code` prints it.";
+      }
+    }).catch(() => { view.querySelector("#wz-admin-code")?.removeAttribute("hidden"); });
+  }
   view.querySelector("#wz-admin-create")?.addEventListener("click", async () => {
     const note = view.querySelector("#wz-admin-note");
     note.hidden = false;
@@ -3159,12 +3197,13 @@ async function renderWelcome() {
         body: JSON.stringify({
           email: view.querySelector("#wz-admin-email").value.trim(),
           password: pass,
+          setup_code: setupCode || view.querySelector("#wz-admin-code")?.value.trim() || null,
         }),
       });
       const data = await res.json();
       if (!res.ok) { note.textContent = `✗ ${data.error || res.statusText}`; return; }
       note.textContent = `✓ ${data.bootstrapped} is signed in — this record now requires your login everywhere`;
-      view.querySelectorAll("#wz-admin-email, #wz-admin-pass, #wz-admin-pass2, #wz-admin-create, #wz-admin-skip")
+      view.querySelectorAll("#wz-admin-email, #wz-admin-pass, #wz-admin-pass2, #wz-admin-code, #wz-admin-create, #wz-admin-skip")
         .forEach((el) => { el.disabled = true; });
     } catch (err) {
       note.textContent = `✗ ${err.message}`;
@@ -4607,7 +4646,7 @@ askInput.addEventListener("keydown", (e) => {
    logout lives in the hamburger. Open installs never see any of it. */
 async function configNudge() {
   try {
-    const s = await (await fetch("/v1/monitor/summary", { headers: authHeaders() })).json();
+    const s = await (await fetch("/v1/monitor/summary")).json();
     const missing = s.llm_configured === false ? 1 : 0;
     const hint = document.getElementById("int-hint");
     window.__hamFlags = window.__hamFlags || { update: false, llm: false };

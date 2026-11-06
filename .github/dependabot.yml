@@ -1,7 +1,8 @@
 # Dependabot security updates for every dependency ecosystem are switched on
 # in the repository settings and need no entry here. This file adds monthly
 # version updates for the GitHub Actions the workflows pin by commit SHA,
-# grouped into a single pull request.
+# grouped into a single pull request, and for the Dockerfile's base images
+# (pinned by digest).
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -10,4 +11,11 @@ updates:
       interval: monthly
     groups:
       github-actions:
+        patterns: ["*"]
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      docker:
         patterns: ["*"]

@@ -48,6 +48,7 @@ pub mod registry_client;
 mod retire;
 mod rlm;
 mod scoped;
+mod setup_code;
 mod sidecar;
 mod sync;
 mod trips;
@@ -325,6 +326,14 @@ pub async fn run(home: Home) -> Result<()> {
 
     // Sleep-time consolidation: LLM/embedding spend happens here, at idle,
     // never on the query path.
+    // A node with no login keeps a one-time setup code on its disk; the
+    // first login needs it (the log says where — never the code).
+    if setup_code::ensure(&state).is_some() {
+        tracing::info!(
+            "this node has no login yet: its one-time setup code is in {} (hearthloom auth setup-code prints it)",
+            setup_code::path(&state).display()
+        );
+    }
     tokio::spawn(consolidate::run_loop(state.clone()));
     // The inbox drop folder: exports placed there ingest themselves.
     tokio::spawn(inbox::run_loop(state.clone()));
@@ -381,7 +390,13 @@ pub async fn run(home: Home) -> Result<()> {
         .await
         .with_context(|| format!("binding {addr} (is another daemon running?)"))?;
     tracing::info!("hearthloom daemon listening on http://{addr}");
-    axum::serve(listener, app).await?;
+    // the peer's address reaches handlers that must know a request came
+    // from this machine itself (the setup code)
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 

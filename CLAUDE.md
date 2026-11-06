@@ -1136,6 +1136,29 @@ the design log 2026-07-14.
   and addresses validated) — the message stays 7-bit. An ember's draft
   (`mail.draft`, plugin row only, like `mail.watch`) answers only a
   message its own queue holds, to the sender, ≤20 a day.
+- **THE SERVER NAMES EVERY WRITER THAT ISN'T THE OWNER (0.5.96).** On
+  `/v1/ingest` and every device feed, `http.rs::ingest_actor` decides the
+  actor: a peer by this node's name for it, an ember by its name, any
+  other key via `write_actor` (`agent:key:<name>`, own-device keys
+  `human:device:<name>`); only the owner names an adapter. MCP checks an
+  ordinary key's scopes per tool (`mcp.rs::call_tool`: `read`|`mcp` read,
+  `mcp`|`write` propose, `write` commit) and its writes go through
+  `write_actor`. A new route that writes for a key uses one of the two.
+- **THE FIRST LOGIN NEEDS PROOF (0.5.96, setup_code.rs).** `auth_bootstrap`
+  takes the node's one-time setup code (`<home>/setup-code`, 0600, spent
+  on use), or on a node with `HEARTHLOOM_PROVISIONER_SECRET` only the
+  provisioner's control token (`X-Provisioner-Token`; a provisioner
+  sends one). `GET /v1/auth/setup-code` answers only a connection whose SOCKET
+  address is loopback (`ConnectInfo`, served with
+  `into_make_service_with_connect_info`) with no forwarding headers —
+  never trust a Host header for "this machine". Never log the code.
+- **THE DASHBOARD HOLDS NO KEY, AND ASKS ONLY FOR ITS OWN API (0.5.96).**
+  No API key in localStorage/sessionStorage: "sign in this browser" trades
+  an owner key for the HttpOnly session (`/v1/auth/session-from-key`).
+  `app.js::apiPath` refuses any path outside `/v1/` and `/health` or with
+  a dot-segment (plain or `%2e`), a backslash or `//` — views build paths
+  from the address bar, so keep every request on `api`/`apiPost`/
+  `apiDelete`. An ember page opens only a page the ember declared.
 - **GOOGLE CALENDAR IS FREE/BUSY ONLY (0.5.95, google_calendar.rs).**
   Scopes stay `calendar.freebusy` + `calendar.calendarlist.readonly`
   (+ `openid email` for the account's name): never a scope that reads

@@ -8,6 +8,30 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.96 — 2026-11-06
+
+### Changed
+- **Keys do what their scopes say, everywhere.** Through MCP, `read` (or
+  `mcp`) reads; proposing a memory for review needs `mcp` (or `write`);
+  adding a task or note straight to the Desk needs `write`. A write by any
+  key that isn't yours — through MCP, `/v1/ingest` or a device feed — is
+  recorded under the key's own name (`agent:key:<name>`), whatever actor
+  the request names; your own keys and the paired phone are unchanged.
+- **The first login needs a one-time setup code.** A node with no login
+  keeps one in `~/.hearthloom/setup-code`; the first-run wizard fills it
+  in on the machine itself, and `hearthloom auth setup-code` prints it for
+  setting up from another computer (`scripts/bootstrap.sh` reads it). A
+  hosted node's first login comes from its provisioner.
+- **The dashboard keeps no API key in the browser.** "Use in this browser"
+  became "sign in this browser": the key is traded for a session cookie
+  the page can't read. A key an earlier version stored is traded the same
+  way once and erased. The dashboard only ever requests its own API paths.
+- The Docker image's base images are pinned by digest (Dependabot
+  proposes updates).
+
+### Fixed
+- An ember holding a mail permission got no token for its pages.
+
 ## 0.5.95 — 2026-11-06
 
 ### Added

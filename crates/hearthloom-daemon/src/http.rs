@@ -135,6 +135,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/keys/self-revoke", post(keys_self_revoke))
         .route("/v1/auth/me", get(auth_me))
         .route("/v1/auth/bootstrap", post(auth_bootstrap))
+        .route("/v1/auth/setup-code", get(auth_setup_code))
         .route("/v1/auth/login", post(auth_login))
         .route("/v1/auth/logout", post(auth_logout))
         .route("/v1/auth/session-from-key", post(auth_session_from_key))
@@ -1012,6 +1013,68 @@ mod ingest_origin_tests {
         }
     }
 
+    /// An ingest key names nobody: the server records it under its own
+    /// name, whatever actor its batch claims; the owner keeps its claim.
+    #[tokio::test]
+    async fn test_an_ingest_key_never_chooses_whom_it_writes_as() {
+        let (state, _tmp) = state();
+        let outside = |r: &str| -> IngestBody {
+            let mut b = body(r);
+            for d in &mut b.batch.episodes {
+                d.source = "clipper".into();
+            }
+            b.batch.actor = "human:owner".into();
+            b.origins.clear();
+            b
+        };
+        let writer = |r: &str| {
+            state
+                .store
+                .episode_origin(&hearthloom_core::ids::episode_id("clipper", r))
+                .unwrap()
+                .unwrap()
+                .writer
+        };
+        for (r, scopes, expected) in [
+            ("a", &["ingest"][..], "agent:key:attic"),
+            ("b", &["ingest", "read"][..], "agent:key:attic"),
+            ("c", &["admin"][..], "human:owner"),
+            ("d", &["read", "ingest", "notify"][..], "human:owner"),
+        ] {
+            let _ = ingest(
+                State(state.clone()),
+                HeaderMap::new(),
+                axum::Extension(key(scopes)),
+                Json(outside(r)),
+            )
+            .await
+            .map_err(|e| e.1)
+            .unwrap();
+            assert_eq!(writer(r).as_deref(), Some(expected), "{scopes:?}");
+        }
+        // the same rule on the device feeds; a peer is named by this node
+        assert_eq!(
+            ingest_actor(&state, &key(&["peer"]), "human:owner"),
+            "peer:attic"
+        );
+        assert_eq!(
+            ingest_actor(&state, &key(&["ingest"]), "adapter:ios-health"),
+            "agent:key:attic"
+        );
+        assert_eq!(
+            ingest_actor(
+                &state,
+                &key(&["read", "ingest", "notify"]),
+                "adapter:ios-health"
+            ),
+            "adapter:ios-health"
+        );
+        assert_eq!(
+            ingest_actor(&state, &AuthInfo(None), "adapter:script"),
+            "adapter:script"
+        );
+    }
+
     #[tokio::test]
     async fn test_only_one_of_the_owners_nodes_may_say_where_an_episode_came_from() {
         let (state, _tmp) = state();
@@ -1881,7 +1944,7 @@ const DEVICE_KEY_SCOPES: [&str; 3] = ["read", "ingest", "notify"];
 /// Is this key the owner's own hand — an admin key, or a paired device?
 /// Scoped keys (grants), plugin keys, and keys with a narrower scope set
 /// (`read` alone, `peer`, `mcp`…) are not.
-fn is_owner_key(scopes: &[String], has_grants: bool) -> bool {
+pub(crate) fn is_owner_key(scopes: &[String], has_grants: bool) -> bool {
     if has_grants {
         return false;
     }
@@ -2468,13 +2531,9 @@ async fn ingest(
             // anyone else would be choosing its provenance
             origins.clear();
         }
-        if peer {
-            batch.actor = format!("peer:{}", claims.name);
-        } else if let Some(plugin) = crate::plugins::plugin_for_claims(&state, claims) {
-            // same receiver-stamped provenance for plugins: a plugin
-            // can't claim to be an adapter, a human, or another plugin
-            batch.actor = format!("plugin:{plugin}");
-        }
+        // receiver-stamped provenance: no key but the owner's chooses
+        // whom a write is recorded under (a peer, an ember, any other key)
+        batch.actor = ingest_actor(&state, &auth, &batch.actor);
         // Any other key that isn't the owner's writes as an OUTSIDE source:
         // never under one of the record's own source names (a `#r` ref
         // there hides a real record; `consolidation` poses as the digest;
@@ -3404,7 +3463,23 @@ fn expiry_from(expires_at: Option<String>, in_secs: Option<i64>) -> Option<Strin
 /// `agent:key:<name>`, which is what the activity list, Undo and the
 /// note-writer record read. The owner (session, admin key, phone) keeps
 /// its claim.
-fn write_actor(auth: &AuthInfo, claimed: String) -> Actor {
+/// Who an ingest is recorded under. The server decides for every key that
+/// isn't the owner's: a peer by the name this node gave it, an ember by
+/// its name, any other key as `agent:key:<name>` (an own-device key as
+/// `human:device:<name>`). Only the owner — no key on an open node, a
+/// session, an owner key — names the adapter it speaks for.
+fn ingest_actor(state: &AppState, auth: &AuthInfo, claimed: &str) -> String {
+    match &auth.0 {
+        Some(c) if c.scopes.iter().any(|s| s == "peer") => format!("peer:{}", c.name),
+        Some(c) => match crate::plugins::plugin_for_claims(state, c) {
+            Some(plugin) => format!("plugin:{plugin}"),
+            None => write_actor(auth, claimed.to_string()).actor,
+        },
+        None => claimed.to_string(),
+    }
+}
+
+pub(crate) fn write_actor(auth: &AuthInfo, claimed: String) -> Actor {
     match &auth.0 {
         // A scoped key the owner minted for one of their own devices
         // (`KeyGrants::own_device`): its words are the owner's.
@@ -3981,6 +4056,10 @@ async fn auth_me(
 struct BootstrapBody {
     email: String,
     password: String,
+    /// the node's one-time setup code (setup_code.rs); a hosted node is
+    /// set up by its provisioner's control token instead
+    #[serde(default)]
+    setup_code: Option<String>,
 }
 
 /// First-run only: create the admin and lock the door. Refused once any
@@ -3988,14 +4067,40 @@ struct BootstrapBody {
 /// a separate, authenticated flow.
 async fn auth_bootstrap(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<BootstrapBody>,
 ) -> Result<Response, ApiError> {
+    // Whoever creates the first login proves they may: a hosted node's
+    // provisioner by its control token, anyone else by the code on this
+    // node's disk. (Before, the first caller to reach a fresh node won.)
+    if crate::provisioner::secret().is_some() {
+        let token = headers
+            .get("x-provisioner-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if crate::provisioner::verify_control_token(token).is_err() {
+            return Err(ApiError(
+                StatusCode::UNAUTHORIZED,
+                "only this node's provisioner sets up its first login".into(),
+            ));
+        }
+    } else if state.store.auth_required()? {
+        return Err(bad_request("an admin user already exists"));
+    } else if !crate::setup_code::check(&state, body.setup_code.as_deref()) {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "the setup code is missing or wrong — on the machine this node runs on, \
+             `hearthloom auth setup-code` prints it"
+                .into(),
+        ));
+    }
     state
         .store
         .create_admin(&Actor::new("human:bootstrap"), &body.email, &body.password)?;
     state
         .auth_locked
         .store(true, std::sync::atomic::Ordering::Relaxed);
+    crate::setup_code::consume(&state);
     // Sign the creator straight in — bootstrap shouldn't end at a login
     // prompt for the password typed two seconds ago.
     let token = state
@@ -4008,6 +4113,35 @@ async fn auth_bootstrap(
         Json(json!({"bootstrapped": body.email, "auth": "required"})),
     )
         .into_response())
+}
+
+/// The setup code, for the first-run wizard on this machine only: a
+/// connection from this machine's own loopback (the socket's address, not
+/// a Host header) to a node with no login and no provisioner.
+async fn auth_setup_code(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+) -> Result<Json<Value>, ApiError> {
+    let local = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .is_some_and(|c| c.0.ip().is_loopback());
+    let forwarded = req.headers().contains_key("x-forwarded-for")
+        || req.headers().contains_key("forwarded")
+        || req.headers().contains_key("fly-client-ip");
+    if !local || forwarded || foreign_browser_request(req.headers()) {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "the setup code is shown only on the machine this node runs on".into(),
+        ));
+    }
+    let code = crate::setup_code::ensure(&state).ok_or_else(|| {
+        ApiError(
+            StatusCode::NOT_FOUND,
+            "this node needs no setup code".into(),
+        )
+    })?;
+    Ok(Json(json!({"setup_code": code})))
 }
 
 #[derive(Deserialize)]
@@ -4124,12 +4258,13 @@ async fn auth_session_from_key(
 async fn ingest_health(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthInfo>,
-    Json(batch): Json<HealthIngestBatch>,
+    Json(mut batch): Json<HealthIngestBatch>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&auth, "ingest")?;
     if batch.actor.trim().is_empty() {
         return Err(bad_request("actor is required on every write"));
     }
+    batch.actor = ingest_actor(&state, &auth, &batch.actor);
     // Pure store+CPU → off the runtime workers (THE PASS CONTRACT);
     // health_add_samples batches its lock holds internally.
     let report = crate::scoped::spawn_blocking(move || -> anyhow::Result<Value> {
@@ -4192,12 +4327,13 @@ async fn ingest_health(
 async fn ingest_photos(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthInfo>,
-    Json(batch): Json<PhotoIngestBatch>,
+    Json(mut batch): Json<PhotoIngestBatch>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&auth, "ingest")?;
     if batch.actor.trim().is_empty() {
         return Err(bad_request("actor is required on every write"));
     }
+    batch.actor = ingest_actor(&state, &auth, &batch.actor);
     let report = crate::scoped::spawn_blocking(move || -> anyhow::Result<Value> {
         let (accepted, duplicates) = state
             .store
@@ -4294,9 +4430,10 @@ fn clean_vehicle_id(id: &str) -> Option<String> {
 async fn ingest_movement(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthInfo>,
-    Json(batch): Json<MovementIngestBatch>,
+    Json(mut batch): Json<MovementIngestBatch>,
 ) -> Result<Json<Value>, ApiError> {
     require_device_write(&auth, &batch.actor)?;
+    batch.actor = ingest_actor(&state, &auth, &batch.actor);
     if batch.items.len() > 5000 {
         return Err(bad_request("at most 5000 movements per batch"));
     }
@@ -4482,9 +4619,10 @@ struct ContactsIngestBatch {
 async fn ingest_contacts(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthInfo>,
-    Json(batch): Json<ContactsIngestBatch>,
+    Json(mut batch): Json<ContactsIngestBatch>,
 ) -> Result<Json<Value>, ApiError> {
     require_device_write(&auth, &batch.actor)?;
+    batch.actor = ingest_actor(&state, &auth, &batch.actor);
     let report = crate::scoped::spawn_blocking(move || -> anyhow::Result<Value> {
         let (new, updated, unchanged) = state.store.contacts_upsert(&batch.device, &batch.items)?;
         let applied = crate::live_ingest::apply_pending_contacts(&state, new + updated + 200)?;
@@ -4521,9 +4659,10 @@ struct CalendarIngestBatch {
 async fn ingest_calendar(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthInfo>,
-    Json(batch): Json<CalendarIngestBatch>,
+    Json(mut batch): Json<CalendarIngestBatch>,
 ) -> Result<Json<Value>, ApiError> {
     require_device_write(&auth, &batch.actor)?;
+    batch.actor = ingest_actor(&state, &auth, &batch.actor);
     let report = crate::scoped::spawn_blocking(move || -> anyhow::Result<Value> {
         let mut drafts = Vec::new();
         let mut observations = Vec::new();
@@ -4612,9 +4751,10 @@ struct RemindersIngestBatch {
 async fn ingest_reminders(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthInfo>,
-    Json(batch): Json<RemindersIngestBatch>,
+    Json(mut batch): Json<RemindersIngestBatch>,
 ) -> Result<Json<Value>, ApiError> {
     require_device_write(&auth, &batch.actor)?;
+    batch.actor = ingest_actor(&state, &auth, &batch.actor);
     let st = state.clone();
     let report = crate::scoped::spawn_blocking(move || -> anyhow::Result<Value> {
         let actor = hearthloom_core::store::Actor::new(batch.actor.clone());
@@ -4668,9 +4808,10 @@ struct LocationIngestBatch {
 async fn ingest_location(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthInfo>,
-    Json(batch): Json<LocationIngestBatch>,
+    Json(mut batch): Json<LocationIngestBatch>,
 ) -> Result<Json<Value>, ApiError> {
     require_device_write(&auth, &batch.actor)?;
+    batch.actor = ingest_actor(&state, &auth, &batch.actor);
     let report = crate::scoped::spawn_blocking(move || -> anyhow::Result<Value> {
         let source = if batch.source.trim().is_empty() {
             "ios-visits"
@@ -4712,9 +4853,10 @@ struct MotionIngestBatch {
 async fn ingest_motion(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthInfo>,
-    Json(batch): Json<MotionIngestBatch>,
+    Json(mut batch): Json<MotionIngestBatch>,
 ) -> Result<Json<Value>, ApiError> {
     require_device_write(&auth, &batch.actor)?;
+    batch.actor = ingest_actor(&state, &auth, &batch.actor);
     let report = crate::scoped::spawn_blocking(move || -> anyhow::Result<Value> {
         let scope = crate::visits::device_scope(&state.store);
         let drafts: Vec<hearthloom_core::EpisodeDraft> = batch
@@ -4798,9 +4940,10 @@ struct MediaIngestBatch {
 async fn ingest_media(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthInfo>,
-    Json(batch): Json<MediaIngestBatch>,
+    Json(mut batch): Json<MediaIngestBatch>,
 ) -> Result<Json<Value>, ApiError> {
     require_device_write(&auth, &batch.actor)?;
+    batch.actor = ingest_actor(&state, &auth, &batch.actor);
     let report = crate::scoped::spawn_blocking(move || -> anyhow::Result<Value> {
         let drafts: Vec<hearthloom_core::EpisodeDraft> = batch
             .items
@@ -4856,9 +4999,10 @@ struct ScanIngestBatch {
 async fn ingest_scan(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthInfo>,
-    Json(batch): Json<ScanIngestBatch>,
+    Json(mut batch): Json<ScanIngestBatch>,
 ) -> Result<Json<Value>, ApiError> {
     require_device_write(&auth, &batch.actor)?;
+    batch.actor = ingest_actor(&state, &auth, &batch.actor);
     let report = crate::scoped::spawn_blocking(move || -> anyhow::Result<Value> {
         let mut drafts = Vec::new();
         let mut observations = Vec::new();
@@ -4929,9 +5073,10 @@ struct FocusIngestBatch {
 async fn ingest_focus(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthInfo>,
-    Json(batch): Json<FocusIngestBatch>,
+    Json(mut batch): Json<FocusIngestBatch>,
 ) -> Result<Json<Value>, ApiError> {
     require_device_write(&auth, &batch.actor)?;
+    batch.actor = ingest_actor(&state, &auth, &batch.actor);
     let report = crate::scoped::spawn_blocking(move || -> anyhow::Result<Value> {
         let source = if batch.source.trim().is_empty() {
             "ios-focus"
@@ -13670,10 +13815,18 @@ async fn plugin_ui_token(
     let expires = (chrono::Utc::now() + chrono::Duration::hours(12))
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
+    // the ember-only grants (mail.watch, mail.draft) live on the plugin
+    // row, not on keys
+    let key_scopes: Vec<String> = row
+        .granted_scopes
+        .iter()
+        .filter(|s| hearthloom_core::store::API_KEY_SCOPES.contains(&s.as_str()))
+        .cloned()
+        .collect();
     let (_, secret) = state.store.create_api_key(
         &Actor::new("human:dashboard"),
         &format!("plugin-ui:{name}"),
-        &row.granted_scopes,
+        &key_scopes,
         Some(&expires),
     )?;
     Ok(Json(

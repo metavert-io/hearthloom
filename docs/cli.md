@@ -25,6 +25,7 @@ Commands, alphabetically:
 ```
 hearthloom auth login                 # prompts email + password
 hearthloom auth login --email a@b.c
+hearthloom auth setup-code              # a node with no login yet: its one-time setup code
 hearthloom auth status
 hearthloom auth logout
 hearthloom --url https://my-node.example.com auth login

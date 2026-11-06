@@ -90,6 +90,10 @@ pub const DIR_CLASSES: &[(&str, DirClass)] = &[
     (".env", DirClass::Excluded("secrets never export")),
     (".env.sealed", DirClass::Excluded("secrets never export")),
     (
+        "setup-code",
+        DirClass::Excluded("a one-time secret for the first login; gone once it exists"),
+    ),
+    (
         ".ember-secrets.key",
         DirClass::Excluded("the key ember secrets are sealed with — secrets never export"),
     ),

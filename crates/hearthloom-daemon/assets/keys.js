@@ -174,14 +174,27 @@ export async function mount(view, helpers) {
             <input id="key-secret" value="${esc(res.secret)}" readonly>
             <button class="btn" id="key-copy">copy</button>
             ${res.key?.grants ? "" : `<button class="btn btn-quiet" id="key-use-here"
-              title="store in this browser and send it with every dashboard request">use in this browser</button>`}
+              title="sign this browser in with it (an owner key; nothing is stored in the page)">sign in this browser</button>`}
           </div>
         </div>`;
       // click selects the whole key, ready to copy
       view.querySelector("#key-secret").addEventListener("click", (e) => e.currentTarget.select());
       view.querySelector("#key-copy").onclick = () => navigator.clipboard?.writeText(res.secret);
       const here = view.querySelector("#key-use-here");
-      if (here) here.onclick = () => { localStorage.setItem("hl-api-key", res.secret); paint(); };
+      // traded for an HttpOnly session cookie — the key itself is never
+      // kept where a script could read it
+      if (here) here.onclick = async () => {
+        const r = await fetch("/v1/auth/session-from-key", {
+          method: "POST", headers: { Authorization: `Bearer ${res.secret}` },
+        });
+        if (!r.ok) {
+          const why = (await r.json().catch(() => ({}))).error || r.statusText;
+          here.replaceWith(Object.assign(document.createElement("span"),
+            { className: "meta", textContent: `couldn't sign in with it: ${why}` }));
+          return;
+        }
+        paint();
+      };
       return true;
     };
     const refreshList = async () => {
