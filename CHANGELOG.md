@@ -8,6 +8,8 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.97 — 2026-11-06
+
 ### Changed
 - **Calendar setup takes the file Google gives you, and checks it.**
   `hearthloom calendar setup` (and the Integrations card) accepts the
