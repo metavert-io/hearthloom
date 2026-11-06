@@ -8,6 +8,8 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+## 0.5.92 — 2026-11-06
+
 ### Added
 - **"Waiting on you": the mail that needs you, on the Desk.** New mail
   from people (Gmail's Primary category, and replies in threads you're
