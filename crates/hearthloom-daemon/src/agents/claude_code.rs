@@ -16,11 +16,15 @@ use serde_json::{json, Value};
 
 use crate::AppState;
 
-/// Where `claude` usually lives; launchd's PATH is minimal.
+/// Where `claude` usually lives; launchd's PATH is minimal. An agent's
+/// own `claude_path` names any file — on a hosted node, where only
+/// reviewed code may run (`registry_client::unreviewed_install_allowed`),
+/// it is ignored and only the usual places count (0.5.100).
 pub fn find_claude(agent: &AgentRow) -> Result<std::path::PathBuf> {
     if let Some(path) = agent.config["claude_path"]
         .as_str()
         .filter(|p| !p.trim().is_empty())
+        .filter(|_| crate::registry_client::unreviewed_install_allowed())
     {
         let path = super::expand_home(path);
         return if path.is_file() {
@@ -301,7 +305,7 @@ pub async fn run(
     }
     let claude = find_claude(agent)?;
     let config_path = write_mcp_config(state, agent, task, token)?;
-    let prompt = format!("{}{}", super::preamble(agent), task.brief);
+    let prompt = format!("{}{}", super::preamble(agent), super::brief_for_model(task));
     let timeout = std::time::Duration::from_secs(
         agent.config["timeout_secs"]
             .as_u64()

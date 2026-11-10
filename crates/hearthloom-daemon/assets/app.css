@@ -832,6 +832,11 @@ a.mention {
   border-radius: var(--radius); border: 1px solid var(--line);
   margin: var(--s3) 0;
 }
+/* a picture on another site: a link you choose to open, never loaded by itself */
+.note-img-link {
+  display: inline-block; margin: var(--s1) 0; padding: 2px var(--s2);
+  border: 1px dashed var(--line); border-radius: 6px; text-decoration: none;
+}
 
 /* ————— relationships ————— */
 .rel-row {
@@ -2094,6 +2099,11 @@ table.browse { width: 100%; border-collapse: collapse; font-size: var(--step--1)
 .agent-status-tag[data-status="proposed"], .agent-status-tag[data-status="running"] { color: var(--accent); }
 .agent-approval { border-left: 3px solid var(--accent); padding: var(--s2) var(--s3); margin: var(--s2) 0; background: var(--bg-raise); border-radius: 4px; }
 .agent-why { font-style: italic; }
+.agent-input { margin: var(--s2) 0; }
+.agent-input pre { margin: 2px 0 0; max-height: 16em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  font-size: 0.85em; padding: var(--s1) var(--s2); background: var(--bg); border-radius: 4px; }
+.agent-input mark.unseen, .agent-approval mark.unseen { background: var(--chart-3, #d9a441); color: #000; border-radius: 2px; padding: 0 1px; }
+.agent-hidden { font-size: 0.9em; margin: var(--s1) 0; padding: 2px var(--s2); border-left: 3px solid var(--chart-3, #d9a441); }
 .agent-panel { margin-top: var(--s3); padding-top: var(--s3); border-top: 1px solid var(--line); }
 .agent-field { display: flex; flex-direction: column; gap: 4px; }
 .agent-matrix { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--s2) var(--s4); margin: var(--s3) 0; }

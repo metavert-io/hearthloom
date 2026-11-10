@@ -914,8 +914,11 @@ window.friendAvatar = (name, opts = {}) => {
   const hue = [...String(name)].reduce((h, c) => ((h * 31 + c.charCodeAt(0)) >>> 0), 7) % 360;
   const bg = opts.color || `hsl(${hue} 42% 34%)`;
   const av = opts.avatar || "";
-  // image > emoji > INITIALS (no avatar supplied means their initials)
-  const face = av && (av.startsWith("data:image/") || av.startsWith("https://"))
+  // image > emoji > INITIALS (no avatar supplied means their initials).
+  // Only an uploaded picture shows (0.5.100): an avatar at a web address
+  // would load from a site its owner picked whenever you open the page,
+  // telling them when you look — so those show initials instead.
+  const face = av.startsWith("data:image/")
     ? `<img src="${esc(av)}" alt="">`
     : (opts.emoji || esc(nameInitials(opts.displayName || name)));
   const tip = esc(opts.title || `${name} — connected brain · click for their card`);
@@ -962,13 +965,28 @@ window.mountProfileCard = async (host) => {
     </div>
     <div class="searchbar" style="flex-wrap:wrap; align-items:center; margin-top:var(--s2)">
       <input id="pc-bio" placeholder="one-line bio" value="${esc(card.bio || "")}" style="flex:1">
-      <input id="pc-avatar" placeholder="avatar https:// URL (or upload →)"
-        value="${esc((card.avatar || "").startsWith("data:") ? "" : card.avatar || "")}" style="flex:1">
-      <button class="btn btn-quiet" id="pc-upload">${(card.avatar || "").startsWith("data:") ? "replace upload" : "upload…"}</button>
+      <button class="btn btn-quiet" id="pc-upload">${card.avatar ? "replace picture…" : "upload a picture…"}</button>
+      ${card.avatar ? `<button class="btn btn-quiet" id="pc-unpic">remove picture</button>` : ""}
       <button class="btn" id="pc-save">save</button>
     </div>
+    ${(card.avatar || "").startsWith("https://") ? `<p class="meta">Your picture is a web address, and
+      Hearthloom no longer loads pictures from other sites (that site would learn whenever someone
+      looks at your card) — upload the picture itself to show it.</p>` : ""}
     <p class="meta" id="pc-note" hidden></p>`;
-  let uploadedAvatar = (card.avatar || "").startsWith("data:") ? card.avatar : "";
+  // An avatar is an uploaded picture (0.5.100: no more web addresses — see
+  // friendAvatar). An older card's web address is kept until replaced or
+  // removed, for friends' older versions, but never shown here.
+  let avatar = card.avatar || "";
+  const unpic = host.querySelector("#pc-unpic");
+  if (unpic) {
+    unpic.onclick = () => {
+      avatar = "";
+      unpic.hidden = true;
+      const note = host.querySelector("#pc-note");
+      note.hidden = false;
+      note.textContent = "picture removed — click save";
+    };
+  }
   host.querySelector("#pc-upload").onclick = () => {
     const input = document.createElement("input");
     input.type = "file";
@@ -984,8 +1002,7 @@ window.mountProfileCard = async (host) => {
       }
       const reader = new FileReader();
       reader.onload = () => {
-        uploadedAvatar = reader.result;
-        host.querySelector("#pc-avatar").value = "";
+        avatar = reader.result;
         note.hidden = false;
         note.textContent = "image ready — click save";
       };
@@ -996,14 +1013,13 @@ window.mountProfileCard = async (host) => {
   host.querySelector("#pc-save").onclick = async () => {
     const note = host.querySelector("#pc-note");
     note.hidden = false; note.textContent = "saving…";
-    const url = host.querySelector("#pc-avatar").value.trim();
     const res = await apiPost("/v1/network/mycard", {
       actor: "human:dashboard",
       name: host.querySelector("#pc-name").value,
       emails: host.querySelector("#pc-emails").value.split(",").map((e) => e.trim()).filter(Boolean),
       emoji: host.querySelector("#pc-emoji").value,
       bio: host.querySelector("#pc-bio").value,
-      avatar: url || uploadedAvatar || "",
+      avatar,
     }).catch((e) => ({ error: e.message }));
     if (res?.error) { note.textContent = `✗ ${res.error}`; return; }
     note.textContent = "✓ saved — it syncs to your other node and shows to connected friends";

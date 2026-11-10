@@ -8,6 +8,38 @@ pin release tags, never a branch.
 
 ## Unreleased
 
+### Changed
+- **You see everything you approve.** When an agent asks to do something,
+  its card now shows the whole of what it would run (it used to show the
+  first 300 characters), field by field, and for a task, everything the
+  agent will be told. A very long action keeps its reason and says how
+  much is left out.
+- **Hidden characters show up, and stay away from models.** Characters
+  that draw nothing or reorder text (zero-width spaces, Unicode tag
+  letters, direction controls) are shown as marks such as ⟦U+202E⟧ on
+  approval cards, with a count. Everything Hearthloom sends to a model,
+  including Ask, mail sorting and drafting, agent tasks and what
+  agents read through MCP, leaves them out. Your records keep every
+  character as it arrived.
+- **One way of keeping other people's words in their place.** The
+  boundaries around email in mail sorting and drafting now use the same
+  check Ask uses, which catches every spelling of a closing tag.
+- **Pictures from other sites aren't loaded by themselves.** A web image
+  in a note shows as a link that opens it, and a friend's avatar at a web
+  address shows their initials. Upload a picture to your own card to
+  show it. The page no longer loads images from the web at all.
+- **Hermes and OpenClaw tasks ask first.** Hearthloom can't see what those
+  agents read, so from the moment one of their tasks starts, every action
+  they ask about waits for you.
+- **Restoring an export brings back only what an export holds.** Settings
+  files, keys and anything an export leaves out are skipped. The settings
+  in `config/` come back beside the node's own, as `*.restored` files, for
+  you to look at. On a hosted Hearthloom, restored embers come back off.
+  Install them again from the gallery, and their data is still there.
+- An ember starts only a program inside its own package, and a hosted
+  Hearthloom runs Claude Code only from where it is installed, not from a
+  path an agent's settings name.
+
 ## 0.5.99 — 2026-11-06
 
 ### Changed

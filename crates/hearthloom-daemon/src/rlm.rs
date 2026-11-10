@@ -1586,7 +1586,7 @@ async fn run_map(
                 let (ask_id, label) = (ask_id.to_string(), label.clone());
                 let prompt = format!(
                     "Instruction: {instruction}\n\n<record>\n{}\n</record>",
-                    defuse_tag(record, &["record"])
+                    crate::fence::outside(record, &["record"])
                 );
                 crate::scoped::spawn(async move {
                     let reply = crate::llm::call(
@@ -1708,56 +1708,13 @@ fn finalize(
 /// between its words — so a record can't close its own fence and pass
 /// off what follows as ours. The `<` of each such tag becomes `&lt;`.
 fn defuse_fence(text: &str) -> String {
-    defuse_tag(text, &["tool", "result"])
-}
-
-/// `defuse_fence` for any tag, named by its words (the map step's
-/// `<record>` fence uses `&["record"]`).
-fn defuse_tag(text: &str, words: &[&str]) -> String {
-    let mut out = String::with_capacity(text.len());
-    for (at, ch) in text.char_indices() {
-        if ch == '<' && reads_as_tag(&text[at + 1..], words) {
-            out.push_str("&lt;");
-        } else {
-            out.push(ch);
-        }
-    }
-    out
+    crate::fence::outside(text, &["tool", "result"])
 }
 
 /// Does the text after a `<` spell a tool_result tag, opening or closing?
 #[cfg(test)]
 fn reads_as_fence_tag(rest: &str) -> bool {
-    reads_as_tag(rest, &["tool", "result"])
-}
-
-/// Does the text after a `<` spell the tag made of `words`, opening or
-/// closing?
-fn reads_as_tag(rest: &str, words: &[&str]) -> bool {
-    // What a reader — or a model — slides straight over inside a tag.
-    let filler = |c: &char| {
-        c.is_whitespace()
-            || matches!(
-                c,
-                '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}' | '\u{00AD}'
-            )
-    };
-    let mut chars = rest.chars().filter(|c| !filler(c)).peekable();
-    while chars.next_if(|c| matches!(c, '/' | '\\')).is_some() {}
-    fn word(chars: &mut impl Iterator<Item = char>, expected: &str) -> bool {
-        expected
-            .chars()
-            .all(|want| chars.next().is_some_and(|c| c.eq_ignore_ascii_case(&want)))
-    }
-    for (i, expected) in words.iter().enumerate() {
-        if i > 0 {
-            while chars.next_if(|c| matches!(c, '_' | '-')).is_some() {}
-        }
-        if !word(&mut chars, expected) {
-            return false;
-        }
-    }
-    true
+    crate::fence::reads_as_tag(rest, &["tool", "result"])
 }
 
 pub async fn run_query(

@@ -34,6 +34,16 @@ async function apiPost(path, body) {
   return response.json();
 }
 
+/** The site a web address points at, for a label (already-escaped input
+ *  stays escaped: only the host's letters come back). */
+function webHost(escapedUrl) {
+  try {
+    return esc(new URL(escapedUrl.replace(/&amp;/g, "&")).host) || "another site";
+  } catch {
+    return "another site";
+  }
+}
+
 /* — compact markdown renderer (escape-first, like app.js's md) with
    @[Name] mentions linkified to dossiers; bare @text stays text — */
 export function renderMarkdown(text) {
@@ -43,10 +53,16 @@ export function renderMarkdown(text) {
   const out = [];
   let list = false;
   const inline = (t) => t
-    // images: only substrate media (vault-guarded route) or the web —
-    // never arbitrary local paths
-    .replace(/!\[([^\]]*)\]\((\/notes-media\/[^)\s]+|https?:[^)\s]+)\)/g,
+    // images: only substrate media (vault-guarded route) show inline —
+    // never arbitrary local paths. A picture on another site is a link
+    // you choose to open (0.5.100): loading it by itself would tell that
+    // site when you read the note, and the page's policy no longer lets
+    // it (dashboard.rs DASHBOARD_CSP img-src).
+    .replace(/!\[([^\]]*)\]\((\/notes-media\/[^)\s]+)\)/g,
       '<img class="note-img" src="$2" alt="$1" loading="lazy">')
+    .replace(/!\[([^\]]*)\]\((https?:[^)\s]+)\)/g, (_, alt, url) =>
+      `<a class="note-img-link" href="${url}" target="_blank" rel="noopener noreferrer"
+        title="opens the picture on ${webHost(url)}">🖼 ${alt || "picture"} <span class="meta">(${webHost(url)})</span></a>`)
     // [[Note Title]] wiki-links — resolved on click (an unknown title
     // opens a fresh note with that title: the red-link flow)
     .replace(/\[\[([^\]]{1,200})\]\]/g, (_, title) =>

@@ -598,9 +598,15 @@ let in, their origin names the agent that proposed them, the user who
 accepted, and the agent's task. An agent task records everything outside
 the user's words it read (`agent_tasks.inputs`) and everything it wrote
 (`outputs`); the first outside read taints it, and every later action
-waits for the user (the taint rule).
+waits for the user (the taint rule). A task on a harness Hearthloom can't
+see inside (Hermes, OpenClaw) is tainted from the moment it runs.
 Promoted content from untrusted origins is quarantined first.
 Credential-shaped tokens are redacted from everything Ask shows a model.
+Records keep every character as it arrived; text going to a model
+(every prompt, agent briefs, MCP results) drops the characters a reader
+can't see (`hearthloom_core::unseen`), and approval cards show them as
+marks. Other people's words in a prompt sit inside a tag that
+`fence::outside` keeps them from closing.
 
 ## 10. More than one node
 
@@ -704,7 +710,10 @@ and `/brain`, with the `friend` scope.
   both ways between peers.
 - **Full export**: one zip that can rebuild a node (database snapshot,
   readable tables, files). It requires the vault unlocked, and restore
-  applies only to an empty node.
+  applies only to an empty node and writes only what an export holds (no
+  settings files, keys or database files). On a hosted node a restore
+  brings no ember code: the restored embers are taken off until installed
+  from the registry again, with their data kept.
 
 ## 12. Running it
 

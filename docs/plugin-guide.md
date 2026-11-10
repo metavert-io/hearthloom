@@ -237,7 +237,9 @@ With `ingest`:
 
 Secrets are sealed at rest, never exported and never copied to the
 user's other node — after a restore, re-establish them (sign in again,
-generate a new key). `sealing: node-key` means this node has no master
+generate a new key). On a hosted node a restore doesn't bring your ember
+back at all: the user installs it again from the gallery, and its data
+(your `data/` folder and stored values) is still there. `sealing: node-key` means this node has no master
 key and the seal key sits on the same disk; say so in your UI. Names
 starting `__` are written by the daemon (sign-in codes).
 

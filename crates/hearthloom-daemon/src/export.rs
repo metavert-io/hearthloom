@@ -70,6 +70,20 @@ pub const DIR_CLASSES: &[(&str, DirClass)] = &[
     ),
     ("exports", DirClass::Excluded("the export output itself")),
     (
+        "agents",
+        DirClass::Excluded(
+            "each agent run's own settings, its key included — written fresh for every run",
+        ),
+    ),
+    (
+        "mail-triage",
+        DirClass::Excluded("an empty working folder for sorting mail with Claude Code"),
+    ),
+    (
+        RESTORE_MARKER,
+        DirClass::Excluded("a note to the next start that a restore was just placed"),
+    ),
+    (
         "claude-accounts",
         DirClass::Excluded(
             "extra Claude Code sign-ins for the agent pool — logins (a credentials file on Linux) never export; sign in again",
@@ -382,6 +396,10 @@ fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
     }
 }
 
+/// Left by `apply_incoming_restore` for `after_restore`, which runs once
+/// the store is open (a crash between the two only repeats the check).
+pub const RESTORE_MARKER: &str = "restore-applied";
+
 /// Restore-side boot hook: a fresh (or restoring) node finding
 /// `hearthloom.db.incoming` swaps it into place BEFORE the store opens.
 /// Crash-safe: the swap is rename-based; the wizard writes .incoming
@@ -391,6 +409,8 @@ pub fn apply_incoming_restore(home: &hearthloom_core::Home) -> Result<()> {
     if !incoming.exists() {
         return Ok(());
     }
+    std::fs::write(home.root().join(RESTORE_MARKER), b"")
+        .context("noting the restore for after the store opens")?;
     let db = home.db_path();
     let backup = home.root().join(format!(
         "hearthloom.db.pre-restore-{}",
@@ -410,25 +430,132 @@ pub fn apply_incoming_restore(home: &hearthloom_core::Home) -> Result<()> {
     Ok(())
 }
 
-/// Fresh-node restore from an uploaded export zip: only allowed while
-/// the record is EMPTY (the wizard's job — no exotic merge-into-existing
-/// cases). Extracts files/, stages the db as .incoming, then exits so
-/// the supervisor restarts us through apply_incoming_restore.
+/// After a restore, once the store is open and before any ember starts.
+/// A hosted node runs only embers it installed from the registry itself
+/// (plugins.rs `install_from_dir`), and a restore installs nothing: the
+/// restored embers' entries are taken off the list — their key revoked,
+/// their data and stored values kept — and the owner is told to install
+/// them again from the gallery. Their packages weren't restored
+/// (`restorable`). Elsewhere a restore brings embers back as they were.
+pub fn after_restore(state: &AppState) {
+    after_restore_on(state, !crate::registry_client::unreviewed_install_allowed());
+}
+
+fn after_restore_on(state: &AppState, hosted: bool) {
+    let marker = state.home.root().join(RESTORE_MARKER);
+    if !marker.exists() {
+        return;
+    }
+    if hosted {
+        let actor = hearthloom_core::Actor::new("system:restore");
+        let mut names = Vec::new();
+        for row in state.store.list_plugins().unwrap_or_default() {
+            let _ = state.store.revoke_api_key(&actor, &row.api_key_id);
+            if state.store.unlist_plugin(&actor, &row.name).is_ok() {
+                names.push(row.name);
+            }
+        }
+        // a package that reached disk anyway (a zip staged by an older
+        // version) goes too: only the registry puts one here
+        if let Ok(dirs) = std::fs::read_dir(crate::plugins::plugins_root(state)) {
+            for dir in dirs.flatten() {
+                let _ = std::fs::remove_dir_all(dir.path().join("pkg"));
+            }
+        }
+        if !names.is_empty() {
+            tracing::info!(
+                "restore: {} ember(s) taken off until installed from the registry",
+                names.len()
+            );
+            let _ = state.store.notify(
+                &actor,
+                "system:restore",
+                "warn",
+                "Install your embers again from the gallery",
+                &format!(
+                    "Your record is back. This hosted Hearthloom runs only embers it installs                      from the registry itself, so {} didn't come back with it — install each                      again from the gallery and its data is still here.",
+                    names.join(", ")
+                ),
+                Some(("#/embers", Some("open the gallery"))),
+                Some("restore-embers"),
+            );
+        }
+    }
+    let _ = std::fs::remove_file(marker);
+}
+
 /// Where an export entry lands on restore, or None to skip it. The
 /// database is staged beside the live one, `files/…` lands under the home
 /// root, and the rest (manifest, tables/) is informational. zip-slip guard:
 /// plain relative segments only. `..` escapes the home root, and so does
 /// an absolute name ("files//etc/x"): joining one replaces the root.
-fn restore_dest(root: &Path, name: &str) -> Option<std::path::PathBuf> {
+/// Then `restorable`: only what an export writes. The settings in
+/// `config/` come back beside the node's own, as `<name>.restored`, for
+/// the owner to look at: never read, so a zip can't change where the node
+/// listens or which AI it talks to.
+fn restore_dest(root: &Path, name: &str, keep_packages: bool) -> Option<std::path::PathBuf> {
     if name == "hearthloom.db" {
         return Some(root.join("hearthloom.db.incoming"));
     }
     let rel = Path::new(name.strip_prefix("files/")?);
-    rel.components()
-        .all(|c| matches!(c, std::path::Component::Normal(_)))
-        .then(|| root.join(rel))
+    let parts = rel
+        .components()
+        .map(|c| match c {
+            std::path::Component::Normal(part) => part.to_str(),
+            _ => None,
+        })
+        .collect::<Option<Vec<&str>>>()?;
+    if !restorable(&parts, keep_packages) {
+        return None;
+    }
+    let mut dest = root.join(rel);
+    if parts[0].eq_ignore_ascii_case("config") {
+        let set_aside = format!("{}.restored", parts[parts.len() - 1]);
+        dest.set_file_name(set_aside);
+    }
+    Some(dest)
 }
 
+/// A restore writes only what an export writes (0.5.100). An export never
+/// holds the node's secrets and settings (`.env`, `.env.sealed`, the seal
+/// keys — every name starting with `.`), the database files, or anything
+/// else `DIR_CLASSES` leaves out, archives excepted (an export asked for
+/// them); nor an ember's key or sealed secrets. A zip that carries them
+/// isn't an export, and writing them would let it change how the node
+/// runs: a plaintext `.env` is read into the environment at the next
+/// start. `keep_packages` false (a hosted node) leaves embers' packages
+/// out too: only the registry installs code there (`after_restore`).
+/// Names compare ignoring case: a Mac's disk does (`Mail-Triage/` IS
+/// `mail-triage/` there).
+fn restorable(parts: &[&str], keep_packages: bool) -> bool {
+    let lower: Vec<String> = parts.iter().map(|p| p.to_ascii_lowercase()).collect();
+    let Some(top) = lower.first().map(String::as_str) else {
+        return false;
+    };
+    if top.starts_with('.') || top.starts_with("hearthloom.db") {
+        return false;
+    }
+    if DIR_CLASSES.iter().any(|(name, class)| {
+        name.eq_ignore_ascii_case(top)
+            && !name.eq_ignore_ascii_case("archives")
+            && matches!(class, DirClass::Excluded(_))
+    }) {
+        return false;
+    }
+    if top == "plugins" {
+        match lower.get(2).map(String::as_str) {
+            Some("key") | Some("secrets") => return false,
+            Some("pkg") if !keep_packages => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
+/// Fresh-node restore from an uploaded export zip: only allowed while
+/// the record is EMPTY (the wizard's job — no exotic merge-into-existing
+/// cases). Extracts files/, stages the db as .incoming, then exits so
+/// the supervisor restarts us through apply_incoming_restore.
 pub fn stage_restore(state: &AppState, zip_path: &Path) -> Result<Value> {
     if state.store.sync_head().unwrap_or(0) > 0 {
         return Err(anyhow!(
@@ -438,12 +565,13 @@ pub fn stage_restore(state: &AppState, zip_path: &Path) -> Result<Value> {
     let file = std::fs::File::open(zip_path)?;
     let mut archive = zip::ZipArchive::new(file)?;
     let root = state.home.root().to_path_buf();
+    let keep_packages = crate::registry_client::unreviewed_install_allowed();
     let mut extracted = 0usize;
     let mut has_db = false;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
         let name = entry.name()?.to_string();
-        let Some(dest) = restore_dest(&root, &name) else {
+        let Some(dest) = restore_dest(&root, &name, keep_packages) else {
             continue;
         };
         has_db |= name == "hearthloom.db";
@@ -474,23 +602,171 @@ mod tests {
     #[test]
     fn test_restore_lands_only_inside_the_home() {
         let root = Path::new("/srv/hl");
+        let dest = |name: &str| restore_dest(root, name, true);
         assert_eq!(
-            restore_dest(root, "hearthloom.db"),
+            dest("hearthloom.db"),
             Some(root.join("hearthloom.db.incoming"))
         );
-        assert_eq!(
-            restore_dest(root, "files/notes/a.md"),
-            Some(root.join("notes/a.md"))
-        );
-        assert_eq!(restore_dest(root, "manifest.json"), None);
+        assert_eq!(dest("files/notes/a.md"), Some(root.join("notes/a.md")));
+        assert_eq!(dest("manifest.json"), None);
         for evil in [
             "files/../../etc/x",
             "files//etc/passwd",
             "files/./x",
             "files/a/../../b",
         ] {
-            assert_eq!(restore_dest(root, evil), None, "{evil:?} must be skipped");
+            assert_eq!(dest(evil), None, "{evil:?} must be skipped");
         }
+    }
+
+    /// A zip can hold anything; a restore writes only what an export does.
+    #[test]
+    fn test_restore_writes_only_what_an_export_writes() {
+        let root = Path::new("/srv/hl");
+        for kept in [
+            "files/raw/2026/01/01/x.txt",
+            "files/notes/a.md",
+            "files/eval/suite.yaml",
+            "files/archives/gmail.mbox",
+            "files/plugins/demo/data/state.json",
+            "files/plugins/demo/pkg/hearthember.json",
+            "files/somenewfeature/data.bin",
+        ] {
+            assert!(
+                restore_dest(root, kept, true).is_some(),
+                "{kept} should restore"
+            );
+        }
+        for refused in [
+            "files/.env",
+            "files/.env.sealed",
+            "files/.ember-secrets.key",
+            "files/setup-code",
+            "files/hearthloom.db",
+            "files/hearthloom.db.incoming",
+            "files/inbox/drop.json",
+            "files/models/model.onnx",
+            "files/claude-accounts/a/credentials.json",
+            "files/mail-triage/.claude/settings.json",
+            "files/agents/t.mcp.json",
+            "files/restore-applied",
+            "files/plugins/demo/key",
+            "files/plugins/demo/secrets/x.sealed",
+            // a Mac's disk ignores case: these ARE the names above there
+            "files/Mail-Triage/.claude/settings.json",
+            "files/INBOX/drop.json",
+            "files/Hearthloom.db",
+            "files/Plugins/demo/KEY",
+            "files/plugins/demo/Secrets/x.sealed",
+        ] {
+            assert_eq!(
+                restore_dest(root, refused, true),
+                None,
+                "{refused} must not restore"
+            );
+        }
+        // settings come back beside the node's own, never in place
+        assert_eq!(
+            restore_dest(root, "files/config/production.yaml", true),
+            Some(root.join("config/production.yaml.restored"))
+        );
+        assert_eq!(
+            restore_dest(root, "files/plugins/demo/PKG/bin/demo", false),
+            None
+        );
+        // a hosted node: no ember code from a zip, its data still comes back
+        assert_eq!(
+            restore_dest(root, "files/plugins/demo/pkg/bin/demo", false),
+            None
+        );
+        assert!(restore_dest(root, "files/plugins/demo/data/state.json", false).is_some());
+    }
+
+    /// After a restore a hosted node holds no ember it didn't install
+    /// from the registry: off the list, key revoked, package gone, data
+    /// and stored values kept, the owner told. Elsewhere nothing changes.
+    #[test]
+    fn test_a_hosted_node_takes_restored_embers_off_until_reinstalled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::paths::Home::at(tmp.path());
+        home.init().unwrap();
+        let state = AppState {
+            store: std::sync::Arc::new(
+                hearthloom_core::store::Store::open(&home.db_path()).unwrap(),
+            ),
+            home,
+            embedder: None,
+            llm: None,
+            auth_locked: Default::default(),
+            bus: Default::default(),
+            killswitch: Default::default(),
+            running: Default::default(),
+        };
+        let actor = hearthloom_core::Actor::new("human:test");
+        let install = |name: &str| {
+            let (key, _) = state
+                .store
+                .create_api_key(
+                    &actor,
+                    &format!("ember:{name}"),
+                    &["read".to_string()],
+                    None,
+                )
+                .unwrap();
+            state
+                .store
+                .install_plugin(
+                    &actor,
+                    name,
+                    "1",
+                    &json!({"name": name}),
+                    &[],
+                    &key.id,
+                    "local-only",
+                )
+                .unwrap();
+            state.store.plugin_kv_set(name, "k", "v").unwrap();
+            let dir = crate::plugins::plugin_dir(&state, name);
+            std::fs::create_dir_all(dir.join("pkg/bin")).unwrap();
+            std::fs::create_dir_all(dir.join("data")).unwrap();
+            std::fs::write(dir.join("pkg/bin/x"), "#!/bin/sh").unwrap();
+            std::fs::write(dir.join("data/state.json"), "{}").unwrap();
+            key.id
+        };
+        let key = install("demo");
+        let marker = state.home.root().join(RESTORE_MARKER);
+
+        // no restore just happened: nothing to do, even hosted
+        after_restore_on(&state, true);
+        assert_eq!(state.store.list_plugins().unwrap().len(), 1);
+
+        // a node of the owner's own: the restore stands as it was
+        std::fs::write(&marker, b"").unwrap();
+        after_restore_on(&state, false);
+        assert_eq!(state.store.list_plugins().unwrap().len(), 1);
+        assert!(!marker.exists());
+
+        // hosted
+        std::fs::write(&marker, b"").unwrap();
+        after_restore_on(&state, true);
+        assert!(state.store.list_plugins().unwrap().is_empty());
+        let dir = crate::plugins::plugin_dir(&state, "demo");
+        assert!(!dir.join("pkg").exists(), "the restored package is gone");
+        assert!(dir.join("data/state.json").exists(), "its data is kept");
+        assert_eq!(
+            state.store.plugin_kv_get("demo", "k").unwrap().as_deref(),
+            Some("v")
+        );
+        let keys = state.store.list_api_keys().unwrap();
+        assert!(
+            keys.iter().all(|k| k.id != key || k.revoked_at.is_some()),
+            "its key is revoked"
+        );
+        let notes = state.store.notifications(false, 10).unwrap();
+        assert!(notes
+            .iter()
+            .any(|n| n.title.contains("Install your embers again")));
+        assert!(!marker.exists());
     }
 
     #[test]

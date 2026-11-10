@@ -483,6 +483,13 @@ pub fn sidecar_start(state: &AppState, manifest: &Manifest) -> Result<()> {
         return Ok(());
     };
     let name = &manifest.name;
+    // The program must be one in the ember's own package. The manifest
+    // comes from the database, and a restored database can say anything:
+    // an absolute launch entry would replace the package folder in the
+    // join below, and `..` would climb out of it (0.5.100).
+    if !plain_relative(Path::new(name)) || name.contains('/') || !plain_relative(Path::new(rel)) {
+        bail!("ember {name:?}: its launch entry {rel:?} isn't a program inside its package");
+    }
     let bin = plugin_dir(state, name).join("pkg").join(rel);
     if !bin.exists() {
         bail!("manifest launch entry points at {rel:?}, which isn't in the package");
@@ -503,6 +510,12 @@ pub fn sidecar_start(state: &AppState, manifest: &Manifest) -> Result<()> {
         log: plugin_dir(state, name).join("plugin.log"),
         cwd: plugin_dir(state, name),
     })
+}
+
+/// One or more plain path segments: no root, no `.`, no `..`.
+fn plain_relative(path: &Path) -> bool {
+    let mut parts = path.components().peekable();
+    parts.peek().is_some() && parts.all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
 pub fn sidecar_stop(name: &str) {
@@ -1616,6 +1629,52 @@ mod tests {
             .is_err(),
             "a path twice"
         );
+    }
+
+    /// A restored database can hold any manifest: the program an ember
+    /// starts must be inside its own package (0.5.100).
+    #[test]
+    fn test_an_ember_starts_only_a_program_inside_its_package() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::paths::Home::at(tmp.path());
+        home.init().unwrap();
+        let state = AppState {
+            store: std::sync::Arc::new(
+                hearthloom_core::store::Store::open(&home.db_path()).unwrap(),
+            ),
+            home,
+            embedder: None,
+            llm: None,
+            auth_locked: Default::default(),
+            bus: Default::default(),
+            killswitch: Default::default(),
+            running: Default::default(),
+        };
+        let os_key = if cfg!(target_os = "macos") {
+            "darwin"
+        } else {
+            std::env::consts::OS
+        };
+        for (name, entry) in [
+            ("x", "/bin/sh"),
+            ("x", "../../../bin/sh"),
+            ("x", "bin/../../../sh"),
+            ("x", "./bin/x"),
+            ("../x", "bin/x"),
+            ("a/b", "bin/x"),
+        ] {
+            let m: Manifest = serde_json::from_value(json!({
+                "protocol": 1, "name": name, "version": "1", "launch": {os_key: entry}
+            }))
+            .unwrap();
+            let err = sidecar_start(&state, &m).unwrap_err().to_string();
+            assert!(
+                err.contains("isn't a program inside its package"),
+                "{name} {entry}: {err}"
+            );
+        }
+        assert!(plain_relative(Path::new("bin/x")));
+        assert!(!plain_relative(Path::new("")));
     }
 
     #[test]
