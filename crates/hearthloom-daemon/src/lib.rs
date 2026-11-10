@@ -16,6 +16,7 @@ mod dashboard;
 mod downloads;
 mod embeddings_dl;
 mod export;
+mod fence;
 mod gmail_pull;
 mod gmail_search;
 mod gmail_watch;
@@ -324,6 +325,9 @@ pub async fn run(home: Home) -> Result<()> {
         killswitch,
         running: Default::default(),
     };
+    // Just restored: before anything serves or starts an ember, a hosted
+    // node takes the restored ones off until the registry installs them.
+    export::after_restore(&state);
 
     // Sleep-time consolidation: LLM/embedding spend happens here, at idle,
     // never on the query path.

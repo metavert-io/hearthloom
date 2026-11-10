@@ -30,10 +30,14 @@ const INDEX_HTML: &str = include_str!("../assets/index.html");
 ///   so editing index.html can't silently block it.
 /// - `style-src 'unsafe-inline'`: the views set `style="…"` attributes
 ///   throughout (inline styles can't run script).
-/// - `img-src https: http:`: notes render web images from markdown
-///   (`![](https?://…)`, notes.js renderMarkdown) and avatars on profile
-///   cards may be `https://` URLs (app.js friendAvatar). `data:` covers
-///   the favicon and uploaded avatars.
+/// - `img-src 'self' data: blob:` and nothing from the web (0.5.100). A
+///   picture from another site loads by itself, which tells that site
+///   when the page was opened, and from where, and a URL can carry
+///   words out with it: it was the page's one open way out. Notes show a
+///   web picture as a link (notes.js renderMarkdown) and profile cards
+///   show only uploaded avatars (app.js friendAvatar). `data:` covers the
+///   favicon and uploaded avatars; `test_the_page_loads_no_pictures_from_the_web`
+///   keeps it closed.
 /// - `frame-src 'self'`: ember pages and Desk widgets are sandboxed
 ///   same-origin iframes (`/plugins/{name}/ui/…`).
 ///
@@ -48,7 +52,7 @@ fn dashboard_csp(index_html: &str) -> String {
         .collect();
     format!(
         "default-src 'self'; script-src 'self'{hashes}; style-src 'self' 'unsafe-inline'; \
-         img-src 'self' data: blob: https: http:; connect-src 'self'; font-src 'self'; \
+         img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; \
          frame-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; \
          frame-ancestors 'self'; form-action 'self'"
     )
@@ -534,6 +538,20 @@ mod tests {
             );
         }
         assert!(axum::http::HeaderValue::from_str(&DASHBOARD_CSP).is_ok());
+    }
+
+    /// A picture from the web would load by itself and tell its site when
+    /// the page was opened (and carry whatever its URL holds): the page
+    /// loads pictures only from itself, `data:` and `blob:`.
+    #[test]
+    fn test_the_page_loads_no_pictures_from_the_web() {
+        let img_src = DASHBOARD_CSP
+            .split(';')
+            .map(str::trim)
+            .find(|d| d.starts_with("img-src "))
+            .unwrap();
+        let sources: Vec<&str> = img_src.split_whitespace().skip(1).collect();
+        assert_eq!(sources, ["'self'", "data:", "blob:"], "{img_src}");
     }
 
     #[test]

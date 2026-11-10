@@ -23,6 +23,7 @@ pub mod sealbox;
 pub mod secrets;
 pub mod store;
 pub mod time;
+pub mod unseen;
 
 pub use ingest::{one_line, EdgeAssertion, EntityRef, EpisodeDraft, IngestBatch, IngestReport};
 

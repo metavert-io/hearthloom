@@ -839,7 +839,15 @@ the design log 2026-07-14.
   Dispatch to a harness Hearthloom can't see inside (depth partial or
   dispatch-only: Hermes, OpenClaw) is judged on the model's `needs` PLUS
   everything the harness can do (`dispatch_classes`); never on the claim
-  alone. Per-tool governance
+  alone — and once such a task RUNS it is tainted (`taint_if_unseen`,
+  0.5.100: Hearthloom can't see what it reads), so every action Hermes
+  routes back asks the owner.
+  APPROVAL CARDS SHOW THE WHOLE INPUT (0.5.100): `agent_approvals.detail`
+  keeps the full tool input up to `DETAIL_CHARS` (`fit_detail` clips the
+  input, never the JSON — a cut used to lose the input AND the reason),
+  and the API's `input_shown` / `brief` / `request` / `summary` reveal
+  every unseen character (`unseen::reveal`, ⟦U+…⟧, counted in `hidden`).
+  Never show the owner a clipped or raw version of what they approve. Per-tool governance
   (`agents/mod.rs::tool_permission`, the Hermes hook, `/mcp/governance`)
   goes through the same `decide`. Never add a path where Ask, an
   agent, or a harness acts without going through `decide`. Default policy
@@ -866,7 +874,19 @@ the design log 2026-07-14.
   taken only when the whole reply is one JSON object
   (`whole_reply_object`) — never fished out of prose that may quote a
   tool result. Every spelling of a fence tag inside results is defused
-  (`defuse_tag`: `<tool_result>`, the map step's `<record>`).
+  (`fence::outside`: `<tool_result>`, the map step's `<record>`, triage's
+  `<thread>`, drafting's `<message>` — ONE defuser, never a per-module
+  `replace`).
+- **UNSEEN CHARACTERS LEAVE AT THE MODEL BOUNDARY, NEVER AT INGEST
+  (0.5.100, core `unseen.rs`).** Records keep every byte (the episode
+  law); text going TO a model drops what a reader can't see
+  (`unseen::for_model`: tag letters, bidi controls, zero-widths, runs of
+  selectors; a joiner between letters and one selector stay). It runs in
+  `llm::call_streaming` (every API prompt), triage's Claude Code `-p`,
+  each harness brief (`agents::brief_for_model`) and every MCP result
+  (`mcp.rs`). A new path that hands text to a model must do the same.
+  `fence::reads_as_tag` skips the SAME set, so a character dropped later
+  can't join a fence tag back together — keep the two on `is_unseen`.
   `rlm.rs::brain_for_ask` keeps BRAIN.md's Recent activity, Top entities
   and the digest out of the system prompt, matching section headings
   EXACTLY (the digest's own "## Self-model notes" once switched the
@@ -1407,6 +1427,24 @@ the wizard's "restoring from an export?" upload → stages
 `hearthloom.db.incoming` + files, daemon exits, and
 `export::apply_incoming_restore` swaps it in at next boot (fresh/empty
 nodes only, previous db kept as a timestamped backup).
+
+**A restore writes only what an export writes (0.5.100,
+`export::restorable`).** Never a top-level dotfile (`.env` is read into
+the environment at the next boot — a zip carrying one could switch a
+hosted node's settings), never the db files, nothing `DIR_CLASSES`
+excludes (archives excepted), never `plugins/<n>/key` or
+`plugins/<n>/secrets/`; names compare IGNORING CASE (a Mac's disk does);
+`config/` comes back as `<name>.restored`, never read. On a HOSTED node
+(`!unreviewed_install_allowed`) embers' `pkg/` stays out too, and `after_restore` (boot, before any
+sidecar starts) takes the restored embers off the list — key revoked,
+data and `plugin_kv` kept — until the registry installs them again.
+`plugins::sidecar_start` launches only a plain relative path inside the
+ember's own package (a restored db's manifest can say anything), and a
+hosted node ignores an agent's `claude_path` (`claude_code::find_claude`).
+The restore marker is written BEFORE the swap on purpose: a crash after
+the swap must still unlist the embers (fail closed). A new
+home-root entry that holds secrets or steers the node must be classified
+`Excluded` so restore refuses it.
 
 **The enshrined contract — new data CANNOT dodge the exporter:**
 - Every DB table must be classified in

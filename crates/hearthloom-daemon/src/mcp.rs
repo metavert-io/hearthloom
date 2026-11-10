@@ -82,6 +82,12 @@ pub async fn handle(
     Json(body).into_response()
 }
 
+/// A tool result as the agent's model reads it: unseen characters dropped.
+fn for_model_text(value: &mut Value) -> String {
+    hearthloom_core::unseen::for_model_json(value);
+    value.to_string()
+}
+
 fn call_tool(
     state: &AppState,
     auth: &crate::http::AuthInfo,
@@ -164,14 +170,16 @@ fn call_tool(
         }
     }
 
-    // Tool-level failures are isError results, not protocol errors.
+    // Tool-level failures are isError results, not protocol errors. What
+    // goes back is read by the agent's model: its unseen characters are
+    // dropped, as in every prompt Hearthloom writes (0.5.100).
     Ok(match outcome {
-        Ok(value) => json!({
-            "content": [{"type": "text", "text": value.to_string()}],
+        Ok(mut value) => json!({
+            "content": [{"type": "text", "text": for_model_text(&mut value)}],
             "isError": false,
         }),
         Err(err) => json!({
-            "content": [{"type": "text", "text": err.to_string()}],
+            "content": [{"type": "text", "text": hearthloom_core::unseen::for_model(&err.to_string())}],
             "isError": true,
         }),
     })

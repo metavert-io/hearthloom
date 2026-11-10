@@ -337,9 +337,13 @@ sets them up and sets the rules: for each kind of action (look things up,
 send messages, calendar, spend money, change files, use websites…)
 "do it", "ask me first" or "never", starting on "ask me first". After a
 task has read things you didn't write, every action asks you first,
-whatever you set (a switch on the same page turns that off). Each agent reads your record through its own
+whatever you set (a switch on the same page turns that off). Hermes and
+OpenClaw count as having read such things from the moment they start, since
+Hearthloom can't see what they read. Each agent reads your record through its own
 read-only key, limited to the life areas you choose; everything it does
-is recorded, and approvals work from anywhere you're signed in.
+is recorded, and approvals work from anywhere you're signed in. An
+approval shows the whole of what would run, with any hidden characters
+marked.
 
 **Claude accounts.** Claude Code agents run on your usual Claude sign-in
 on that machine. In the Claude Code agent's setup you can say how much of

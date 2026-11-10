@@ -22,7 +22,7 @@ pub fn hook_body(agent: &AgentRow, task: &AgentTaskRow, report_url: &str, token:
          {{\"ok\": true, \"result\": \"<your short summary>\"}}\n\
          (use \"ok\": false and describe the problem if you could not do it).",
         super::preamble(agent),
-        task.brief
+        super::brief_for_model(task)
     );
     let mut body = json!({
         "message": message,

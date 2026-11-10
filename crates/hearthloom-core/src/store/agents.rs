@@ -26,6 +26,7 @@ use serde_json::{json, Value};
 
 use super::{record_mutation, Actor, Store};
 use crate::time::now_utc;
+use crate::unseen;
 
 /// The kinds of action a policy governs. `other` is anything a harness
 /// asks about that maps to none of the rest — it is never auto unless the
@@ -790,7 +791,7 @@ impl Store {
                 kind,
                 class,
                 summary.chars().take(500).collect::<String>(),
-                detail.to_string().chars().take(8000).collect::<String>(),
+                fit_detail(detail),
                 status,
                 decided_by,
                 decided_at,
@@ -832,24 +833,54 @@ impl Store {
         let conn = self.lock();
         let mut stmt = conn.prepare(&format!(
             "SELECT a.id, a.task_id, a.kind, a.class, a.summary, a.detail, a.status, a.decided_by,
-                    a.decided_at, a.created_at, t.request, t.sensitive, t.agent_id
+                    a.decided_at, a.created_at, t.request, t.sensitive, t.agent_id, t.brief
              FROM agent_approvals a LEFT JOIN agent_tasks t ON t.id = a.task_id
              WHERE {clause} ORDER BY a.created_at DESC LIMIT {limit}"
         ))?;
         let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            let detail = row
+                .get::<_, Option<String>>(5)?
+                .and_then(|d| serde_json::from_str::<Value>(&d).ok());
+            let request = row.get::<_, Option<String>>(10)?;
+            let brief = row.get::<_, Option<String>>(13)?;
+            let kind = row.get::<_, String>(2)?;
+            let status = row.get::<_, String>(6)?;
+            // What the owner reads before deciding (a PENDING approval's
+            // card): the whole input, and for a dispatch the task and what
+            // the agent will be told — every character they couldn't see
+            // shown as a mark (unseen.rs), and counted only where shown.
+            // A decided one is history: its input stays short.
+            let pending = status == "pending";
+            let dispatch = kind == "dispatch";
+            let hidden = if pending {
+                detail.as_ref().map_or(0, |d| hidden_in(&d["input"]))
+                    + if dispatch {
+                        request.as_deref().map_or(0, unseen::count)
+                            + brief.as_deref().map_or(0, unseen::count)
+                    } else {
+                        0
+                    }
+            } else {
+                0
+            };
+            let input_shown = detail.as_ref().filter(|_| pending).and_then(shown_input);
+            let detail = detail.map(|d| if pending { d } else { history_detail(d) });
             Ok(json!({
                 "id": row.get::<_, String>(0)?,
                 "task_id": row.get::<_, String>(1)?,
-                "kind": row.get::<_, String>(2)?,
+                "kind": kind,
                 "class": row.get::<_, Option<String>>(3)?,
-                "summary": row.get::<_, String>(4)?,
-                "detail": row.get::<_, Option<String>>(5)?
-                    .and_then(|d| serde_json::from_str::<Value>(&d).ok()),
-                "status": row.get::<_, String>(6)?,
+                "summary": unseen::reveal(&row.get::<_, String>(4)?),
+                "input_shown": input_shown,
+                "input_clipped": detail.as_ref().and_then(|d| d["input_chars"].as_u64()),
+                "hidden": hidden,
+                "detail": detail,
+                "status": status,
                 "decided_by": row.get::<_, Option<String>>(7)?,
                 "decided_at": row.get::<_, Option<String>>(8)?,
                 "created_at": row.get::<_, String>(9)?,
-                "request": row.get::<_, Option<String>>(10)?,
+                "request": request.as_deref().map(unseen::reveal),
+                "brief": brief.as_deref().map(unseen::reveal),
                 "sensitive": row.get::<_, Option<i64>>(11)?.unwrap_or(0) != 0,
                 "agent_id": row.get::<_, Option<String>>(12)?,
             }))
@@ -1207,6 +1238,115 @@ impl Store {
     }
 }
 
+/// The most of an approval's detail kept, in characters. An action's whole
+/// input is kept up to here, so its card can show all of it (0.5.100: it
+/// used to be cut at 8000 characters, which broke the JSON and lost the
+/// input and the reason both). Past it the input is clipped, and
+/// `input_chars` says how long it was, so the card can say so.
+const DETAIL_CHARS: usize = 100_000;
+
+fn fit_detail(detail: &Value) -> String {
+    let text = detail.to_string();
+    if text.chars().count() <= DETAIL_CHARS {
+        return text;
+    }
+    let Some(input) = detail.get("input") else {
+        return json!({"tool": detail.get("tool"), "reason": detail.get("reason")}).to_string();
+    };
+    let input_chars = input.to_string().chars().count();
+    let mut fitted = detail.clone();
+    fitted["input_chars"] = json!(input_chars);
+    // every field kept, each long one cut in its middle: a command after
+    // a long file body still shows, and so does the end of a long command
+    for max in [FIELD_CHARS, FIELD_CHARS / 10] {
+        fitted["input"] = clip_fields(input, max);
+        let text = fitted.to_string();
+        if text.chars().count() <= DETAIL_CHARS {
+            return text;
+        }
+    }
+    json!({
+        "tool": detail.get("tool"),
+        "reason": detail.get("reason"),
+        "input": "(too long to keep)",
+        "input_chars": input_chars,
+    })
+    .to_string()
+}
+
+/// The most of one input field kept when an input is too long.
+const FIELD_CHARS: usize = 20_000;
+
+/// Every string in `value` longer than `max` cut to its first and last
+/// `max / 2` characters, the cut said in the middle.
+fn clip_fields(value: &Value, max: usize) -> Value {
+    match value {
+        Value::String(s) => {
+            let n = s.chars().count();
+            if n <= max {
+                return value.clone();
+            }
+            let head: String = s.chars().take(max / 2).collect();
+            let tail: String = s.chars().skip(n - max / 2).collect();
+            json!(format!(
+                "{head}\n⟪… {} characters not kept …⟫\n{tail}",
+                n - max
+            ))
+        }
+        Value::Array(items) => Value::Array(items.iter().map(|v| clip_fields(v, max)).collect()),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), clip_fields(v, max)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// A decided approval's detail, for the history: its input kept short.
+fn history_detail(mut detail: Value) -> Value {
+    if let Some(input) = detail.get("input") {
+        if input.to_string().chars().count() > 2000 {
+            let clipped = clip_fields(input, 1000);
+            if detail.get("input_chars").is_none() {
+                detail["input_chars"] = json!(input.to_string().chars().count());
+            }
+            detail["input"] = clipped;
+        }
+    }
+    detail
+}
+
+/// An action's input as its card shows it: one entry per field, strings
+/// as they are (a command keeps its lines), anything else as indented
+/// JSON — and every unseen character revealed.
+fn shown_input(detail: &Value) -> Option<Value> {
+    let field = |name: &str, value: &Value| {
+        let text = match value {
+            Value::String(s) => s.clone(),
+            other => serde_json::to_string_pretty(other).unwrap_or_default(),
+        };
+        json!({"field": unseen::reveal(name), "text": unseen::reveal(&text)})
+    };
+    Some(match detail.get("input")? {
+        Value::Object(map) => Value::Array(map.iter().map(|(k, v)| field(k, v)).collect()),
+        other => json!([field("", other)]),
+    })
+}
+
+/// Unseen characters anywhere in a JSON value's strings.
+fn hidden_in(value: &Value) -> usize {
+    match value {
+        Value::String(s) => unseen::count(s),
+        Value::Array(items) => items.iter().map(hidden_in).sum(),
+        Value::Object(map) => map
+            .iter()
+            .map(|(k, v)| unseen::count(k) + hidden_in(v))
+            .sum(),
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1478,6 +1618,134 @@ mod tests {
         assert_eq!(s.agent_tasks(10, true).unwrap().len(), 2);
         assert!(s.pending_approvals(false).unwrap().is_empty());
         assert_eq!(s.pending_approvals(true).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_an_approval_card_shows_the_whole_input_and_what_hides_in_it() {
+        let s = store();
+        let task = s
+            .create_agent_task(
+                &actor(),
+                None,
+                None,
+                "tidy up\u{200B}",
+                "Clean the folder\u{E0041}",
+                &[],
+                None,
+                false,
+            )
+            .unwrap();
+        // a long command: the dangerous part sits past the first 300
+        // characters, and the whole detail is past the old 8000 cut
+        let command = format!("echo {} && rm -rf ~/x\u{202E}", "a".repeat(9000));
+        s.add_approval(
+            &task.id,
+            "tool",
+            Some("files"),
+            "Bash: echo aaaa…",
+            &json!({"tool": "Bash", "input": {"command": command, "description": "list"}, "reason": "ask first"}),
+            "pending",
+            None,
+        )
+        .unwrap();
+        let card = &s.pending_approvals(false).unwrap()[0];
+        assert_eq!(
+            card["detail"]["reason"], "ask first",
+            "the detail still parses"
+        );
+        let fields = card["input_shown"].as_array().unwrap();
+        let shown = fields.iter().find(|f| f["field"] == "command").unwrap()["text"]
+            .as_str()
+            .unwrap();
+        assert!(
+            shown.ends_with("rm -rf ~/x⟦U+202E⟧"),
+            "the whole command, revealed"
+        );
+        assert_eq!(card["hidden"], 1, "counted where it's shown: the input");
+        assert!(card["input_clipped"].is_null());
+
+        // a dispatch card shows the task and the brief: their marks count
+        s.add_approval(
+            &task.id,
+            "dispatch",
+            None,
+            "Code → tidy up",
+            &json!({}),
+            "pending",
+            None,
+        )
+        .unwrap();
+        let send = s
+            .pending_approvals(false)
+            .unwrap()
+            .into_iter()
+            .find(|a| a["kind"] == "dispatch")
+            .unwrap();
+        assert_eq!(send["hidden"], 2);
+        assert_eq!(send["request"], "tidy up⟦U+200B⟧");
+        assert_eq!(send["brief"], "Clean the folder⟦U+E0041⟧");
+
+        // past the keep limit: clipped, but still JSON, and the card says so
+        let huge = "b".repeat(DETAIL_CHARS * 2);
+        s.add_approval(
+            &task.id,
+            "tool",
+            Some("files"),
+            "Write",
+            &json!({"tool": "Write", "input": {"content": huge}, "reason": "ask first"}),
+            "pending",
+            None,
+        )
+        .unwrap();
+        let clipped = s
+            .pending_approvals(false)
+            .unwrap()
+            .into_iter()
+            .find(|a| a["summary"] == "Write")
+            .unwrap();
+        assert_eq!(clipped["detail"]["reason"], "ask first");
+        assert!(clipped["input_clipped"].as_u64().unwrap() > DETAIL_CHARS as u64);
+
+        // a long file body doesn't push the command out, and the end of a
+        // long field still shows
+        let body = format!("{}TAIL", "c".repeat(DETAIL_CHARS + 50_000));
+        s.add_approval(
+            &task.id,
+            "tool",
+            Some("files"),
+            "Both",
+            &json!({"tool": "X", "input": {"content": body, "zcommand": "rm -rf ~"}, "reason": "r"}),
+            "pending",
+            None,
+        )
+        .unwrap();
+        let both = s
+            .pending_approvals(false)
+            .unwrap()
+            .into_iter()
+            .find(|a| a["summary"] == "Both")
+            .unwrap();
+        let text = |field: &str| {
+            both["input_shown"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["field"] == field)
+                .unwrap()["text"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(text("zcommand"), "rm -rf ~");
+        assert!(text("content").ends_with("TAIL") && text("content").contains("not kept"));
+
+        // decided: history keeps the input short, and no card fields
+        let id = both["id"].as_str().unwrap();
+        s.decide_approval(id, false, "human:test").unwrap();
+        let old = s.approval(id).unwrap().unwrap();
+        assert!(old["input_shown"].is_null());
+        assert!(old["detail"]["input"].to_string().chars().count() < 3000);
+        assert_eq!(old["detail"]["reason"], "r");
     }
 
     #[test]

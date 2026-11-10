@@ -135,6 +135,26 @@ impl Store {
         Ok(())
     }
 
+    /// Take an ember off the installed list but keep its stored values
+    /// (plugin_kv): a hosted node after a restore (daemon export.rs
+    /// `after_restore`), until the registry installs it again under the
+    /// same name. The caller revokes its key.
+    pub fn unlist_plugin(&self, actor: &Actor, name: &str) -> Result<()> {
+        let conn = self.lock();
+        let changed = conn.execute("DELETE FROM plugins WHERE name = ?1", [name])?;
+        if changed == 0 {
+            return Err(anyhow!("no installed plugin {name:?}"));
+        }
+        record_mutation(
+            &conn,
+            actor,
+            "plugin_unlisted",
+            &format!("plugin_unlisted:{name}:{}", now_utc()),
+            &serde_json::json!({"name": name}),
+        )?;
+        Ok(())
+    }
+
     pub fn set_plugin_enabled(&self, actor: &Actor, name: &str, enabled: bool) -> Result<()> {
         let conn = self.lock();
         let changed = conn.execute(

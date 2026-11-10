@@ -642,6 +642,13 @@ pub fn task_card(state: &AppState, task: &AgentTaskRow) -> Result<Value> {
         "depth": depth,
         "approvals": state.store.task_approvals(&task.id)?,
     });
+    // what the owner reads of the task: hidden characters shown as marks
+    for field in ["request", "brief"] {
+        if let Some(text) = card["task"][field].as_str() {
+            let shown = hearthloom_core::unseen::reveal(text).into_owned();
+            card["task"][field] = json!(shown);
+        }
+    }
     if task.agent_id.is_none() {
         card["guidance"] = guidance(&task.classes, !agents.is_empty());
     }
@@ -755,7 +762,7 @@ pub fn propose(
     let summary = format!(
         "{} → {}",
         agent.name,
-        request.chars().take(160).collect::<String>()
+        hearthloom_core::unseen::reveal(&request.chars().take(160).collect::<String>())
     );
     let detail = json!({"classes": task.classes, "judged_on": judged, "tainted": tainted, "agent": agent.name});
     match decision {
@@ -877,6 +884,27 @@ pub async fn tool_permission(
         }
     }
     (allowed, reason)
+}
+
+/// Inside Hermes and OpenClaw Hearthloom can't see what the agent reads,
+/// so it can't know when outside words came in: from the moment such a
+/// task runs it counts as having read them (0.5.100). Every action it
+/// still asks about — Hermes routes the commands it flags as dangerous —
+/// then waits for the owner, whatever the preset (`decide`'s taint rule;
+/// only `never` and the owner's `taint_guard` switch outrank it). Tainting
+/// at run, not at creation, keeps the send itself judged as before.
+fn taint_if_unseen(state: &AppState, agent: &AgentRow, task_id: &str) {
+    if let Some(h) = harness(&agent.harness).filter(|h| h.depth != "full") {
+        let why = format!(
+            "whatever {} reads while it works, which Hearthloom can't see",
+            h.label
+        );
+        if state.store.taint_agent_task(task_id, &why).unwrap_or(false) {
+            let _ = state
+                .store
+                .add_agent_task_input(task_id, &why, &agent.harness);
+        }
+    }
 }
 
 /// What a tool the agent was allowed to run brings in that the owner
@@ -1030,9 +1058,12 @@ async fn decide_tool(state: &AppState, task_id: &str, tool: &str, input: &Value)
         .store
         .bump_agent_task_actions(task_id)
         .unwrap_or(i64::MAX);
+    // A one-line title (notifications, lists). The card shows the whole
+    // input from `detail` — every unseen character revealed (store
+    // `shown_input`), so the part that matters can't sit past a cut.
     let summary = format!(
         "{tool}: {}",
-        input.to_string().chars().take(300).collect::<String>()
+        hearthloom_core::unseen::reveal(&input.to_string().chars().take(300).collect::<String>())
     );
     let detail = json!({"tool": tool, "input": input});
     if actions > policy.actions_per_task as i64 {
@@ -1119,6 +1150,12 @@ async fn decide_tool(state: &AppState, task_id: &str, tool: &str, input: &Value)
 }
 
 /// What every agent is told, ahead of the task itself.
+/// The task's brief as its agent's model gets it: the unseen characters
+/// dropped (`hearthloom_core::unseen::for_model`), as for every prompt.
+pub fn brief_for_model(task: &AgentTaskRow) -> String {
+    hearthloom_core::unseen::for_model(&task.brief).into_owned()
+}
+
 pub fn preamble(agent: &AgentRow) -> String {
     format!(
         "{} (a personal memory system), as the \
@@ -1239,6 +1276,7 @@ async fn run_one(state: AppState, agent: AgentRow, task: AgentTaskRow) {
     {
         return;
     }
+    taint_if_unseen(&state, &agent, &task.id);
     let token = issue_token(&task.id);
     let outcome = match (agent.harness.as_str(), &seat) {
         ("claude_code", Some(seat)) => claude_code::run(&state, &agent, &task, &token, seat).await,
@@ -2403,6 +2441,80 @@ mod tests {
                 },
             )
             .unwrap()
+    }
+
+    /// Hermes and OpenClaw read things Hearthloom never sees: once their
+    /// task runs it is tainted, so even an all-automatic preset asks about
+    /// the commands Hermes routes back. Claude Code's tasks are tainted
+    /// only by what they're seen to read.
+    #[tokio::test]
+    async fn test_a_harness_hearthloom_cant_see_into_is_tainted_once_it_runs() {
+        let (state, _tmp) = state();
+        let me = Actor::new("human:test");
+        let code = all_auto(&state, &me);
+        let hermes = state
+            .store
+            .save_agent(
+                &me,
+                None,
+                &hearthloom_core::store::AgentIn {
+                    name: "Hermes".into(),
+                    harness: "hermes".into(),
+                    config: json!({}),
+                    enabled: None,
+                },
+            )
+            .unwrap();
+        let task_for = |agent: &AgentRow| {
+            let task = state
+                .store
+                .create_agent_task(
+                    &me,
+                    None,
+                    Some(&agent.id),
+                    "tidy",
+                    "Tidy…",
+                    &["files".into()],
+                    None,
+                    false,
+                )
+                .unwrap();
+            state
+                .store
+                .set_agent_task_status(&me, &task.id, "running", None, None, None)
+                .unwrap();
+            taint_if_unseen(&state, agent, &task.id);
+            state.store.agent_task(&task.id).unwrap().unwrap()
+        };
+        assert!(
+            task_for(&code).tainted.is_none(),
+            "Claude Code is seen whole"
+        );
+        let task = task_for(&hermes);
+        assert!(task.tainted.as_deref().unwrap().contains("Hermes Agent"));
+
+        let (st, id) = (state.clone(), task.id.clone());
+        let wait = tokio::spawn(async move {
+            tool_permission(&st, &id, "Bash", &json!({"command": "rm -rf build"})).await
+        });
+        let mut pending = Vec::new();
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            pending = state.store.pending_approvals(false).unwrap();
+            if !pending.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(pending.len(), 1, "an all-automatic preset still asks");
+        decide_approval(
+            &state,
+            pending[0]["id"].as_str().unwrap(),
+            false,
+            "human:test",
+        )
+        .unwrap();
+        let (allowed, _) = wait.await.unwrap();
+        assert!(!allowed);
     }
 
     #[tokio::test]

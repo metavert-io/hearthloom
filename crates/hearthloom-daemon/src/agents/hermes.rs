@@ -19,7 +19,7 @@ pub fn request_body(agent: &AgentRow, task: &AgentTaskRow) -> Value {
         "model": agent.config["model"].as_str().filter(|m| !m.trim().is_empty()).unwrap_or("hermes-agent"),
         "messages": [
             {"role": "system", "content": super::preamble(agent)},
-            {"role": "user", "content": task.brief},
+            {"role": "user", "content": super::brief_for_model(task)},
         ],
         "stream": false,
     })

@@ -4,7 +4,9 @@
 //! `provider.complete(...)` in the daemon goes through `call`; if you
 //! are adding an LLM call site, use this, not the provider directly
 //! (a direct call silently escapes the reconciliation surface — the
-//! exact defect this module fixed).
+//! exact defect this module fixed). It is also where a prompt's unseen
+//! characters are dropped (0.5.100, `hearthloom_core::unseen`), so a
+//! direct call would skip that too.
 
 use anyhow::Result;
 use hearthloom_core::provider::{LlmProvider, Stop, TextSink, Tier, Usage};
@@ -57,6 +59,11 @@ pub async fn call_streaming(
     max_tokens: u32,
     on_text: Option<TextSink<'_>>,
 ) -> Result<LlmReply> {
+    // What a model reads never carries characters a person reading the
+    // same text couldn't see (unseen.rs): dropped here, for every caller.
+    let system = hearthloom_core::unseen::for_model(system);
+    let prompt = hearthloom_core::unseen::for_model(prompt);
+    let (system, prompt) = (system.as_ref(), prompt.as_ref());
     let started = Instant::now();
     let result = match on_text {
         Some(on_text) => {

@@ -27,7 +27,7 @@ export const CLASS_LABEL = {
 const MODE_LABEL = { auto: "do it", ask: "ask me first", never: "never" };
 export const DEPTH = {
   full: ["full control", "every action it wants to take comes back here for a decision"],
-  partial: ["partial control", "Hearthloom decides whether a task is sent, and the commands it flags as dangerous"],
+  partial: ["partial control", "Hearthloom decides whether a task is sent, and asks you about every command it flags as dangerous"],
   "dispatch-only": ["sends only", "Hearthloom decides whether a task is sent; after that, the agent's own settings apply"],
 };
 const GOALS = [
@@ -45,14 +45,40 @@ const depthBadge = (depth) => depth && DEPTH[depth]
   ? `<span class="agent-depth" data-depth="${esc(depth)}" title="${esc(DEPTH[depth][1])}">${esc(DEPTH[depth][0])}</span>` : "";
 
 /* ————— waiting for your OK ————— */
+// What you decide on is shown whole (0.5.100): every field of the action's
+// input, and for a task what the agent will be told. The server reveals
+// characters you couldn't otherwise see as ⟦U+…⟧ marks; they're
+// highlighted here, and a count above says they're there.
+const marked = (text) => esc(text).replace(/⟦U\+[0-9A-F]{4,6}⟧/g, (m) => `<mark class="unseen">${m}</mark>`);
+const shownBlock = (label, text) => `
+  <div class="agent-input">${label ? `<span class="meta">${marked(label)}</span>` : ""}<pre>${marked(text)}</pre></div>`;
+
+function approvalBody(a) {
+  const parts = [];
+  if (a.hidden > 0) {
+    parts.push(`<p class="agent-hidden">⚠ ${a.hidden} hidden character${a.hidden === 1 ? " is" : "s are"} in this —
+      shown below as ⟦U+…⟧. Text you can't see usually means someone is trying to slip something past you.</p>`);
+  }
+  if (a.kind === "dispatch" && a.request) parts.push(shownBlock("the task", a.request));
+  if (a.kind === "dispatch" && a.brief) parts.push(shownBlock("what the agent will be told", a.brief));
+  for (const f of a.input_shown || []) parts.push(shownBlock(f.field, f.text));
+  if (a.input_clipped) {
+    parts.push(`<p class="agent-hidden">This action's input is ${Number(a.input_clipped).toLocaleString()} characters —
+      too long to show whole, so the middle of its longest parts is left out (marked ⟪…⟫). Decline unless you
+      expected something this size.</p>`);
+  }
+  return parts.join("");
+}
+
 export function approvalRows(approvals, { compact = false } = {}) {
   if (!approvals.length) return compact ? "" : `<p class="meta">Nothing is waiting for you.</p>`;
   return approvals.map((a) => `
     <div class="agent-approval" data-approval="${esc(a.id)}">
       <div><b>${esc(a.kind === "dispatch" ? "Start this task?" : "Allow this action?")}</b>
         ${a.class ? `<span class="task-tag plain-tag">${esc(CLASS_LABEL[a.class] || a.class)}</span>` : ""}</div>
-      <div class="meta">${esc(a.summary)}</div>
+      <div class="meta">${marked(a.summary)}</div>
       ${a.detail?.reason ? `<div class="meta agent-why">${esc(a.detail.reason)}</div>` : ""}
+      ${approvalBody(a)}
       <div class="tend-actions">
         <button class="btn agent-approve" data-yes="1">approve</button>
         <button class="btn btn-quiet agent-approve" data-yes="0">don't</button>
