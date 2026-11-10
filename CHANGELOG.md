@@ -6,7 +6,7 @@ a coarse retrospective, not a release ledger — the design log
 (newest last) is the fine-grained history. Tenant/cloud deploys should
 pin release tags, never a branch.
 
-## Unreleased
+## 0.5.100 — 2026-11-10
 
 ### Changed
 - **You see everything you approve.** When an agent asks to do something,
