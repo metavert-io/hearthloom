@@ -40,6 +40,39 @@ pub struct VirtualHit {
     /// the privacy check — never sent anywhere.
     #[serde(skip)]
     pub text: Option<String>,
+    /// What the item's memory is keyed by, when the search already knows
+    /// (Gmail search) — for the privacy check, never sent anywhere.
+    #[serde(skip)]
+    pub key: ItemKey,
+}
+
+/// What the memory made from an item would be keyed by, besides the path
+/// that reached it — the vault check looks the memory up by these.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum ItemKey {
+    /// Only its path (an item that isn't a message).
+    #[default]
+    Path,
+    /// Its path and these: the ref an import gives the message
+    /// (`mbox::message_id_ref`), and any other spelling of its Message-ID
+    /// a reader parsed.
+    Refs(Vec<String>),
+    /// A message whose memory is keyed by a hash of the exact copy an
+    /// import read (`mbox::UNKEYED_REF_PREFIX`) — it has no Message-ID, or
+    /// its headers couldn't be read. No later read rebuilds that key.
+    Unkeyed,
+}
+
+/// A message's key, read from its raw text by the import's own rule.
+/// `parsed`: the Message-ID another parser read from it, also looked up.
+pub fn mail_key(raw: &str, parsed: Option<&str>) -> ItemKey {
+    match hearthloom_adapters::mbox::message_id_ref(raw) {
+        Some(id) => {
+            let other = parsed.filter(|p| *p != id).map(String::from);
+            ItemKey::Refs(std::iter::once(id).chain(other).collect())
+        }
+        None => ItemKey::Unkeyed,
+    }
 }
 
 /// The result of a promotion: exactly one of `episode_id` (materialized)
@@ -289,7 +322,8 @@ pub fn search(def: &VirtualSourceDef, query: &str, limit: usize) -> Result<Vec<V
             .map(|(id, snippet)| VirtualHit {
                 path: id,
                 snippet,
-                text: None,
+                text: None, // read (and keyed) by the vault check when needed
+                key: ItemKey::default(),
             })
             .collect());
     }
@@ -331,11 +365,35 @@ fn marked_private(
 /// pass through ingest, so until 0.5.86 neither test ran on them: mail a
 /// rule makes private was searchable and readable through the archive
 /// with the vault locked.
-fn item_private(state: &AppState, def: &VirtualSourceDef, path: &str, text: &str) -> Result<bool> {
-    Ok(
-        marked_private(state, def, &[path.to_string()])?.contains(path)
-            || state.store.privacy_rules_match(text)?,
-    )
+/// The memory is looked up by every key the item is known by: the path
+/// asked for, and the key an import gives it (`key` — a message's
+/// Message-ID as the mail import reads it, which a `uid:` path or an
+/// archive's `at:<offset>` copy doesn't carry). A message whose memory key
+/// can't be rebuilt (`ItemKey::Unkeyed`) counts as private while any
+/// memory keyed that way is: the check can't tell it isn't that one.
+fn item_private(
+    state: &AppState,
+    def: &VirtualSourceDef,
+    path: &str,
+    key: &ItemKey,
+    text: &str,
+) -> Result<bool> {
+    let mut keys = vec![path.to_string()];
+    match key {
+        ItemKey::Path => {}
+        ItemKey::Refs(refs) => keys.extend(refs.iter().filter(|r| *r != path).cloned()),
+        ItemKey::Unkeyed => {
+            for source in materialized_sources(def) {
+                if state.store.private_ref_with_prefix(
+                    source,
+                    hearthloom_adapters::mbox::UNKEYED_REF_PREFIX,
+                )? {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(!marked_private(state, def, &keys)?.is_empty() || state.store.privacy_rules_match(text)?)
 }
 
 /// `search`, leaving out what the vault hides from this caller (the
@@ -374,14 +432,19 @@ pub fn search_with(
         if marked.contains(&hit.path) {
             continue;
         }
-        let text = if let Some(text) = &hit.text {
-            text.clone()
+        let (text, key) = if let Some(text) = &hit.text {
+            (text.clone(), hit.key.clone())
         } else if def.adapter == "mbox" {
-            fetch(def, &hit.path, None).unwrap_or_else(|_| hit.snippet.clone())
+            match fetch(def, &hit.path, None) {
+                Ok(read) => read,
+                // a message that can't be read can't be checked: held back
+                Err(_) => continue,
+            }
         } else {
-            format!("{}\n{}", hit.path, hit.snippet)
+            (format!("{}\n{}", hit.path, hit.snippet), ItemKey::Path)
         };
-        if state.store.privacy_rules_match(&text)? {
+        // the path is already checked above; this adds the item's own key
+        if item_private(state, def, &hit.path, &key, &text)? {
             continue;
         }
         kept.push(hit);
@@ -408,10 +471,26 @@ pub fn fetch_with(
     budget: Option<u32>,
     locked: bool,
 ) -> Result<String> {
-    let text = fetch(def, path, budget)?;
-    if locked && item_private(state, def, path, &text)? {
+    let (text, key) = fetch(def, path, budget)?;
+    shown_to(state, def, path, text, &key, locked)
+}
+
+/// What `fetch_with` gives the caller for an item fetched as `text` (with
+/// the key its memory would carry): the text, or — while locked, for a
+/// private item — the same words as an item that isn't there.
+fn shown_to(
+    state: &AppState,
+    def: &VirtualSourceDef,
+    path: &str,
+    text: String,
+    key: &ItemKey,
+    locked: bool,
+) -> Result<String> {
+    if locked && item_private(state, def, path, key, &text)? {
         return Err(if def.adapter == "mbox" {
             anyhow!("no message {path:?} in the index")
+        } else if def.adapter == crate::gmail_search::ADAPTER {
+            anyhow!("no message {path:?} in Gmail")
         } else {
             anyhow!("nothing at {path:?}")
         });
@@ -448,6 +527,7 @@ fn magic_search(mount: &Path, query: &str, limit: usize) -> Result<Vec<VirtualHi
                 path,
                 snippet: String::new(),
                 text: None,
+                key: ItemKey::Path,
             });
         } else if let Some(hit) = hits.last_mut() {
             if trimmed.is_empty() || trimmed.starts_with("next:") {
@@ -504,6 +584,7 @@ fn fs_search(mount: &Path, query: &str, limit: usize) -> Result<Vec<VirtualHit>>
                     path: rel,
                     snippet: snippet_of(&content),
                     text: None,
+                    key: ItemKey::Path,
                 });
                 if hits.len() >= limit {
                     return Ok(hits);
@@ -517,7 +598,12 @@ fn fs_search(mount: &Path, query: &str, limit: usize) -> Result<Vec<VirtualHit>>
 /// Read a file's content from a virtual source. On a HearthFS mount a
 /// `budget` requests a token-fit view (`file@fit/<budget>`); on a plain
 /// mount `budget` is ignored (the whole file, capped, is returned).
-pub fn fetch(def: &VirtualSourceDef, path: &str, budget: Option<u32>) -> Result<String> {
+/// Returned with the key the item's memory would carry: for a message, its
+/// Message-ID as the mail import reads it, which the path that reached it
+/// need not be (a `uid:` path, an archive's `at:<offset>` duplicate copy,
+/// another parser's spelling). Callers read through `fetch_with`, which
+/// checks the vault on both.
+fn fetch(def: &VirtualSourceDef, path: &str, budget: Option<u32>) -> Result<(String, ItemKey)> {
     if def.adapter == crate::gmail_search::ADAPTER {
         return crate::gmail_search::fetch(path);
     }
@@ -532,7 +618,9 @@ pub fn fetch(def: &VirtualSourceDef, path: &str, budget: Option<u32>) -> Result<
     if def.adapter == "mbox" {
         // `path` is a message id from a prior vsearch; the sidecar index
         // maps it to a byte range in the archive.
-        return crate::mbox_index::fetch(&mount, path, MAX_FETCH_CHARS);
+        let text = crate::mbox_index::fetch(&mount, path, MAX_FETCH_CHARS)?;
+        let key = mail_key(&text, None);
+        return Ok((text, key));
     }
     let target = match (uses_magic(def), budget) {
         (true, Some(budget)) => {
@@ -550,10 +638,11 @@ pub fn fetch(def: &VirtualSourceDef, path: &str, budget: Option<u32>) -> Result<
         _ => safe_join(&mount, path)?,
     };
     let bytes = std::fs::read(&target).with_context(|| format!("fetching {}", target.display()))?;
-    Ok(String::from_utf8_lossy(&bytes)
+    let text = String::from_utf8_lossy(&bytes)
         .chars()
         .take(MAX_FETCH_CHARS)
-        .collect())
+        .collect();
+    Ok((text, ItemKey::Path))
 }
 
 /// `vquery`: read-only SQL over a source's numeric sidecar. The sidecar
@@ -1340,6 +1429,198 @@ mod tests {
             .contains("mediation"));
     }
 
+    /// Land messages as private memories the way an import does.
+    fn import_private(state: &AppState, drafts: Vec<EpisodeDraft>) {
+        state
+            .store
+            .apply_batch(
+                &state.home,
+                &hearthloom_core::IngestBatch {
+                    actor: "adapter:mbox".into(),
+                    session_id: None,
+                    episodes: drafts,
+                },
+            )
+            .unwrap();
+    }
+
+    /// An archive message whose memory is private stays held back while
+    /// locked whatever path reaches it: its Message-ID, or the
+    /// `at:<offset>` of a duplicate copy — judged by the import's own key.
+    /// A message without a Message-ID is keyed by a hash of the copy the
+    /// import read, which no read rebuilds: while any such memory is
+    /// private, every one of them is held back.
+    #[test]
+    fn test_a_private_archive_message_is_held_back_by_its_import_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mbox = tmp.path().join("archive.mbox");
+        let message = |id: Option<&str>, subject: &str, body: &str| {
+            format!(
+                "From a@x Mon Jan 05 10:00:00 2026\nFrom: Ann <ann@x.example>\nSubject: {subject}\n\
+                 Date: Mon, 05 Jan 2026 10:00:00 -0400\n{}X-Gmail-Labels: Inbox\n\n{body}\n\n",
+                id.map(|id| format!("Message-ID: {id}\n"))
+                    .unwrap_or_default()
+            )
+        };
+        let secret = message(
+            Some("(desk) <hush1@x>"),
+            "plans for the clinic",
+            "Results are in.",
+        );
+        let unkeyed = message(None, "plans for the picnic", "Bring the blanket.");
+        std::fs::write(
+            &mbox,
+            [
+                message(
+                    Some("<sail1@x>"),
+                    "plans for saturday",
+                    "The regatta is on the 12th.",
+                ),
+                secret.clone(),
+                secret.clone(), // a second copy: indexed as at:<offset>
+                unkeyed.clone(),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        crate::mbox_index::build(&mbox).unwrap();
+        let at = |q: &str| {
+            crate::mbox_index::search(&mbox, q, 10)
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .find(|id| id.starts_with("at:"))
+                .unwrap()
+        };
+        let (copy, picnic) = (at("clinic"), at("picnic"));
+
+        let (state, _home) = state_with(tmp.path(), "imported");
+        state
+            .store
+            .register_virtual_source(
+                &Actor::new("human:test"),
+                "gmail-archive",
+                "mbox",
+                &json!({"mount": mbox.to_string_lossy(), "trust": "imported"}),
+                &["search".into(), "fetch".into()],
+            )
+            .unwrap();
+        let def = resolve(&state, "gmail-archive").unwrap();
+        let ingest = |raw: &str| {
+            let one = tmp.path().join("one.mbox");
+            std::fs::write(&one, raw).unwrap();
+            hearthloom_adapters::mbox::ingest(&one, Some("private")).unwrap()
+        };
+        let found = |state: &AppState| -> Vec<String> {
+            let mut p: Vec<String> = search_for_viewer(state, &def, "plans", 10)
+                .unwrap()
+                .into_iter()
+                .map(|h| h.path)
+                .collect();
+            p.sort();
+            p
+        };
+        let held = |path: &str| {
+            fetch_for_viewer(&state, &def, path, None)
+                .unwrap_err()
+                .to_string()
+                == format!("no message {path:?} in the index")
+        };
+
+        // the owner made the clinic message's memory private
+        import_private(&state, ingest(&secret));
+        let mut expect = vec![picnic.clone(), "sail1@x".to_string()];
+        expect.sort();
+        assert_eq!(found(&state), expect);
+        assert!(held("(desk) <hush1@x"));
+        assert!(held(&copy));
+        assert!(fetch_for_viewer(&state, &def, &picnic, None).is_ok());
+
+        // and a message without a Message-ID: its copy here can't be told
+        // apart from it, so it is held back too
+        import_private(&state, ingest(&unkeyed));
+        assert_eq!(found(&state), ["sail1@x"]);
+        assert!(held(&picnic));
+        assert!(fetch_for_viewer(&state, &def, "sail1@x", None).is_ok());
+
+        // open: all of it
+        state.store.vault_unlock(15);
+        assert_eq!(found(&state).len(), 4);
+        for path in [copy.as_str(), picnic.as_str()] {
+            assert!(fetch_for_viewer(&state, &def, path, None).is_ok());
+        }
+    }
+
+    /// A Gmail message whose memory the live pull made private is held back
+    /// while locked, whatever path reaches it — a `uid:` path, or another
+    /// parser's spelling of its Message-ID — and a message without a
+    /// Message-ID while any memory keyed that way is private.
+    #[test]
+    fn test_a_private_gmail_message_is_held_back_by_its_import_key() {
+        use hearthloom_adapters::gmail_imap::{message_text, PulledMessage};
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, _home) = state_with(tmp.path(), "imported");
+        let raw = |id: Option<&str>, subject: &str| {
+            format!(
+                "From: Ann <ann@x.example>\r\nSubject: {subject}\r\n\
+                 Date: Mon, 05 Jan 2026 10:00:00 -0400\r\n{}\r\nSee you then.\r\n",
+                id.map(|id| format!("Message-ID: {id}\r\n"))
+                    .unwrap_or_default()
+            )
+            .into_bytes()
+        };
+        // what the live pull materializes (gmail_pull.rs)
+        let pulled = |raw: &[u8]| {
+            let text = message_text(&PulledMessage {
+                uid: 7,
+                labels: vec!["Inbox".into()],
+                raw: raw.to_vec(),
+            });
+            hearthloom_adapters::mbox::draft_from_message_filtered(
+                &text,
+                &Default::default(),
+                Some("private"),
+            )
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>()
+        };
+        let gmail = VirtualSourceDef {
+            name: crate::gmail_search::SOURCE.into(),
+            adapter: crate::gmail_search::ADAPTER.into(),
+            config: json!({}),
+            capabilities: vec!["search".into(), "fetch".into()],
+        };
+        let shown = |raw: &[u8], path: &str, locked: bool| {
+            let (text, key) = crate::gmail_search::as_text(raw);
+            shown_to(&state, &gmail, path, text, &key, locked)
+        };
+        let held = |raw: &[u8], path: &str| {
+            shown(raw, path, true).unwrap_err().to_string()
+                == format!("no message {path:?} in Gmail")
+        };
+
+        let clinic = raw(Some("(desk) <hush2@x>"), "the clinic");
+        let sail = raw(Some("<sail2@x>"), "saturday");
+        let bare = raw(None, "the picnic");
+        let other_bare = raw(None, "the parade");
+        import_private(&state, pulled(&clinic));
+        assert!(held(&clinic, "uid:48211"));
+        assert!(held(&clinic, "hush2@x"), "the path another parser reads");
+        assert!(shown(&sail, "uid:48212", true).is_ok());
+        assert!(shown(&bare, "uid:48213", true).is_ok());
+
+        import_private(&state, pulled(&bare));
+        assert!(held(&bare, "uid:48213"));
+        assert!(held(&other_bare, "uid:48214"), "can't be told apart");
+        assert!(shown(&sail, "uid:48212", true).is_ok());
+
+        // open
+        for (raw, path) in [(&clinic, "uid:48211"), (&bare, "uid:48213")] {
+            assert!(shown(raw, path, false).is_ok());
+        }
+    }
+
     /// 0.5.86: Ask is told what each mail archive holds (rounded, so its
     /// instructions don't change with every message) and how mail search
     /// works.
@@ -1473,8 +1754,9 @@ mod tests {
         assert_eq!(hits[0].path, "sail1@x");
         assert!(hits[0].snippet.contains("sailing plans"));
 
-        let raw = fetch(&def, "sail1@x", None).unwrap();
+        let (raw, key) = fetch(&def, "sail1@x", None).unwrap();
         assert!(raw.contains("regatta"));
+        assert_eq!(key, ItemKey::Refs(vec!["sail1@x".into()]));
 
         let actor = Actor::new("human:test");
         let outcome =

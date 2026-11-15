@@ -1,7 +1,8 @@
 //! Substack adapter: a publication's public archive — the author's
 //! professional-interest timeline. Uses Substack's public JSON API
 //! (`/api/v1/archive` for the index, `/api/v1/posts/{slug}` for bodies),
-//! which also works on custom domains backed by Substack.
+//! which also works on custom domains backed by Substack. Posts land at
+//! trust `imported`: the URL can name any publication.
 
 use std::path::Path;
 
@@ -165,7 +166,9 @@ fn post_to_draft(
         title,
         body,
         event_time,
-        trust: "self".into(),
+        // any publication's URL can be given, so its posts are not taken
+        // as the owner's own words (core `OTHERS_WORDS_SOURCES`)
+        trust: "imported".into(),
         scope: scope.map(String::from),
         entities: vec![],
         edges: vec![],

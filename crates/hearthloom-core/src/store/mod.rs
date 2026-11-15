@@ -82,7 +82,7 @@ pub use graph::{
 };
 pub use groups::{FriendAccess, GroupRow, GROUP_PREFIX};
 pub use health::{HealthSampleRow, StoredHealthSample};
-pub use ingest_apply::OWNER_ONLY_SOURCES;
+pub use ingest_apply::{same_record, OWNER_ONLY_SOURCES};
 pub use intents::{IntentMatch, IntentRow};
 pub use lint::ReviewInputs;
 pub use movements::{

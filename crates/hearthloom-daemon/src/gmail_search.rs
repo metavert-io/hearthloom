@@ -24,11 +24,11 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use anyhow::{anyhow, bail, Result};
-use hearthloom_adapters::gmail_imap::{is_auth_failure, FoundMessage, GmailSearch};
+use hearthloom_adapters::gmail_imap::{is_auth_failure, is_message_id, FoundMessage, GmailSearch};
 use serde_json::json;
 
 use crate::mailboxes::{self, Mailbox};
-use crate::virtual_source::VirtualHit;
+use crate::virtual_source::{mail_key, ItemKey, VirtualHit};
 use crate::AppState;
 
 pub const SOURCE: &str = "gmail";
@@ -188,6 +188,10 @@ fn hit(found: &FoundMessage, mailbox: Option<&Mailbox>, label: bool) -> VirtualH
             "{}\n{}\n{}\n{}\n{}",
             r.from, r.to, r.subject, r.text, r.links
         )),
+        key: mail_key(
+            &String::from_utf8_lossy(&found.header),
+            r.message_id.as_deref(),
+        ),
     }
 }
 
@@ -248,8 +252,29 @@ fn merge(
         .collect()
 }
 
-/// One message, as text: who, when, subject, its readable text, links.
-pub fn fetch(path: &str) -> Result<String> {
+/// Whether a raw message's own Message-ID is `id` (angle brackets aside,
+/// ASCII case ignored). Gmail's `rfc822msgid:` lookup is a search, so what
+/// it returns is checked to be the message asked for.
+fn carries(raw: &[u8], id: &str) -> bool {
+    mail_parser::MessageParser::default()
+        .parse_headers(raw)
+        .and_then(|m| m.message_id().map(String::from))
+        .is_some_and(|own| {
+            own.trim_matches(|c| c == '<' || c == '>')
+                .eq_ignore_ascii_case(id.trim_matches(|c| c == '<' || c == '>'))
+        })
+}
+
+/// One message, as text — who, when, subject, its readable text, links —
+/// and the key its memory carries, whatever path reached it (a `uid:` path
+/// names none, and another parser may spell the Message-ID differently
+/// from the import): the vault check needs the message's identity, not
+/// only the path asked for.
+pub fn fetch(path: &str) -> Result<(String, ItemKey)> {
+    let not_found = || anyhow!("no message {path:?} in Gmail");
+    if parse_uid_path(path).is_none() && !is_message_id(path) {
+        return Err(not_found());
+    }
     let boxes = mailboxes::all();
     let raw = match parse_uid_path(path) {
         // a uid means something in one mailbox only
@@ -267,11 +292,11 @@ pub fn fetch(path: &str) -> Result<String> {
             let mut first_err = None;
             for mb in boxes.iter().filter(|mb| !mailboxes::refused(&mb.id)) {
                 match with_session(mb, |s| s.fetch(path, FETCH_CAP)) {
-                    Ok(Some(raw)) => {
+                    Ok(Some(raw)) if carries(&raw, path) => {
                         out = Some(raw);
                         break;
                     }
-                    Ok(None) => {}
+                    Ok(_) => {}
                     Err(err) => {
                         first_err.get_or_insert(err);
                     }
@@ -284,10 +309,16 @@ pub fn fetch(path: &str) -> Result<String> {
             }
         }
     }
-    .ok_or_else(|| anyhow!("no message {path:?} in Gmail"))?;
-    let r = read(&raw);
+    .ok_or_else(not_found)?;
+    Ok(as_text(&raw))
+}
+
+/// A fetched message as vfetch shows it, with the key its memory carries.
+pub(crate) fn as_text(raw: &[u8]) -> (String, ItemKey) {
+    let r = read(raw);
+    let key = mail_key(&String::from_utf8_lossy(raw), r.message_id.as_deref());
     let text: String = r.text.chars().take(TEXT_CAP).collect();
-    Ok(format!(
+    let shown = format!(
         "From: {}\nTo: {}\nDate: {}\nSubject: {}\n\n{}{}",
         r.from,
         r.to,
@@ -299,7 +330,8 @@ pub fn fetch(path: &str) -> Result<String> {
         } else {
             format!("\n\nLinks: {}", r.links)
         }
-    ))
+    );
+    (shown, key)
 }
 
 /// Keep the `gmail` source registered while Gmail is connected here, naming
@@ -394,6 +426,29 @@ mod tests {
         assert!(hits[0].snippet.contains("| in jon@work.example"));
         assert_eq!(hits[1].path, "both@x");
         assert_eq!(merge(Vec::new(), true, 10).len(), 0);
+    }
+
+    /// A Message-ID lookup returns only the message asked for, and a read
+    /// reports the message's own id whatever path reached it.
+    #[test]
+    fn test_a_fetch_is_the_message_asked_for() {
+        let raw = b"From: Bank <alerts@bank.example>\r\nSubject: statement\r\n\
+Message-ID: <Stmt-7@bank.example>\r\n\r\nYour balance.\r\n";
+        assert!(carries(raw, "Stmt-7@bank.example"));
+        assert!(carries(raw, "<stmt-7@BANK.example>"));
+        assert!(!carries(raw, "p1@neutral.example"));
+        assert!(!carries(
+            b"From: a@x\r\n\r\nno id\r\n",
+            "p1@neutral.example"
+        ));
+        let (text, key) = as_text(raw);
+        assert!(text.contains("Subject: statement"));
+        assert_eq!(key, ItemKey::Refs(vec!["Stmt-7@bank.example".into()]));
+        // a path that isn't a uid or one Message-ID is never looked up
+        let err = fetch("p1@neutral.example OR from:bank.example")
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("no message"), "{err}");
     }
 
     #[test]

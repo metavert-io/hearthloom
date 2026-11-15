@@ -1063,6 +1063,8 @@ async fn main() -> Result<()> {
                 );
                 return Ok(());
             }
+            // conversations the export flags "do not remember", draft or not
+            let mut flagged: Vec<(String, String)> = Vec::new();
             let (drafts, actor, label) = match source {
                 IngestCmd::Git { path, scope } => (
                     hearthloom_adapters::git::ingest(&path, scope.as_deref())?,
@@ -1079,11 +1081,11 @@ async fn main() -> Result<()> {
                     "adapter:mbox",
                     file.display().to_string(),
                 ),
-                IngestCmd::Chatlog { file, scope } => (
-                    hearthloom_adapters::chatlog::ingest(&file, scope.as_deref())?,
-                    "adapter:chatlog",
-                    file.display().to_string(),
-                ),
+                IngestCmd::Chatlog { file, scope } => {
+                    let read = hearthloom_adapters::chatlog::read(&file, scope.as_deref())?;
+                    flagged = read.flagged;
+                    (read.drafts, "adapter:chatlog", file.display().to_string())
+                }
                 IngestCmd::ClaudeCode { dir, scope } => {
                     let dir = dir.unwrap_or_else(|| {
                         PathBuf::from(std::env::var("HOME").unwrap_or_default())
@@ -1168,6 +1170,26 @@ async fn main() -> Result<()> {
                 "ingested: {} new episodes ({} already present), {} new entities, {} new edges",
                 totals.0, totals.1, totals.2, totals.3
             );
+            // A flagged conversation the daemon got a private draft of is
+            // vaulted by /v1/ingest; one with no turns left has no draft,
+            // yet a copy an earlier reader stored of it goes into the vault.
+            let episodes: Vec<String> = flagged
+                .iter()
+                .flat_map(|(source, id)| hearthloom_core::store::same_record(source, id))
+                .map(|(source, id)| hearthloom_core::ids::episode_id(&source, &id))
+                .collect();
+            if !episodes.is_empty() {
+                let report = client
+                    .post(
+                        "/v1/scope",
+                        &json!({"actor": actor, "episodes": episodes, "scope": "private"}),
+                    )
+                    .await?;
+                let moved = report["episodes_relabeled"].as_u64().unwrap_or(0);
+                if moved > 0 {
+                    println!("{moved} stored before now private");
+                }
+            }
         }
         Cmd::Search { query, limit } => {
             let query = query.join(" ");

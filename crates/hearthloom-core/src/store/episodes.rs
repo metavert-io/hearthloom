@@ -325,9 +325,11 @@ impl Store {
     }
 
     /// The first of these episodes whose words aren't the owner's
-    /// (`trust != 'self'`), if any. A provenance check over ids the caller
-    /// has already been shown, so it ignores the vault and area filters:
-    /// it reveals no content, only that one of them came from outside.
+    /// (`trust != 'self'`, or a source others write whatever trust it was
+    /// stored with — `provenance::not_owners_words_sql`), if any. A
+    /// provenance check over ids the caller has already been shown, so it
+    /// ignores the vault and area filters: it reveals no content, only that
+    /// one of them came from outside.
     pub fn first_untrusted_episode(&self, ids: &[String]) -> Result<Option<String>> {
         if ids.is_empty() {
             return Ok(None);
@@ -338,7 +340,8 @@ impl Store {
         conn.query_row(
             &format!(
                 "SELECT id FROM episodes /* all-episodes: a retired untrusted memory still taints */
-                 WHERE id IN ({marks}) AND trust != 'self' LIMIT 1"
+                 WHERE id IN ({marks}) AND {} LIMIT 1",
+                super::provenance::not_owners_words_sql("")
             ),
             rusqlite::params_from_iter(ids),
             |r| r.get(0),

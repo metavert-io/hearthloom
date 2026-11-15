@@ -9796,7 +9796,8 @@ fn ingest_openai_background(
         let scope = body.scope.as_deref();
         let media_out = state.home.raw_dir().join("openai/media");
         let result = (|| -> anyhow::Result<(usize, usize, usize)> {
-            let drafts = hearthloom_adapters::openai::ingest(&root, Some(&media_out), scope)?;
+            let hearthloom_adapters::openai::ExportRead { drafts, flagged } =
+                hearthloom_adapters::openai::read_export(&root, Some(&media_out), scope)?;
             let parsed = drafts.len();
             tracing::info!(
                 "openai ingest {}: {parsed} conversations parsed, applying…",
@@ -9818,6 +9819,14 @@ fn ingest_openai_background(
                 // shared store mutex — keep the dashboard alive
                 std::thread::sleep(std::time::Duration::from_millis(40));
             }
+            // a conversation flagged "do not remember" since it was stored
+            // (here or through the chat-log reader) goes into the vault —
+            // one with no turns left to make a draft of too
+            state.store.label_private_on_reimport(
+                &Actor::new("adapter:openai"),
+                &drafts,
+                &flagged,
+            )?;
             Ok((parsed, new, existing))
         })();
         match result {

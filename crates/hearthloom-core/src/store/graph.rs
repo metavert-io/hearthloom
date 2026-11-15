@@ -1768,7 +1768,8 @@ impl Store {
     /// the entity form of "did this read touch a non-`self` episode?".
     /// An entity passes only when it, with everything merged into it, is
     /// linked to at least one episode and every one of them is
-    /// `trust = 'self'`. No evidence at all (a name minted from a network
+    /// `trust = 'self'` from a source the owner writes
+    /// (`provenance::not_owners_words_sql`). No evidence at all (a name minted from a network
     /// export, a friend's card or a peer), a link to an episode that isn't
     /// here, or more links than one check reads under the store lock
     /// (`MAX_LINKS`) all fail it: the guard fails closed.
@@ -1827,7 +1828,8 @@ impl Store {
                 &format!(
                     "SELECT ee.entity_id FROM episode_entities ee /* all-episodes: provenance of a name, retired evidence included */
                      LEFT JOIN episodes e ON e.id = ee.episode_id
-                     WHERE ee.entity_id IN ({marks}) AND e.trust IS NOT 'self' LIMIT 1"
+                     WHERE ee.entity_id IN ({marks}) AND {} LIMIT 1",
+                    super::provenance::not_owners_words_sql("e.")
                 ),
                 rusqlite::params_from_iter(&group),
                 |row| row.get(0),
@@ -2414,7 +2416,7 @@ mod tests {
             session_id: None,
             episodes: vec![
                 episode(
-                    "git",
+                    "desk",
                     "self",
                     entity("Project", "hearthloom"),
                     entity("Person", "Jon"),
@@ -2468,13 +2470,13 @@ mod tests {
             .unwrap();
         assert_eq!(check(&[&project, &jon]), Some(jon.clone()));
         // More evidence than one check reads is unchecked, so it fails too.
-        let git = ids::episode_id("git", "git:1");
+        let own = ids::episode_id("desk", "desk:1");
         {
             let conn = store.lock();
             for n in 0..5_001 {
                 conn.execute(
                     "INSERT INTO episode_entities (episode_id, entity_id, role) VALUES (?1, ?2, ?3)",
-                    rusqlite::params![git, project, format!("r{n}")],
+                    rusqlite::params![own, project, format!("r{n}")],
                 )
                 .unwrap();
             }

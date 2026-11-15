@@ -30,10 +30,34 @@ use crate::time::now_utc;
 /// threads, web page titles, screen captures, chat assistants' replies,
 /// coding sessions (they hold fetched pages and tool output), calendar
 /// invitations, scanned documents, media titles. Their episodes are
-/// `imported`, never `self`. Git is NOT here yet: a commit is the owner's
-/// or a collaborator's, which needs an author check against the owner's
-/// claimed identities (a known follow-up).
+/// `imported`, never `self`.
+/// Git and Substack are here too: a repository's history holds every
+/// contributor's commit messages, and a publication URL can name anyone's
+/// newsletter. A commit's author line is whatever its writer typed, so it
+/// can't tell the owner's commits from others'; both sources are
+/// `imported` until the owner can say which repositories and publications
+/// are their own.
 pub const OTHERS_WORDS_SOURCES: &[&str] = &[
+    "imessage",
+    "chrome",
+    "rewind",
+    "openai",
+    "claude-code",
+    "ics",
+    "ios-scan",
+    "ios-media",
+    "git",
+    "substack",
+];
+
+/// Source families matched by prefix (`chatlog-claude`, `chatlog-chatgpt`).
+pub const OTHERS_WORDS_PREFIXES: &[&str] = &["chatlog-"];
+
+/// What the v61 migration relabelled, as it shipped. A migration's effect
+/// stays fixed; sources added to `OTHERS_WORDS_SOURCES` later are judged
+/// when read instead (`not_owners_words_sql`), whatever trust an earlier
+/// build stored them with.
+const V61_RELABELLED: &[&str] = &[
     "imessage",
     "chrome",
     "rewind",
@@ -44,12 +68,37 @@ pub const OTHERS_WORDS_SOURCES: &[&str] = &[
     "ios-media",
 ];
 
-/// Source families matched by prefix (`chatlog-claude`, `chatlog-chatgpt`).
-pub const OTHERS_WORDS_PREFIXES: &[&str] = &["chatlog-"];
-
 pub fn others_words(source: &str) -> bool {
     OTHERS_WORDS_SOURCES.contains(&source)
         || OTHERS_WORDS_PREFIXES.iter().any(|p| source.starts_with(p))
+}
+
+/// `source IN (…) OR source LIKE 'prefix%'` over these sources, with the
+/// column prefix given (`""` or `"e."`).
+fn source_sql(sources: &[&str], col: &str) -> String {
+    let list = sources
+        .iter()
+        .map(|s| format!("'{s}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let prefixes = OTHERS_WORDS_PREFIXES
+        .iter()
+        .map(|p| format!(" OR {col}source LIKE '{p}%'"))
+        .collect::<String>();
+    format!("{col}source IN ({list}){prefixes}")
+}
+
+/// SQL that is true for an episode row whose words aren't the owner's:
+/// stored with any trust but `self` (a missing row too, through a LEFT
+/// JOIN), or from a source others write whatever trust it was stored with.
+/// The taint checks use it, so an episode an earlier build stored as
+/// `self` before its source joined `OTHERS_WORDS_SOURCES` still counts.
+/// `col` is the column prefix (`""` or `"e."`).
+pub(crate) fn not_owners_words_sql(col: &str) -> String {
+    format!(
+        "({col}trust IS NOT 'self' OR {})",
+        source_sql(OTHERS_WORDS_SOURCES, col)
+    )
 }
 
 /// The trust an arriving episode is stored with: a `self` claim from a
@@ -65,18 +114,9 @@ pub fn trust_for(source: &str, trust: &str) -> String {
 }
 
 /// The v61 relabel's WHERE clause (and the test's): `self` rows whose
-/// source others wrote.
+/// source others wrote, as the migration shipped (`V61_RELABELLED`).
 pub(crate) fn others_words_sql() -> String {
-    let list = OTHERS_WORDS_SOURCES
-        .iter()
-        .map(|s| format!("'{s}'"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let prefixes = OTHERS_WORDS_PREFIXES
-        .iter()
-        .map(|p| format!(" OR source LIKE '{p}%'"))
-        .collect::<String>();
-    format!("trust = 'self' AND (source IN ({list}){prefixes})")
+    format!("trust = 'self' AND ({})", source_sql(V61_RELABELLED, ""))
 }
 
 /// One node an episode passed through. `node` is a node id (names are
@@ -399,13 +439,98 @@ mod tests {
         assert_eq!(trust_for("chatlog-claude", "self"), "imported");
         assert_eq!(trust_for("ics", "self"), "imported");
         assert_eq!(trust_for("desk", "self"), "self");
-        assert_eq!(trust_for("substack", "self"), "self");
+        assert_eq!(trust_for("git", "self"), "imported");
+        assert_eq!(trust_for("substack", "self"), "imported");
         assert_eq!(
             trust_for("imessage", "agent"),
             "agent",
             "only a self claim moves"
         );
         assert!(others_words_sql().contains("source LIKE 'chatlog-%'"));
+        assert!(
+            !others_words_sql().contains("'git'"),
+            "the shipped migration's list stays as it was"
+        );
+    }
+
+    /// A commit or a post is outside text for the taint checks: one landing
+    /// now is stored `imported`, and one an earlier build stored as `self`
+    /// counts as outside text when read.
+    #[test]
+    fn test_repository_and_publication_text_counts_as_outside_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = crate::paths::Home::at(tmp.path());
+        home.init().unwrap();
+        let store = Store::open(&home.db_path()).unwrap();
+        store
+            .apply_batch(
+                &home,
+                &IngestBatch {
+                    actor: "adapter:test".into(),
+                    session_id: None,
+                    episodes: vec![
+                        draft("git", "repo#1", "self"),
+                        draft("substack", "post-1", "self"),
+                        EpisodeDraft {
+                            entities: vec![crate::ingest::EntityRef {
+                                entity_type: "Person".into(),
+                                name: "Ann Contributor".into(),
+                                attributes: vec![],
+                                role: "author".into(),
+                            }],
+                            ..draft("git", "repo#2", "self")
+                        },
+                        draft("desk", "task-1", "self"),
+                    ],
+                },
+            )
+            .unwrap();
+        let id = |s: &str, r: &str| crate::ids::episode_id(s, r);
+        let trust = |i: &str| -> String {
+            store
+                .lock()
+                .query_row("SELECT trust FROM episodes WHERE id = ?1", [i], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(trust(&id("git", "repo#1")), "imported");
+        assert_eq!(trust(&id("substack", "post-1")), "imported");
+        assert_eq!(trust(&id("desk", "task-1")), "self");
+
+        // stored as `self` by an earlier build
+        let old = id("git", "repo#2");
+        store
+            .lock()
+            .execute("UPDATE episodes SET trust = 'self' WHERE id = ?1", [&old])
+            .unwrap();
+        assert_eq!(
+            store
+                .first_untrusted_episode(std::slice::from_ref(&old))
+                .unwrap(),
+            Some(old)
+        );
+        assert_eq!(
+            store
+                .first_untrusted_episode(&[id("desk", "task-1")])
+                .unwrap(),
+            None
+        );
+        // a name only that commit vouches for isn't the owner's
+        let author: String = store
+            .lock()
+            .query_row(
+                "SELECT id FROM entities WHERE name = 'Ann Contributor'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .entity_names_unverified(std::slice::from_ref(&author))
+                .unwrap(),
+            Some(author)
+        );
     }
 
     #[test]
