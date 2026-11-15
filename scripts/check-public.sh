@@ -41,7 +41,8 @@ rules = [
     ("email", re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b")),
     ("phone", re.compile(r"(?<![\w.])(?:\+?1[ .-]?)?\(?[2-9]\d{2}\)?[ .-][2-9]\d{2}[ .-]\d{4}(?![\w])|\b1[2-9]\d{9}\.\d{11}\b")),
     ("home-path", re.compile(r"/(?:Users|home)/(?!you\b|me\b|user\b|username\b|<)[a-z][a-z0-9_-]+")),
-    ("fly-machine-id", re.compile(r"(?<![0-9a-f])[0-9a-f]{14}(?![0-9a-f])")),
+    # not the fraction of a decimal number (a unit string's molar mass)
+    ("fly-machine-id", re.compile(r"(?<![0-9a-f])(?<!\d\.)[0-9a-f]{14}(?![0-9a-f])")),
 ]
 allowed = set()
 if os.path.exists("scripts/check-public.allow"):

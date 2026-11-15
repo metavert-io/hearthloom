@@ -15,7 +15,7 @@ const css = (name, fallback) =>
   (getComputedStyle(document.documentElement).getPropertyValue(name) || fallback).trim();
 
 // Health metrics carry a `today` reducer over /v1/health/today rows
-// ({metric, source, n, sum, min, max, avg}) — the LIVE intra-day point
+// ({metric, source, n, sum, min, max, avg, unit}) — the LIVE intra-day point
 // the export sidecar can't have (v44 device stream). Each mirrors its
 // history SQL's aggregate so today's point is comparable to the trace.
 const METRICS = [
@@ -35,14 +35,17 @@ const METRICS = [
       }
       return bySource.size ? Math.max(...bySource.values()) : null;
     } },
-  { id: "weight", label: "Body mass", unit: "lb", src: "health",
-    sql: "SELECT day, AVG(avg) v FROM daily WHERE metric='BodyMass' GROUP BY day",
+  // Mass and glucose come in a regional unit (`hk` names the metric): the
+  // sidecar's third column names the history's, today's readings are
+  // asked for in it, and `unit` is only the fallback.
+  { id: "weight", label: "Body mass", unit: "lb", src: "health", hk: "BodyMass",
+    sql: "SELECT day, AVG(avg) v, MAX(unit) u FROM daily WHERE metric='BodyMass' GROUP BY day",
     today: (rows) => aggToday(rows, (r) => r.metric === "BodyMass", "avg", "mean") },
   { id: "hrv", label: "Heart-rate variability", unit: "ms", src: "health",
     sql: "SELECT day, MAX(avg) v FROM daily WHERE metric='HeartRateVariabilitySDNN' GROUP BY day",
     today: (rows) => aggToday(rows, (r) => r.metric === "HeartRateVariabilitySDNN", "avg", Math.max) },
-  { id: "glucose", label: "Blood glucose", unit: "mg/dL", src: "health",
-    sql: "SELECT day, AVG(avg) v FROM daily WHERE metric='BloodGlucose' GROUP BY day",
+  { id: "glucose", label: "Blood glucose", unit: "mg/dL", src: "health", hk: "BloodGlucose",
+    sql: "SELECT day, AVG(avg) v, MAX(unit) u FROM daily WHERE metric='BloodGlucose' GROUP BY day",
     today: (rows) => aggToday(rows, (r) => r.metric === "BloodGlucose", "avg", "mean") },
   { id: "episodes", label: "Episodes recorded", unit: "/day", src: "histogram" },
   { id: "mail", label: "Mail", unit: "/day", src: "histogram", source: "mbox" },
@@ -65,26 +68,49 @@ function aggToday(rows, keep, field, combine) {
   return vals.reduce((a, b) => combine(a, b));
 }
 
-// One fetch of today's live rollup per page view, shared across metrics.
-let todayPromise = null;
-function loadToday() {
-  todayPromise ??= fetch("/v1/health/today").then((r) => r.json()).catch(() => null);
-  return todayPromise;
+// One fetch of today's live rollup per page view and set of units (a
+// metric's readings come back in the unit asked for, each row naming
+// its unit), shared across metrics.
+const todayCache = new Map();
+function loadToday(units = {}) {
+  const query = new URLSearchParams(
+    Object.entries(units).map(([metric, unit]) => [`unit.${metric}`, unit])).toString();
+  if (!todayCache.has(query)) {
+    todayCache.set(query, fetch(`/v1/health/today${query ? `?${query}` : ""}`)
+      .then((r) => r.json()).catch(() => null));
+  }
+  return todayCache.get(query);
 }
 
 const seriesCache = new Map();
+
+/// The unit a metric's series is in: the one its rows named, else the
+/// metric's own. A HealthKit molar unit names its molar mass
+/// (`mmol<180.15…>/L`), which the label leaves out.
+function unitOf(metric) {
+  const named = seriesCache.get(metric.id)?.unit;
+  return named ? named.replace(/<[^>]*>/g, "") : metric.unit;
+}
+
 async function loadSeries(metric) {
   if (seriesCache.has(metric.id)) return seriesCache.get(metric.id);
   let points = [];
+  let unit = null;
   try {
     if (metric.src === "health") {
       const data = await (await fetch(
         `/v1/sources/virtual/apple-health/query?sql=${encodeURIComponent(metric.sql)}&limit=6000`)).json();
       points = (data.rows || []).map(([day, v]) => [dayNum(day), v]);
+      unit = (data.rows || []).map((row) => row[2]).find((u) => typeof u === "string" && u) || null;
       // "Today so far": the live device stream's intra-day point — the
-      // export sidecar only knows finished, exported days.
+      // export sidecar only knows finished, exported days. Asked for in
+      // the history's unit (a reading the server can't convert is left
+      // out); with no history, the live rows name the unit.
       if (metric.today) {
-        const today = await loadToday();
+        const today = await loadToday(metric.hk && unit ? { [metric.hk]: unit } : {});
+        if (metric.hk && !unit) {
+          unit = (today?.rows || []).find((r) => r.metric === metric.hk && r.unit)?.unit || null;
+        }
         const v = today?.rows?.length ? metric.today(today.rows) : null;
         if (v != null) {
           const n = dayNum(today.day);
@@ -119,7 +145,7 @@ async function loadSeries(metric) {
     if (!hi || p[1] > hi[1]) hi = p;
     if (!lo || p[1] < lo[1]) lo = p;
   }
-  const series = { points, hi, lo };
+  const series = { points, hi, lo, unit };
   seriesCache.set(metric.id, series);
   return series;
 }
@@ -355,7 +381,7 @@ export async function mount(container) {
       if (Math.abs(pt[0] - cursor) < 1.2) {
         milestonesFired.add(tag);
         flashEl.hidden = false;
-        flashEl.textContent = `all-time ${tag}: ${pt[1].toLocaleString()} ${metric.unit} · ${numDay(pt[0])}`;
+        flashEl.textContent = `all-time ${tag}: ${pt[1].toLocaleString()} ${unitOf(metric)} · ${numDay(pt[0])}`;
         flashEl.classList.remove("in");
         void flashEl.offsetWidth;
         flashEl.classList.add("in");
@@ -400,6 +426,7 @@ export async function mount(container) {
     unitEl.textContent = metric.unit;
     name1El.textContent = metric.label;
     series = await loadSeries(metric);
+    unitEl.textContent = unitOf(metric);
     if (series.points.length) {
       cursor = series.points[series.points.length - 1][0];
       const first = series.points[0][0];
@@ -416,7 +443,7 @@ export async function mount(container) {
     block2El.hidden = !compareMetric;
     if (compareMetric) {
       name2El.textContent = compareMetric.label;
-      unit2El.textContent = compareMetric.unit;
+      unit2El.textContent = unitOf(compareMetric);
     }
     draw();
   };

@@ -330,7 +330,9 @@ workspace with `npm i playwright`) — screenshot + pageerror check.
   (`${VAR:default}` YAML + `~/.hearthloom/.env`), provider trait (Anthropic
   default), local ONNX embeddings, BRAIN.md generator (self-model section
   renders confirmed propositions first, private sphere excluded always)
-- `crates/hearthloom-adapters` — git, ICS, mbox (streaming; `LabelFilter`
+- `crates/hearthloom-adapters` — git, ICS (recurrence is hand-written on
+  purpose: read the decision note at the top of `ics/rrule.rs` before
+  proposing a library), mbox (streaming; `LabelFilter`
   over `X-Gmail-Labels` — Spam/Trash always dropped, kept episodes record a
   `labels:` preamble line), chatlog
   (Claude/ChatGPT, owner-aware via users.json), claude-code, iMessage, Apple
@@ -395,7 +397,14 @@ workspace with `npm i playwright`) — screenshot + pageerror check.
   willingness filter `bus::offered` at fan-out — friend grants slot in
   there with federation; notes in the design log 2026-07-15);
   inbox drop-folder watcher (`~/.hearthloom/inbox/` — zips, mbox, ics,
-  conversations.json, Finder-dragged chat.db/Photos.sqlite; an owner's import that reads a
+  conversations.json, Finder-dragged chat.db/Photos.sqlite; zips AND tgz
+  unpack in-process writing only plain files and folders inside the
+  folder, within `unpack_budget` (what the temp and home disks can spare
+  less 1 GB, counted as written for a tgz); staging an export into
+  `archives/<key>` refuses a tree with links/special files
+  (`downloads::only_plain_files`) and holds the run-now import's
+  single-flight key (`downloads::import_claim_key`), so a folder is never
+  replaced while its import reads it); an owner's import that reads a
   record as private (ChatGPT "do not remember", or `--scope private`)
   relabels the copy stored before (`Store::label_private_on_reimport`:
   label only, into the vault only; never for a peer's or another key's

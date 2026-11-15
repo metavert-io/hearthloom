@@ -209,39 +209,6 @@ impl Store {
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
-
-    /// Per-(metric, source) rollup of one day's LIVE samples — the
-    /// "today so far" feed for Pulse. Shapes rows like the export
-    /// sidecar's `daily` table (Sleep stages become `Sleep/<stage>`
-    /// valued in HOURS, matching apple_health::DayTable) so the client
-    /// can apply the same per-metric aggregate it uses on history.
-    pub fn health_day_rollup(&self, day: &str) -> Result<Vec<serde_json::Value>> {
-        let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT CASE WHEN metric='SleepAnalysis' AND category IS NOT NULL
-                         THEN 'Sleep/'||category ELSE metric END AS m,
-                    source,
-                    COUNT(*) AS n,
-                    SUM(CASE WHEN metric='SleepAnalysis'
-                             THEN (julianday(end_utc)-julianday(start_utc))*24.0
-                             ELSE value END) AS sum,
-                    MIN(value) AS min, MAX(value) AS max, AVG(value) AS avg
-             FROM health_sample WHERE day = ?1 GROUP BY m, source",
-        )?;
-        let rows = stmt.query_map([day], |row| {
-            Ok(serde_json::json!({
-                "metric": row.get::<_, String>(0)?,
-                "source": row.get::<_, String>(1)?,
-                "n": row.get::<_, i64>(2)?,
-                "sum": row.get::<_, Option<f64>>(3)?,
-                "min": row.get::<_, Option<f64>>(4)?,
-                "max": row.get::<_, Option<f64>>(5)?,
-                "avg": row.get::<_, Option<f64>>(6)?,
-            }))
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
-    }
 }
 
 #[cfg(test)]

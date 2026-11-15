@@ -299,7 +299,10 @@ Four ways in:
    Those that need macOS privacy permissions (iMessage, Photos) run
    daemon-side through `/v1/ingest/local`.
 2. **The inbox drop folder.** Files placed in `~/.hearthloom/inbox/`
-   (zips, mbox, ics, conversation exports) are recognised and ingested.
+   (zips, tgz, mbox, ics, conversation exports) are recognised and
+   ingested. Archives unpack in-process, plain files and folders only,
+   within what the disk can spare; a recognised export is staged into
+   `archives/<key>` for its run-now import, never while that import runs.
    Very large mail archives are refused there and go through the
    filtered pipeline.
 3. **Live device feeds.** The iOS app posts to `/v1/ingest/*`: health,

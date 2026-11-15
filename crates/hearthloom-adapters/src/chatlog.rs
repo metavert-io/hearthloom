@@ -11,6 +11,8 @@ use chrono::DateTime;
 use hearthloom_core::{EpisodeDraft, EventTime, TimeUncertainty};
 use serde_json::Value;
 
+use crate::cap;
+
 /// Per-message and per-episode text caps: the condensed transcript is the
 /// searchable body; the export file itself remains the deep archive.
 const MESSAGE_CAP: usize = 2000;
@@ -96,17 +98,6 @@ fn read_with_owner(
         return Err(anyhow!("no conversations found in {}", path.display()));
     }
     Ok(crate::openai::ExportRead { drafts, flagged })
-}
-
-fn cap(text: &str, limit: usize) -> &str {
-    if text.len() <= limit {
-        return text;
-    }
-    let mut cut = limit;
-    while !text.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    &text[..cut]
 }
 
 /// One conversation's transcript, whichever provider exported it.

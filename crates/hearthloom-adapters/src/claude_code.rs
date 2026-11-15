@@ -19,6 +19,8 @@ use chrono::DateTime;
 use hearthloom_core::{EntityRef, EpisodeDraft, EventTime, TimeUncertainty};
 use serde_json::Value;
 
+use crate::cap;
+
 const MESSAGE_CAP: usize = 1500;
 const BODY_CAP: usize = 64 * 1024;
 /// How long a session file must go unchanged before it is read: long
@@ -228,17 +230,6 @@ fn content_text(content: &Value) -> String {
         }
         _ => String::new(),
     }
-}
-
-fn cap(text: &str, limit: usize) -> &str {
-    if text.len() <= limit {
-        return text;
-    }
-    let mut cut = limit;
-    while !text.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    &text[..cut]
 }
 
 fn session_to_draft(

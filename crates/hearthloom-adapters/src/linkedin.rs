@@ -21,6 +21,9 @@ use std::path::Path;
 use anyhow::{anyhow, Context, Result};
 use hearthloom_core::{EntityRef, EpisodeDraft, EventTime, TimeUncertainty};
 
+/// An article's text cap, in bytes; the cut falls on a character boundary.
+const ARTICLE_CAP: usize = 48 * 1024;
+
 /// Minimal RFC-4180 CSV: quoted fields, embedded commas/newlines/"".
 pub fn parse_csv(text: &str) -> Vec<Vec<String>> {
     let mut rows = Vec::new();
@@ -435,7 +438,7 @@ pub fn ingest(root: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
             }
             let html = std::fs::read_to_string(&path)?;
             let (title, mut text) = html_to_text(&html);
-            text.truncate(48 * 1024);
+            text.truncate(text.floor_char_boundary(ARTICLE_CAP));
             let stem = path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -569,5 +572,39 @@ mod tests {
             .attributes
             .iter()
             .any(|(k, v)| k == "email" && v == "jon+li@example.com"));
+    }
+
+    /// An article past the cap is cut on a character boundary, wherever
+    /// the cap falls.
+    #[test]
+    fn test_a_long_article_is_cut_between_characters() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(
+            root.join("Profile.csv"),
+            "First Name,Last Name,Headline,Summary\nJon,Hale,h,s\n",
+        )
+        .unwrap();
+        let articles = root.join("Articles/Articles");
+        std::fs::create_dir_all(&articles).unwrap();
+        for (i, wide) in ["é", "—", "🥰"].into_iter().enumerate() {
+            // the cap lands one byte into the wide character
+            let text = format!("{}{wide}{}", "a".repeat(ARTICLE_CAP - 1), "b".repeat(64));
+            std::fs::write(
+                articles.join(format!("2020-01-0{}-post.html", i + 1)),
+                format!("<p>{text}</p>"),
+            )
+            .unwrap();
+        }
+        let drafts = ingest(root, None).unwrap();
+        let bodies: Vec<&str> = drafts
+            .iter()
+            .filter(|d| d.kind == "li_article")
+            .map(|d| d.body.as_str())
+            .collect();
+        assert_eq!(bodies.len(), 3);
+        for body in bodies {
+            assert_eq!(body, "a".repeat(ARTICLE_CAP - 1));
+        }
     }
 }

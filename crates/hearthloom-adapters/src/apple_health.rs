@@ -35,16 +35,36 @@ pub struct Sample {
     /// of the `HKCategoryValueSleepAnalysis` prefix.
     pub category: Option<String>,
     pub unit: Option<String>,
-    /// Normalized source ("Apple Watch", "WHOOP", "Withings", …).
+    /// Normalized source ("Apple Watch", "WHOOP", "Withings", …): how the
+    /// sample is shown and ranked.
     pub source: String,
+    /// The device or app that recorded it, as named where it came from
+    /// ("Ada’s Apple Watch Ultra"). Two devices can share a `source` (two
+    /// watches are both "Apple Watch"); a night's sleep is one device's.
+    pub device: String,
     /// Raw start timestamp, `2023-10-14 08:42:26 -0300`.
     pub start: String,
     /// Local day this sample belongs to (sleep buckets to the wake day).
     pub day: String,
 }
 
+impl Sample {
+    /// Who recorded the sample, as the day table keeps it apart: the
+    /// device for a sleep stage (two devices on the same night record the
+    /// same hours, which must not add up), the source for the rest.
+    fn tracker(&self) -> &str {
+        let device = self.device.trim();
+        if self.metric == "SleepAnalysis" && !device.is_empty() {
+            device
+        } else {
+            &self.source
+        }
+    }
+}
+
 /// One workout, with totals folded in from `WorkoutStatistics` children
-/// (newer exports moved energy/distance off the open tag).
+/// (newer exports moved energy/distance off the open tag). Totals are in
+/// the units their names say, whatever unit the export wrote.
 #[derive(Debug, Clone, Default)]
 pub struct WorkoutRec {
     pub activity: String,
@@ -90,15 +110,117 @@ fn hours_between(start: &str, end: &str) -> Option<f64> {
 /// "Ada’s Apple Watch" → "Apple Watch"; "iPhone (7)" → "iPhone".
 /// Pub: the daemon's live-HealthKit finalize pass normalizes device
 /// names the same way so live and export rows aggregate together.
+///
+/// Only a name that says "Apple Watch" (in any language's device name:
+/// "Apple Watch de Ada") is the watch: an app whose name merely contains
+/// "Watch" (SleepWatch) is a tracker of its own, and two trackers must
+/// never share a source — their sleep would add up.
 pub fn normalize_source(raw: &str) -> String {
     let s = raw.trim();
-    if s.contains("Watch") {
+    let spaced: String = s
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect();
+    if spaced.to_lowercase().contains("apple watch") {
         return "Apple Watch".into();
     }
     if s.contains("iPhone") {
         return "iPhone".into();
     }
     s.to_string()
+}
+
+/// A HealthKit unit string as a dimension and the affine map onto that
+/// dimension's base unit (base = value × scale + offset).
+fn unit_def(unit: &str) -> Option<(&'static str, f64, f64)> {
+    let linear = |dimension, scale| Some((dimension, scale, 0.0));
+    match unit {
+        "g" => linear("mass", 1.0),
+        "kg" => linear("mass", 1000.0),
+        "mg" => linear("mass", 1e-3),
+        "mcg" => linear("mass", 1e-6),
+        "lb" => linear("mass", 453.592_37),
+        "oz" => linear("mass", 28.349_523_125),
+        "st" => linear("mass", 6_350.293_18),
+        "m" => linear("length", 1.0),
+        "km" => linear("length", 1000.0),
+        "cm" => linear("length", 0.01),
+        "mm" => linear("length", 0.001),
+        "mi" => linear("length", 1_609.344),
+        "yd" => linear("length", 0.9144),
+        "ft" => linear("length", 0.3048),
+        "in" => linear("length", 0.0254),
+        // HealthKit's "Cal" is the food calorie, a kilocalorie.
+        "kcal" | "Cal" => linear("energy", 1.0),
+        "cal" => linear("energy", 0.001),
+        "kJ" => linear("energy", 1.0 / 4.184),
+        "J" => linear("energy", 1.0 / 4184.0),
+        "s" => linear("time", 1.0),
+        "ms" => linear("time", 0.001),
+        "min" => linear("time", 60.0),
+        "hr" | "h" => linear("time", 3600.0),
+        "d" => linear("time", 86_400.0),
+        "L" => linear("volume", 1.0),
+        "mL" => linear("volume", 0.001),
+        "fl_oz_us" => linear("volume", 0.029_573_529_562_5),
+        "fl_oz_imp" => linear("volume", 0.028_413_062_5),
+        "cup_us" => linear("volume", 0.236_588_236_5),
+        "m/s" => linear("speed", 1.0),
+        "km/hr" => linear("speed", 1000.0 / 3600.0),
+        "mi/hr" => linear("speed", 1_609.344 / 3600.0),
+        "degC" => linear("temperature", 1.0),
+        "degF" => Some(("temperature", 5.0 / 9.0, -160.0 / 9.0)),
+        "K" => Some(("temperature", 1.0, -273.15)),
+        "mg/dL" => linear("mass/volume", 1.0),
+        // Blood glucose in molar units names its molar mass:
+        // `mmol<180.15588000005408>/L`; mmol/L × g/mol ÷ 10 = mg/dL.
+        other => {
+            let molar_mass = other
+                .strip_prefix("mmol<")?
+                .strip_suffix(">/L")?
+                .parse::<f64>()
+                .ok()
+                .filter(|m| m.is_finite() && *m > 0.0)?;
+            linear("mass/volume", molar_mass / 10.0)
+        }
+    }
+}
+
+/// `value` written in `from`, read in `to`; None when the two units don't
+/// measure the same thing (or either is one this table doesn't know and
+/// they differ).
+fn convert_unit(value: f64, from: &str, to: &str) -> Option<f64> {
+    if from == to {
+        return Some(value);
+    }
+    let (dimension_from, scale_from, offset_from) = unit_def(from)?;
+    let (dimension_to, scale_to, offset_to) = unit_def(to)?;
+    (dimension_from == dimension_to)
+        .then(|| (value * scale_from + offset_from - offset_to) / scale_to)
+}
+
+/// The unit a metric always aggregates in, for the metrics whose readers
+/// name one (the day's text says "kcal active", "min exercise", "hrv …ms";
+/// Pulse labels HRV in ms). Metrics written in a regional unit (mass,
+/// distance, glucose) aggregate in the first unit the table sees, which
+/// their readers take from the table.
+fn canonical_unit(metric: &str) -> Option<&'static str> {
+    match metric {
+        "ActiveEnergyBurned" => Some("kcal"),
+        "AppleExerciseTime" => Some("min"),
+        "HeartRateVariabilitySDNN" => Some("ms"),
+        _ => None,
+    }
+}
+
+/// A total read in `to`: as written when no unit is given, dropped when
+/// its unit measures something else.
+fn total_in(value: Option<String>, unit: Option<String>, to: &str) -> Option<f64> {
+    let value = value?.parse::<f64>().ok()?;
+    match unit {
+        Some(unit) => convert_unit(value, &unit, to),
+        None => Some(value),
+    }
 }
 
 fn short_metric(hk_type: &str) -> String {
@@ -112,7 +234,8 @@ fn short_metric(hk_type: &str) -> String {
 fn record_to_sample(line: &str) -> Option<Sample> {
     let hk_type = attr(line, "type")?;
     let metric = short_metric(&hk_type);
-    let source = normalize_source(&attr(line, "sourceName")?);
+    let device = attr(line, "sourceName")?.trim().to_string();
+    let source = normalize_source(&device);
     let start = attr(line, "startDate")?;
     let end = attr(line, "endDate").unwrap_or_else(|| start.clone());
     let unit = attr(line, "unit");
@@ -146,6 +269,7 @@ fn record_to_sample(line: &str) -> Option<Sample> {
         category,
         unit,
         source,
+        device,
         start,
         day,
     })
@@ -175,9 +299,17 @@ pub fn scan(path: &Path, mut sink: impl FnMut(Item) -> Result<()>) -> Result<(us
                     .unwrap_or_default()
                     .trim_start_matches("HKWorkoutActivityType")
                     .to_string(),
-                duration_min: attr(line, "duration").and_then(|v| v.parse().ok()),
-                distance_km: attr(line, "totalDistance").and_then(|v| v.parse().ok()),
-                kcal: attr(line, "totalEnergyBurned").and_then(|v| v.parse().ok()),
+                duration_min: total_in(attr(line, "duration"), attr(line, "durationUnit"), "min"),
+                distance_km: total_in(
+                    attr(line, "totalDistance"),
+                    attr(line, "totalDistanceUnit"),
+                    "km",
+                ),
+                kcal: total_in(
+                    attr(line, "totalEnergyBurned"),
+                    attr(line, "totalEnergyBurnedUnit"),
+                    "kcal",
+                ),
                 source: normalize_source(&attr(line, "sourceName").unwrap_or_default()),
                 start: attr(line, "startDate").unwrap_or_default(),
                 end: attr(line, "endDate").unwrap_or_default(),
@@ -186,15 +318,15 @@ pub fn scan(path: &Path, mut sink: impl FnMut(Item) -> Result<()>) -> Result<(us
         } else if let Some(w) = workout.as_mut() {
             if line.starts_with("<WorkoutStatistics ") {
                 let stat = attr(line, "type").unwrap_or_default();
-                let sum = attr(line, "sum").and_then(|v| v.parse::<f64>().ok());
+                let sum = |to: &str| total_in(attr(line, "sum"), attr(line, "unit"), to);
                 if stat.ends_with("ActiveEnergyBurned") && w.kcal.is_none() {
-                    w.kcal = sum;
+                    w.kcal = sum("kcal");
                 } else if (stat.ends_with("DistanceWalkingRunning")
                     || stat.ends_with("DistanceCycling")
                     || stat.ends_with("DistanceSwimming"))
                     && w.distance_km.is_none()
                 {
-                    w.distance_km = sum;
+                    w.distance_km = sum("km");
                 }
             } else if line.starts_with("<FileReference ") {
                 w.route = attr(line, "path");
@@ -242,35 +374,70 @@ impl Agg {
     }
 }
 
-/// (day, metric, source) → stats. Sleep stages aggregate as
-/// `Sleep/<stage>` metrics valued in hours.
+/// (day, metric, tracker) → stats. Sleep stages aggregate as
+/// `Sleep/<stage>` metrics valued in hours. The tracker is the sample's
+/// source, except for sleep stages, which are kept per device
+/// (`Sample::tracker`): the day's text shows and ranks every tracker by
+/// its source name.
+///
+/// Every value of a metric is aggregated in ONE unit: the one the table
+/// was made with (`with_units`), else its canonical unit when its
+/// readers name one (`canonical_unit`), else the first unit the table
+/// sees for it. A sample in another unit of the same kind (154 lb after
+/// 70 kg, kJ for kcal) is converted; one whose unit measures something
+/// else, or that this table can't convert, is left out of the day.
 #[derive(Default)]
 pub struct DayTable {
     pub map: BTreeMap<(String, String, String), Agg>,
+    /// metric → the unit its aggregates are in.
     units: BTreeMap<String, String>,
     /// First raw timestamp seen per day (anchors the episode's event time).
     first_ts: BTreeMap<String, String>,
 }
 
 impl DayTable {
+    /// A table whose metrics aggregate in the given units (metric →
+    /// unit) — a reader's, so new values join the ones it already holds.
+    pub fn with_units(units: impl IntoIterator<Item = (String, String)>) -> DayTable {
+        DayTable {
+            units: units.into_iter().collect(),
+            ..DayTable::default()
+        }
+    }
+
     pub fn add(&mut self, s: &Sample) {
         let Some(v) = s.value else { return };
         let metric = match (&s.metric[..], &s.category) {
             ("SleepAnalysis", Some(stage)) => format!("Sleep/{stage}"),
             _ => s.metric.clone(),
         };
-        if let Some(u) = &s.unit {
-            self.units
-                .entry(metric.clone())
-                .or_insert_with(|| u.clone());
-        }
+        let v = match &s.unit {
+            Some(unit) => {
+                let table_unit = self.units.entry(metric.clone()).or_insert_with(|| {
+                    canonical_unit(&metric)
+                        .map(String::from)
+                        .unwrap_or_else(|| unit.clone())
+                });
+                match convert_unit(v, unit, table_unit) {
+                    Some(v) if v.is_finite() => v,
+                    _ => return,
+                }
+            }
+            None => v,
+        };
         self.first_ts
             .entry(s.day.clone())
             .or_insert_with(|| s.start.clone());
         self.map
-            .entry((s.day.clone(), metric, s.source.clone()))
+            .entry((s.day.clone(), metric, s.tracker().to_string()))
             .or_default()
             .add(v);
+    }
+
+    /// The unit a metric's aggregates are in (None: unitless, like the
+    /// sleep stages' hours).
+    pub fn unit(&self, metric: &str) -> Option<&str> {
+        self.units.get(metric).map(String::as_str)
     }
 
     /// One `health_day` episode per day, with a compact per-family body
@@ -287,12 +454,13 @@ impl DayTable {
         }
         let mut episodes = Vec::new();
         for (day, metrics) in days {
+            // The preferred tracker of a metric, by its source name.
             let pick = |name: &str| -> Option<(String, Agg)> {
-                let sources = metrics.get(name)?;
-                sources
+                let (tracker, agg) = metrics
+                    .get(name)?
                     .iter()
-                    .min_by_key(|(s, _)| source_priority(s))
-                    .cloned()
+                    .min_by_key(|(t, _)| source_priority(&normalize_source(t)))?;
+                Some((normalize_source(tracker), agg.clone()))
             };
             let mut lines: Vec<String> = Vec::new();
             let mut highlights: Vec<String> = Vec::new();
@@ -352,24 +520,38 @@ impl DayTable {
                 lines.push(format!("heart: {}", heart.join(" · ")));
             }
 
-            // sleep (sum of asleep stages; InBed separate)
-            let asleep: f64 = [
-                "Sleep/AsleepCore",
-                "Sleep/AsleepDeep",
-                "Sleep/AsleepREM",
-                "Sleep/AsleepUnspecified",
-                "Sleep/Asleep",
-            ]
-            .iter()
-            .filter_map(|k| pick(k).map(|(_, a)| a.sum))
-            .sum();
-            if asleep > 0.05 {
-                let mut sleep = vec![format!("{} asleep", fmt_hours(asleep))];
-                if let Some((_, deep)) = pick("Sleep/AsleepDeep") {
-                    sleep.push(format!("{} deep", fmt_hours(deep.sum)));
+            // sleep: the night as ONE device recorded it (the sum of its
+            // asleep stages). Two trackers on the same night record the
+            // same hours, so stages from different devices never add up —
+            // not even two that share a source name. InBed is separate.
+            let mut nights: BTreeMap<&str, f64> = BTreeMap::new();
+            for stage in ASLEEP_STAGES {
+                for (device, a) in metrics.get(stage).into_iter().flatten() {
+                    *nights.entry(device.as_str()).or_default() += a.sum;
                 }
-                if let Some((_, rem)) = pick("Sleep/AsleepREM") {
-                    sleep.push(format!("{} rem", fmt_hours(rem.sum)));
+            }
+            let night = nights
+                .into_iter()
+                .filter(|(_, hours)| *hours > 0.05)
+                .min_by_key(|(device, _)| source_priority(&normalize_source(device)));
+            if let Some((sleep_device, asleep)) = night {
+                let stage = |name: &str| -> Option<f64> {
+                    metrics
+                        .get(name)?
+                        .iter()
+                        .find(|(device, _)| device == sleep_device)
+                        .map(|(_, a)| a.sum)
+                };
+                let mut sleep = vec![format!(
+                    "{} asleep [{}]",
+                    fmt_hours(asleep),
+                    lc(&normalize_source(sleep_device))
+                )];
+                if let Some(deep) = stage("Sleep/AsleepDeep") {
+                    sleep.push(format!("{} deep", fmt_hours(deep)));
+                }
+                if let Some(rem) = stage("Sleep/AsleepREM") {
+                    sleep.push(format!("{} rem", fmt_hours(rem)));
                 }
                 if let Some((src, bed)) = pick("Sleep/InBed") {
                     sleep.push(format!("{} in bed [{}]", fmt_hours(bed.sum), lc(&src)));
@@ -419,8 +601,11 @@ impl DayTable {
             }
 
             let sources: Vec<String> = {
-                let mut set: Vec<String> =
-                    metrics.values().flatten().map(|(s, _)| s.clone()).collect();
+                let mut set: Vec<String> = metrics
+                    .values()
+                    .flatten()
+                    .map(|(tracker, _)| normalize_source(tracker))
+                    .collect();
                 set.sort();
                 set.dedup();
                 set
@@ -466,6 +651,16 @@ impl DayTable {
     }
 }
 
+/// The sleep stages that count as asleep (`Asleep` is the value older
+/// exports wrote before stages existed).
+const ASLEEP_STAGES: [&str; 5] = [
+    "Sleep/AsleepCore",
+    "Sleep/AsleepDeep",
+    "Sleep/AsleepREM",
+    "Sleep/AsleepUnspecified",
+    "Sleep/Asleep",
+];
+
 fn lc(s: &str) -> String {
     s.to_lowercase()
 }
@@ -478,7 +673,7 @@ fn fmt_hours(h: f64) -> String {
 /// Lower = preferred when several sources report the same metric.
 fn source_priority(source: &str) -> u8 {
     match source {
-        s if s.contains("Watch") => 0,
+        "Apple Watch" => 0,
         "WHOOP" => 1,
         "Oura" => 2,
         "Withings" => 3,
@@ -753,6 +948,289 @@ mod tests {
         let apr3 = &episodes[1];
         assert!(apr3.body.contains("6h00m asleep"), "body: {}", apr3.body);
         assert!(apr3.body.contains("2h00m deep"));
+    }
+
+    fn sample(metric: &str, value: f64, unit: Option<&str>, source: &str) -> Sample {
+        Sample {
+            metric: metric.into(),
+            value: Some(value),
+            category: None,
+            unit: unit.map(String::from),
+            source: normalize_source(source),
+            device: source.into(),
+            start: "2026-04-02 08:00:00 -0400".into(),
+            day: "2026-04-02".into(),
+        }
+    }
+
+    fn sleep(stage: &str, hours: f64, source: &str) -> Sample {
+        Sample {
+            metric: "SleepAnalysis".into(),
+            category: Some(stage.into()),
+            ..sample("SleepAnalysis", hours, None, source)
+        }
+    }
+
+    /// Samples of one metric in different units aggregate in one unit; a
+    /// sample whose unit measures something else stays out of the day.
+    #[test]
+    fn test_mixed_units_aggregate_in_one_unit() {
+        let mut table = DayTable::default();
+        table.add(&sample("BodyMass", 70.0, Some("kg"), "Withings"));
+        table.add(&sample("BodyMass", 154.0, Some("lb"), "Withings"));
+        table.add(&sample("BodyMass", 3.0, Some("count"), "Withings"));
+        table.add(&sample(
+            "DistanceWalkingRunning",
+            1.0,
+            Some("mi"),
+            "Apple Watch",
+        ));
+        table.add(&sample(
+            "DistanceWalkingRunning",
+            500.0,
+            Some("m"),
+            "Apple Watch",
+        ));
+        let mass = &table.map[&(
+            "2026-04-02".to_string(),
+            "BodyMass".to_string(),
+            "Withings".to_string(),
+        )];
+        assert_eq!(mass.n, 2);
+        assert!((mass.avg() - 69.93).abs() < 0.01, "{}", mass.avg());
+        assert_eq!(table.unit("BodyMass"), Some("kg"));
+        let episodes = table.into_episodes(None);
+        let body = &episodes[0].body;
+        assert!(body.contains("69.9 kg [withings]"), "{body}");
+        // 1 mi + 500 m = 1.31 mi.
+        assert!(body.contains("1.3 mi [apple watch]"), "{body}");
+
+        // Glucose in molar units joins mg/dL readings.
+        let mut glucose = DayTable::default();
+        glucose.add(&sample("BloodGlucose", 100.0, Some("mg/dL"), "Signos"));
+        glucose.add(&sample(
+            "BloodGlucose",
+            5.55,
+            Some("mmol<180.15588000005408>/L"),
+            "Signos",
+        ));
+        let body = &glucose.into_episodes(None)[0].body;
+        assert!(body.contains("glucose: avg 100 mg/dL (100–100)"), "{body}");
+
+        assert_eq!(
+            convert_unit(98.6, "degF", "degC").map(|c| (c * 10.0).round()),
+            Some(370.0)
+        );
+        assert_eq!(convert_unit(1.0, "kg", "km"), None);
+    }
+
+    /// The day's text names a unit for some metrics; those aggregate in
+    /// that unit whichever unit arrives first, and a regional metric is
+    /// labelled with the unit it aggregated in, in either order.
+    #[test]
+    fn test_named_units_hold_in_either_input_order() {
+        let day = |samples: &[(&str, f64, &str)]| -> String {
+            let mut table = DayTable::default();
+            for (metric, value, unit) in samples {
+                table.add(&sample(metric, *value, Some(unit), "Apple Watch"));
+            }
+            table.into_episodes(None).remove(0).body
+        };
+        let named = [
+            ("ActiveEnergyBurned", 418.4, "kJ"),
+            ("ActiveEnergyBurned", 100.0, "kcal"),
+            ("AppleExerciseTime", 0.5, "hr"),
+            ("AppleExerciseTime", 30.0, "min"),
+            ("HeartRateVariabilitySDNN", 0.05, "s"),
+            ("HeartRateVariabilitySDNN", 40.0, "ms"),
+        ];
+        let mut reversed = named;
+        reversed.reverse();
+        for samples in [named, reversed] {
+            let body = day(&samples);
+            assert!(body.contains("200 kcal active [apple watch]"), "{body}");
+            assert!(body.contains("60 min exercise [apple watch]"), "{body}");
+            assert!(body.contains("hrv 45ms [apple watch]"), "{body}");
+        }
+        // HealthKit's "Cal" is a kilocalorie.
+        assert!(day(&[("ActiveEnergyBurned", 312.0, "Cal")]).contains("312 kcal active"));
+
+        let kg_first = day(&[("BodyMass", 70.0, "kg"), ("BodyMass", 154.0, "lb")]);
+        assert!(
+            kg_first.contains("body: 69.9 kg [apple watch]"),
+            "{kg_first}"
+        );
+        let lb_first = day(&[("BodyMass", 154.0, "lb"), ("BodyMass", 70.0, "kg")]);
+        assert!(
+            lb_first.contains("body: 154.2 lb [apple watch]"),
+            "{lb_first}"
+        );
+    }
+
+    /// Workout totals are read in the units the export wrote them in.
+    #[test]
+    fn test_workout_totals_follow_their_units() {
+        const XML: &str = r#"<HealthData>
+ <Workout workoutActivityType="HKWorkoutActivityTypeRunning" duration="1800" durationUnit="s" totalDistance="3.1" totalDistanceUnit="mi" totalEnergyBurned="1255" totalEnergyBurnedUnit="kJ" sourceName="Apple Watch" startDate="2026-04-02 07:00:00 -0400" endDate="2026-04-02 07:30:00 -0400">
+ </Workout>
+ <Workout workoutActivityType="HKWorkoutActivityTypeSwimming" duration="40" durationUnit="min" sourceName="Apple Watch" startDate="2026-04-03 07:00:00 -0400" endDate="2026-04-03 07:40:00 -0400">
+  <WorkoutStatistics type="HKQuantityTypeIdentifierDistanceSwimming" sum="1000" unit="m"/>
+  <WorkoutStatistics type="HKQuantityTypeIdentifierActiveEnergyBurned" sum="300" unit="Cal"/>
+ </Workout>
+</HealthData>
+"#;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("export.xml");
+        std::fs::write(&path, XML).unwrap();
+        let mut workouts = Vec::new();
+        scan(&path, |item| {
+            if let Item::Workout(w) = item {
+                workouts.push(w);
+            }
+            Ok(())
+        })
+        .unwrap();
+        let run = &workouts[0];
+        assert_eq!(run.duration_min, Some(30.0));
+        assert!((run.distance_km.unwrap() - 4.989).abs() < 0.001);
+        assert!((run.kcal.unwrap() - 300.0).abs() < 0.1);
+        let swim = &workouts[1];
+        assert_eq!(swim.distance_km, Some(1.0));
+        assert_eq!(swim.kcal, Some(300.0));
+        let episode = workout_to_episode(swim, None);
+        assert!(episode.body.contains("1.0 km"), "{}", episode.body);
+    }
+
+    /// Two trackers on the same night: the asleep total is one source's,
+    /// never the sum of both.
+    #[test]
+    fn test_sleep_counts_one_source_per_night() {
+        let mut table = DayTable::default();
+        for (stage, hours) in [("AsleepCore", 4.0), ("AsleepDeep", 1.5), ("AsleepREM", 2.5)] {
+            table.add(&sleep(stage, hours, "Apple Watch"));
+        }
+        table.add(&sleep("AsleepUnspecified", 7.5, "Sleep Tracker"));
+        table.add(&sleep("Asleep", 7.0, "Another Tracker"));
+        table.add(&sleep("InBed", 8.5, "Sleep Tracker"));
+        let episodes = table.into_episodes(None);
+        let body = &episodes[0].body;
+        assert!(
+            body.contains("sleep: 8h00m asleep [apple watch], 1h30m deep, 2h30m rem, 8h30m in bed [sleep tracker]"),
+            "{body}"
+        );
+        assert!(
+            episodes[0].title.contains("8h00m sleep"),
+            "{}",
+            episodes[0].title
+        );
+
+        // Without the Watch, the preferred remaining source alone counts.
+        let mut table = DayTable::default();
+        table.add(&sleep("AsleepUnspecified", 7.5, "Sleep Tracker"));
+        table.add(&sleep("Asleep", 7.0, "Another Tracker"));
+        let body = &table.into_episodes(None)[0].body;
+        assert!(
+            body.contains("sleep: 7h00m asleep [another tracker]"),
+            "{body}"
+        );
+    }
+
+    /// Read from an export: an app whose name contains "Watch" is a
+    /// tracker of its own, so its record of the night doesn't add to the
+    /// Apple Watch's.
+    #[test]
+    fn test_overlapping_trackers_stay_apart_through_scan() {
+        const XML: &str = r#"<HealthData>
+ <Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="Ada’s Apple Watch" startDate="2026-04-02 23:00:00 -0400" endDate="2026-04-03 03:00:00 -0400" value="HKCategoryValueSleepAnalysisAsleepCore"/>
+ <Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="Ada’s Apple Watch" startDate="2026-04-03 03:00:00 -0400" endDate="2026-04-03 04:30:00 -0400" value="HKCategoryValueSleepAnalysisAsleepDeep"/>
+ <Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="Ada’s Apple Watch" startDate="2026-04-03 04:30:00 -0400" endDate="2026-04-03 07:00:00 -0400" value="HKCategoryValueSleepAnalysisAsleepREM"/>
+ <Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="SleepWatch" startDate="2026-04-02 23:00:00 -0400" endDate="2026-04-03 07:00:00 -0400" value="HKCategoryValueSleepAnalysisAsleepUnspecified"/>
+</HealthData>
+"#;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("export.xml");
+        std::fs::write(&path, XML).unwrap();
+        let mut table = DayTable::default();
+        let mut sources = Vec::new();
+        scan(&path, |item| {
+            if let Item::Sample(s) = item {
+                sources.push(s.source.clone());
+                table.add(&s);
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            sources,
+            ["Apple Watch", "Apple Watch", "Apple Watch", "SleepWatch"]
+        );
+        let episodes = table.into_episodes(None);
+        let body = &episodes[0].body;
+        assert!(
+            body.contains("sleep: 8h00m asleep [apple watch], 1h30m deep, 2h30m rem"),
+            "{body}"
+        );
+        assert!(body.contains("sources: apple watch, sleepwatch"), "{body}");
+        assert!(episodes[0].title.contains("8h00m sleep"));
+
+        assert_eq!(normalize_source("Apple Watch de Ada"), "Apple Watch");
+        assert_eq!(normalize_source("Ada’s Apple\u{a0}Watch"), "Apple Watch");
+        assert_eq!(
+            normalize_source("Watch Sleep Tracker"),
+            "Watch Sleep Tracker"
+        );
+    }
+
+    /// Two devices that share a source name (two Apple Watches), each
+    /// recording the same night: the night is one device's eight hours,
+    /// shown under the shared name — never the two added up.
+    #[test]
+    fn test_devices_sharing_a_name_keep_their_own_nights() {
+        const XML: &str = r#"<HealthData>
+ <Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="Ada’s Apple Watch" startDate="2026-04-02 23:00:00 -0400" endDate="2026-04-03 07:00:00 -0400" value="HKCategoryValueSleepAnalysisAsleepCore"/>
+ <Record type="HKCategoryTypeIdentifierSleepAnalysis" sourceName="Ada’s Apple Watch Ultra" startDate="2026-04-02 23:00:00 -0400" endDate="2026-04-03 07:00:00 -0400" value="HKCategoryValueSleepAnalysisAsleepCore"/>
+ <Record type="HKQuantityTypeIdentifierStepCount" sourceName="Ada’s Apple Watch Ultra" unit="count" startDate="2026-04-03 09:00:00 -0400" endDate="2026-04-03 09:10:00 -0400" value="1200"/>
+</HealthData>
+"#;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("export.xml");
+        std::fs::write(&path, XML).unwrap();
+        let mut table = DayTable::default();
+        scan(&path, |item| {
+            if let Item::Sample(s) = item {
+                table.add(&s);
+            }
+            Ok(())
+        })
+        .unwrap();
+        let trackers: Vec<(&str, &str)> = table
+            .map
+            .keys()
+            .map(|(_, metric, tracker)| (metric.as_str(), tracker.as_str()))
+            .collect();
+        assert_eq!(
+            trackers,
+            [
+                ("Sleep/AsleepCore", "Ada’s Apple Watch"),
+                ("Sleep/AsleepCore", "Ada’s Apple Watch Ultra"),
+                ("StepCount", "Apple Watch"),
+            ]
+        );
+        let episodes = table.into_episodes(None);
+        let body = &episodes[0].body;
+        assert!(body.contains("sleep: 8h00m asleep [apple watch]"), "{body}");
+        assert!(body.ends_with("\nsources: apple watch"), "{body}");
+        assert!(
+            episodes[0].title.contains("8h00m sleep"),
+            "{}",
+            episodes[0].title
+        );
+        let devices: Vec<&str> = episodes[0]
+            .entities
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(devices, ["Apple Watch"]);
     }
 
     #[test]

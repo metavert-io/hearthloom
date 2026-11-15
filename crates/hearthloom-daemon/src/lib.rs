@@ -221,20 +221,30 @@ impl AppState {
     /// Atomically claim an automation key. Returns an RAII guard that
     /// releases on drop, or `None` if the key is already running.
     pub fn try_start_automation(&self, key: &str) -> Option<AutomationGuard> {
-        let mut set = self.running.lock().unwrap();
-        if set.contains(key) {
-            return None;
-        }
-        set.insert(key.to_string());
-        Some(AutomationGuard {
-            running: self.running.clone(),
-            key: key.to_string(),
-        })
+        try_claim(&self.running, key)
     }
 
     pub fn is_automation_running(&self, key: &str) -> bool {
         self.running.lock().unwrap().contains(key)
     }
+}
+
+/// The single-flight registry `AppState::running` holds (automation keys
+/// currently running).
+pub type Running = Arc<Mutex<HashSet<String>>>;
+
+/// `AppState::try_start_automation` for code that holds only the registry
+/// (the inbox's staging of an export claims its import's key).
+pub fn try_claim(running: &Running, key: &str) -> Option<AutomationGuard> {
+    let mut set = running.lock().unwrap();
+    if set.contains(key) {
+        return None;
+    }
+    set.insert(key.to_string());
+    Some(AutomationGuard {
+        running: running.clone(),
+        key: key.to_string(),
+    })
 }
 
 /// Releases its automation key from the running set when dropped — so a

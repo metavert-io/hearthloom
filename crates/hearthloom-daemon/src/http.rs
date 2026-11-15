@@ -1182,6 +1182,181 @@ mod ingest_origin_tests {
 }
 
 #[cfg(test)]
+mod import_single_flight_tests {
+    use super::*;
+
+    fn state(home: hearthloom_core::paths::Home) -> AppState {
+        AppState {
+            store: std::sync::Arc::new(
+                hearthloom_core::store::Store::open(&home.db_path()).unwrap(),
+            ),
+            home,
+            embedder: None,
+            llm: None,
+            auth_locked: Default::default(),
+            bus: Default::default(),
+            killswitch: Default::default(),
+            running: Default::default(),
+        }
+    }
+
+    #[test]
+    fn test_an_import_claim_is_held_until_released() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::paths::Home::at(tmp.path());
+        home.init().unwrap();
+        let state = state(home);
+        let first = claim_import(&state, "health").map_err(|e| e.1).unwrap();
+        assert!(state.is_automation_running("import-health"));
+        assert!(matches!(
+            claim_import(&state, "health"),
+            Err(ApiError(StatusCode::CONFLICT, _))
+        ));
+        // another kind is independent
+        drop(claim_import(&state, "facebook").map_err(|e| e.1).unwrap());
+        drop(first);
+        assert!(claim_import(&state, "health").is_ok());
+    }
+
+    /// While an import of a kind runs, a second request for that kind is
+    /// refused rather than started alongside it.
+    #[tokio::test]
+    async fn test_a_second_import_of_a_kind_is_refused_while_one_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::paths::Home::at(tmp.path().join("home"));
+        home.init().unwrap();
+        let state = state(home);
+        // one source each import accepts
+        let src = tmp.path().join("src");
+        for dir in [
+            "health",
+            "fb/your_facebook_activity",
+            "li",
+            "notion",
+            "md",
+            "openai",
+        ] {
+            std::fs::create_dir_all(src.join(dir)).unwrap();
+        }
+        std::fs::write(src.join("mail.mbox"), "").unwrap();
+        std::fs::write(src.join("health/export.xml"), "<HealthData/>").unwrap();
+        std::fs::write(src.join("li/Profile.csv"), "First Name,Last Name\n").unwrap();
+        for (adapter, kind, path) in [
+            ("mbox", "mbox", "mail.mbox"),
+            ("apple-health", "health", "health"),
+            ("facebook", "facebook", "fb"),
+            ("linkedin", "linkedin", "li"),
+            ("notion", "notion", "notion"),
+            ("markdown", "markdown", "md"),
+            ("openai", "openai", "openai"),
+        ] {
+            let running = state
+                .try_start_automation(&format!("import-{kind}"))
+                .unwrap();
+            let body: IngestLocalBody = serde_json::from_value(json!({
+                "actor": "human:test",
+                "adapter": adapter,
+                "path": src.join(path),
+            }))
+            .unwrap();
+            let refused = ingest_local(State(state.clone()), Json(body)).await;
+            assert!(
+                matches!(refused, Err(ApiError(StatusCode::CONFLICT, _))),
+                "{adapter}"
+            );
+            drop(running);
+        }
+    }
+
+    /// A request that names no path (the dashboard's run-now) reads the
+    /// export staged under the node's data home, wherever that is — the
+    /// folder the inbox's zip route stages an upload into.
+    #[tokio::test]
+    async fn test_run_now_reads_the_export_staged_in_the_data_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::paths::Home::at(tmp.path().join("data/.hearthloom"));
+        home.init().unwrap();
+        let state = state(home);
+        // a ChatGPT export uploaded as a zip
+        let zip_path = tmp.path().join("chatgpt.zip");
+        {
+            use std::io::Write;
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+            zip.start_file(
+                "chatgpt/conversations-000.json",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            let chunk = json!([{
+                "conversation_id": "c1", "title": "Trip", "create_time": 1720992777.0,
+                "mapping": {"n1": {"message": {"author": {"role": "user"},
+                    "create_time": 1720992778.0, "content": {"parts": ["Lisbon in May"]}}}}
+            }]);
+            zip.write_all(chunk.to_string().as_bytes()).unwrap();
+            zip.finish().unwrap();
+        }
+        let staged =
+            crate::inbox::process_file(&state.store, &state.home, &state.running, &zip_path)
+                .unwrap();
+        assert!(staged.contains("staged the openai export"), "{staged}");
+        // the other exports, staged where the zip route puts them
+        let archives = state.home.root().join("archives");
+        for dir in [
+            "facebook/your_facebook_activity",
+            "linkedin",
+            "notion",
+            "markdown",
+            "apple-health",
+        ] {
+            std::fs::create_dir_all(archives.join(dir)).unwrap();
+        }
+        std::fs::write(
+            archives.join("linkedin/Profile.csv"),
+            "First Name,Last Name\n",
+        )
+        .unwrap();
+        std::fs::write(archives.join("apple-health/export.xml"), "<HealthData/>").unwrap();
+
+        for (adapter, kind) in [
+            ("openai", "openai"),
+            ("facebook", "facebook"),
+            ("linkedin", "linkedin"),
+            ("notion", "notion"),
+            ("markdown", "markdown"),
+            ("apple-health", "health"),
+        ] {
+            let body: IngestLocalBody =
+                serde_json::from_value(json!({"actor": "human:test", "adapter": adapter})).unwrap();
+            let started = ingest_local(State(state.clone()), Json(body))
+                .await
+                .map_err(|e| e.1)
+                .unwrap_or_else(|e| panic!("{adapter}: {e}"));
+            if let Some(path) = started.0.get("path") {
+                assert_eq!(
+                    path.as_str().map(std::path::PathBuf::from),
+                    Some(archives.join(adapter)),
+                    "{adapter}"
+                );
+            }
+            // the import runs detached; let it finish before the next
+            let running = format!("import-{kind}");
+            while state.is_automation_running(&running) {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+        let (_, rows) = state
+            .store
+            .read_query(
+                "SELECT COUNT(*) FROM episodes
+                 WHERE source = 'openai' AND source_ref = 'c1' AND superseded_by IS NULL",
+                1,
+            )
+            .unwrap();
+        assert_eq!(rows[0][0], 1, "the uploaded conversation landed");
+    }
+}
+
+#[cfg(test)]
 mod key_ceiling_tests {
     use super::{key_route_allowed, KEY_ROUTES};
 
@@ -3364,9 +3539,18 @@ async fn anthropic_save(
 
 /// Today's per-(metric, source) rollup from the DURABLE live sample
 /// store (v44) — the intra-day point the export sidecar can't have.
+/// Each row names its unit; `unit.<Metric>=<unit>` asks for a metric in
+/// the unit the caller's history is in (`live_health::today_rows`).
 /// Same coarse vault gate as the apple-health vquery: any private
 /// episode on the source locks the whole numeric surface.
-async fn health_today(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+async fn health_today(
+    State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    let units: Vec<(String, String)> = params
+        .into_iter()
+        .filter_map(|(key, unit)| Some((key.strip_prefix("unit.")?.to_string(), unit)))
+        .collect();
     let report = crate::scoped::spawn_blocking(move || -> anyhow::Result<Value> {
         let (vault_locked, _) = state.store.vault_status();
         if vault_locked && state.store.source_has_private("apple-health")? {
@@ -3376,7 +3560,8 @@ async fn health_today(State(state): State<AppState>) -> Result<Json<Value>, ApiE
         let day = (chrono::Utc::now() + chrono::Duration::minutes(off as i64))
             .format("%Y-%m-%d")
             .to_string();
-        Ok(json!({"day": day, "rows": state.store.health_day_rollup(&day)?}))
+        let rows = crate::live_health::today_rows(&state.store, &day, units)?;
+        Ok(json!({"day": day, "rows": rows}))
     })
     .await
     .map_err(anyhow::Error::from)??;
@@ -7358,12 +7543,7 @@ async fn openai_estimate(
         .get("path")
         .cloned()
         .filter(|p| !p.trim().is_empty())
-        .unwrap_or_else(|| {
-            format!(
-                "{}/.hearthloom/archives/openai",
-                std::env::var("HOME").unwrap_or_default()
-            )
-        });
+        .unwrap_or_else(|| staged_archive(&state, "openai").display().to_string());
     let root = std::path::PathBuf::from(&dir);
     if !root.is_dir() {
         return Ok(Json(json!({ "path": dir, "found": false })));
@@ -7456,8 +7636,9 @@ async fn downloads_place(
     Json(body): Json<DownloadsPlaceBody>,
 ) -> Result<Json<Value>, ApiError> {
     let home = state.home.clone();
+    let running = state.running.clone();
     let (dest, note) = crate::scoped::spawn_blocking(move || {
-        crate::downloads::place(&home, &body.path, &body.key, body.keep_copy)
+        crate::downloads::place(&home, &running, &body.path, &body.key, body.keep_copy)
     })
     .await
     .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -9801,6 +9982,31 @@ async fn ingest_local(
     })))
 }
 
+/// Where a run-now import reads when the request names no path: the export
+/// staged under this node's data home, `<home>/archives/<key>` — where the
+/// inbox's zip route and the Downloads "place" put it. The data home is not
+/// always `$HOME/.hearthloom` (`HEARTHLOOM_HOME` moves it; a hosted node
+/// keeps it under `/data`).
+fn staged_archive(state: &AppState, key: &str) -> std::path::PathBuf {
+    state.home.root().join("archives").join(key)
+}
+
+/// Claim a detached import's single-flight key (`import-<name>`, the key
+/// the Integrations cards read as "running") before the import starts. A
+/// second request while one runs is refused: two runs of one import would
+/// write the same staging files and archives at once. Staging an export
+/// into `archives/<key>` holds the same key (`downloads::install_archive_dir`).
+fn claim_import(state: &AppState, name: &str) -> Result<crate::AutomationGuard, ApiError> {
+    state
+        .try_start_automation(&crate::downloads::import_claim_key(name))
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::CONFLICT,
+                format!("a {name} import is already running — wait for it to finish"),
+            )
+        })
+}
+
 /// Detached mbox ingest: returns immediately; the scan streams batches
 /// into the store, logs progress, and lands an `mbox_ingest_done`
 /// mutations event on completion (idempotency makes crashed or repeated
@@ -9819,9 +10025,10 @@ fn ingest_mbox_background(state: AppState, body: IngestLocalBody) -> Result<Json
         exclude_any: body.exclude_labels.clone(),
     };
     let display = path.display().to_string();
+    let guard = claim_import(&state, "mbox")?;
     crate::scoped::spawn_blocking(move || {
-        // single-flight + the card's "running" status
-        let _import_guard = state.try_start_automation("import-mbox");
+        // held until the import ends: single-flight + the card's status
+        let _import_guard = guard;
         let started = std::time::Instant::now();
         let mut new = 0usize;
         let mut existing = 0usize;
@@ -9912,12 +10119,11 @@ fn ingest_openai_background(
     state: AppState,
     body: IngestLocalBody,
 ) -> Result<Json<Value>, ApiError> {
-    let root = std::path::PathBuf::from(body.path.clone().unwrap_or_else(|| {
-        format!(
-            "{}/.hearthloom/archives/openai",
-            std::env::var("HOME").unwrap_or_default()
-        )
-    }));
+    let root = body
+        .path
+        .clone()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| staged_archive(&state, "openai"));
     if !root.is_dir() {
         return Err(bad_request(format!(
             "{} is not an extracted ChatGPT export directory",
@@ -9925,9 +10131,10 @@ fn ingest_openai_background(
         )));
     }
     let display = root.display().to_string();
+    let guard = claim_import(&state, "openai")?;
     crate::scoped::spawn_blocking(move || {
-        // single-flight + the card's "running" status
-        let _import_guard = state.try_start_automation("import-openai");
+        // held until the import ends: single-flight + the card's status
+        let _import_guard = guard;
         let started = std::time::Instant::now();
         let scope = body.scope.as_deref();
         let media_out = state.home.raw_dir().join("openai/media");
@@ -10008,12 +10215,11 @@ fn ingest_facebook_background(
     state: AppState,
     body: IngestLocalBody,
 ) -> Result<Json<Value>, ApiError> {
-    let root = std::path::PathBuf::from(body.path.clone().unwrap_or_else(|| {
-        format!(
-            "{}/.hearthloom/archives/facebook",
-            std::env::var("HOME").unwrap_or_default()
-        )
-    }));
+    let root = body
+        .path
+        .clone()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| staged_archive(&state, "facebook"));
     if !root.join("your_facebook_activity").is_dir() {
         return Err(bad_request(format!(
             "{} is not an extracted Facebook archive",
@@ -10021,9 +10227,10 @@ fn ingest_facebook_background(
         )));
     }
     let display = root.display().to_string();
+    let guard = claim_import(&state, "facebook")?;
     crate::scoped::spawn_blocking(move || {
-        // single-flight + the card's "running" status
-        let _import_guard = state.try_start_automation("import-facebook");
+        // held until the import ends: single-flight + the card's status
+        let _import_guard = guard;
         let started = std::time::Instant::now();
         let scope = body.scope.as_deref();
         let result = (|| -> anyhow::Result<(usize, usize, usize, usize)> {
@@ -10116,12 +10323,11 @@ fn ingest_mdvault_background(
     state: AppState,
     body: IngestLocalBody,
 ) -> Result<Json<Value>, ApiError> {
-    let root = std::path::PathBuf::from(body.path.clone().unwrap_or_else(|| {
-        format!(
-            "{}/.hearthloom/archives/markdown",
-            std::env::var("HOME").unwrap_or_default()
-        )
-    }));
+    let root = body
+        .path
+        .clone()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| staged_archive(&state, "markdown"));
     if !root.is_dir() {
         return Err(bad_request(format!(
             "no such directory: {} — pass the vault's full path",
@@ -10129,9 +10335,10 @@ fn ingest_mdvault_background(
         )));
     }
     let display = root.display().to_string();
+    let guard = claim_import(&state, "markdown")?;
     crate::scoped::spawn_blocking(move || {
-        // single-flight + the card's "running" status
-        let _import_guard = state.try_start_automation("import-markdown");
+        // held until the import ends: single-flight + the card's status
+        let _import_guard = guard;
         let started = std::time::Instant::now();
         let scope = body.scope.clone().unwrap_or_else(|| "personal".into());
         match crate::mdvault::import(&state.store, &state.home, &root, &scope) {
@@ -10187,12 +10394,11 @@ fn ingest_notion_background(
     state: AppState,
     body: IngestLocalBody,
 ) -> Result<Json<Value>, ApiError> {
-    let root = std::path::PathBuf::from(body.path.clone().unwrap_or_else(|| {
-        format!(
-            "{}/.hearthloom/archives/notion",
-            std::env::var("HOME").unwrap_or_default()
-        )
-    }));
+    let root = body
+        .path
+        .clone()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| staged_archive(&state, "notion"));
     if !root.is_dir() {
         return Err(bad_request(format!(
             "no such directory: {}",
@@ -10200,9 +10406,10 @@ fn ingest_notion_background(
         )));
     }
     let display = root.display().to_string();
+    let guard = claim_import(&state, "notion")?;
     crate::scoped::spawn_blocking(move || {
-        // single-flight + the card's "running" status
-        let _import_guard = state.try_start_automation("import-notion");
+        // held until the import ends: single-flight + the card's status
+        let _import_guard = guard;
         let started = std::time::Instant::now();
         let scope = body.scope.clone().unwrap_or_else(|| "personal".into());
         match crate::notion::import(&state.store, &state.home, &root, &scope) {
@@ -10264,12 +10471,11 @@ fn ingest_linkedin_background(
     state: AppState,
     body: IngestLocalBody,
 ) -> Result<Json<Value>, ApiError> {
-    let root = std::path::PathBuf::from(body.path.clone().unwrap_or_else(|| {
-        format!(
-            "{}/.hearthloom/archives/linkedin",
-            std::env::var("HOME").unwrap_or_default()
-        )
-    }));
+    let root = body
+        .path
+        .clone()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| staged_archive(&state, "linkedin"));
     if !root.join("Connections.csv").is_file() && !root.join("Profile.csv").is_file() {
         return Err(bad_request(format!(
             "{} is not an extracted LinkedIn export",
@@ -10277,9 +10483,10 @@ fn ingest_linkedin_background(
         )));
     }
     let display = root.display().to_string();
+    let guard = claim_import(&state, "linkedin")?;
     crate::scoped::spawn_blocking(move || {
-        // single-flight + the card's "running" status
-        let _import_guard = state.try_start_automation("import-linkedin");
+        // held until the import ends: single-flight + the card's status
+        let _import_guard = guard;
         let started = std::time::Instant::now();
         let scope = body.scope.as_deref();
         let result = (|| -> anyhow::Result<(usize, usize, usize, usize)> {
@@ -10379,7 +10586,7 @@ fn ingest_health_background(
         .path
         .clone()
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| state.home.root().join("archives/apple-health"));
+        .unwrap_or_else(|| staged_archive(&state, "apple-health"));
     // Accept the export dir, the archive root, or export.xml itself.
     let xml = if given.is_file() {
         given
@@ -10398,9 +10605,10 @@ fn ingest_health_background(
         }
     };
     let xml_display = xml.display().to_string();
+    let guard = claim_import(&state, "health")?;
     crate::scoped::spawn_blocking(move || {
-        // single-flight + the card's "running" status
-        let _import_guard = state.try_start_automation("import-health");
+        // held until the import ends: single-flight + the card's status
+        let _import_guard = guard;
         let started = std::time::Instant::now();
         let result = (|| -> anyhow::Result<(usize, usize, usize, usize)> {
             use hearthloom_adapters::apple_health as ah;
@@ -10421,7 +10629,7 @@ fn ingest_health_background(
                 "apple-health {}: scanned {samples} samples, building sidecar rollups",
                 xml.display()
             );
-            writer.finish(&table.map)?;
+            writer.finish(&table)?;
 
             let scope = body.scope.as_deref();
             let export_dir = xml
