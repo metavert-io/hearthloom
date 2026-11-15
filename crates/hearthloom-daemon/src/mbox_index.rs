@@ -8,13 +8,23 @@
 //! writer of hearthloom.db) is untouched: this file is derived, holds
 //! no substrate state, and can be rebuilt from the archive at any time.
 //! Header fields only (from/subject/labels/date) go into FTS — bodies
-//! stay in the archive and are read by byte offset on fetch.
+//! stay in the archive and are read by byte offset on fetch. Two things
+//! besides the archive ride along through a rebuild: the meta rows (the
+//! live pull's cursor, and its list of messages still to observe) and
+//! `label_updates`, the labels the live pull read again from Gmail after a
+//! message was archived. A rebuild that can't read them leaves the old
+//! file in place (`carry_over`). The labels come from Gmail, and the pull
+//! re-reads every message's labels in time, so a file deleted or damaged
+//! past reading loses no label for good — only those messages on the list
+//! whose labels didn't change (their observation failed on arrival).
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 /// Only the head of each message is scanned for headers; a header block
 /// bigger than this (giant recipient lists) is indexed truncated.
@@ -91,7 +101,10 @@ fn slot_of(fields: &mut HeaderFields, slot: Slot) -> Option<&mut String> {
 /// The FIRST occurrence of each header wins, as in the mbox adapter's
 /// readers: Takeout and the live pull both write their `X-Gmail-Labels`
 /// at the top, so a sender's own copy lower down (or a second From or
-/// Message-ID) never overrides what vsearch shows.
+/// Message-ID) never overrides what vsearch shows. The Message-ID is read
+/// by the mail import's own rule (`mbox::message_id_ref`, folded lines
+/// and all), so a message is indexed under the key its memory has and the
+/// one the live pull reads from Gmail when it re-reads labels.
 fn scan_headers(head: &str) -> HeaderFields {
     let mut fields = HeaderFields {
         message_id: None,
@@ -125,13 +138,6 @@ fn scan_headers(head: &str) -> HeaderFields {
             "to" => Slot::To,
             "subject" => Slot::Subject,
             "x-gmail-labels" => Slot::Labels,
-            "message-id" => {
-                if fields.message_id.is_none() {
-                    fields.message_id =
-                        Some(value.trim_matches(|c| c == '<' || c == '>').to_string());
-                }
-                continue;
-            }
             _ => continue,
         };
         // A repeat is skipped whole — its folded lines too (last stays None).
@@ -144,16 +150,69 @@ fn scan_headers(head: &str) -> HeaderFields {
             *s = value.to_string();
         }
     }
+    fields.message_id = hearthloom_adapters::mbox::message_id_ref(head);
     fields
 }
 
+/// The meta row naming how an index keys its messages: `IDS_RULE`, the
+/// mail import's key (`scan_headers`). An index built before it has none:
+/// it read a folded Message-ID as missing and keyed that message by its
+/// offset, where nothing that knows the message's Message-ID finds it.
+const IDS_KEY: &str = "ids";
+const IDS_RULE: &str = "import-key";
+
+/// Whether this index keys its messages by the mail import's rule. One
+/// built before doesn't (`IDS_KEY`); rebuilding it does.
+pub fn ids_current(mbox: &Path) -> bool {
+    meta_get(mbox, IDS_KEY).ok().flatten().as_deref() == Some(IDS_RULE)
+}
+
+/// One writer of an archive's index at a time. A rebuild copies the meta
+/// rows and label updates of the index it replaces, then takes its place:
+/// a write to that index while the rebuild ran would be lost with it. So a
+/// rebuild holds this for its whole run, and so does every write it
+/// carries over (meta rows, label updates) or reads the archive for
+/// (appended records). Readers don't take it, and neither does the text
+/// pass (a rebuilt index starts its texts over).
+static WRITERS: Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>> = Mutex::new(BTreeMap::new());
+
+fn writer(mbox: &Path) -> Arc<Mutex<()>> {
+    // one lock per file, however its path was written
+    let key = std::fs::canonicalize(mbox).unwrap_or_else(|_| mbox.to_path_buf());
+    WRITERS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .entry(key)
+        .or_default()
+        .clone()
+}
+
+fn hold(lock: &Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
+    lock.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Labels the live pull re-read from Gmail after a message was archived
+/// (`set_labels`): the archive keeps each message's labels as received,
+/// so these are kept beside them and win over them, across rebuilds too.
+const LABEL_UPDATES: &str =
+    "CREATE TABLE IF NOT EXISTS label_updates(id TEXT PRIMARY KEY, labels TEXT NOT NULL)";
+
 /// Build (or rebuild) the sidecar index by streaming the archive once.
 /// Writes to a temp file and renames over the old index, so a crashed
-/// or concurrent build never leaves a half-written index in place.
-/// Non-fingerprint meta rows (the live pull's IMAP cursor) survive a
-/// rebuild — losing them only costs a re-anchored backfill, but there's
-/// no reason to pay that on every rebuild.
+/// build never leaves a half-written index in place; a build waits for
+/// the index's other writes, and they for it (`writer`).
+/// Non-fingerprint meta rows (the live pull's IMAP cursor and its list of
+/// messages still to observe) survive a rebuild, and so do label updates;
+/// an old index that can't be read now fails the build and stays in place
+/// (`carry_over`).
 pub fn build(mbox: &Path) -> Result<usize> {
+    let lock = writer(mbox);
+    let _one_writer = hold(&lock);
+    build_held(mbox)
+}
+
+/// `build`, with the index's writer lock held.
+fn build_held(mbox: &Path) -> Result<usize> {
     let final_path = index_path(mbox);
     let tmp_path = final_path.with_extension("sqlite.building");
     let _ = std::fs::remove_file(&tmp_path);
@@ -171,51 +230,193 @@ pub fn build(mbox: &Path) -> Result<usize> {
              id UNINDEXED, subject, from_addr, to_addr, labels, date
          );",
     )?;
+    conn.execute(LABEL_UPDATES, [])?;
+    let mut updates = std::collections::HashMap::new();
     if final_path.exists() {
-        let _ = carry_meta(&final_path, &conn);
+        updates = carry_over(&final_path, &conn)?;
     }
 
     let file = std::fs::File::open(mbox).with_context(|| format!("opening {}", mbox.display()))?;
     let mut reader = std::io::BufReader::with_capacity(1 << 20, file);
-    let count = index_stream(&conn, &mut reader, 0, mbox)?;
+    let count = index_stream(&conn, &mut reader, 0, mbox, &updates)?;
 
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES ('fingerprint', ?1)",
         [fingerprint(mbox)?],
     )?;
+    conn.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+        [IDS_KEY, IDS_RULE],
+    )?;
     drop(conn);
+    #[cfg(test)]
+    before_install(mbox);
     std::fs::rename(&tmp_path, &final_path)
         .with_context(|| format!("installing index at {}", final_path.display()))?;
     Ok(count)
 }
 
-/// Best-effort copy of non-fingerprint meta from a previous index.
-fn carry_meta(old_index: &Path, conn: &Connection) -> Result<()> {
-    let old = Connection::open_with_flags(old_index, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    // the text watermark belongs to the old file's texts: a rebuild starts
-    // its text pass from the beginning
-    let mut stmt = old.prepare(
-        "SELECT key, value FROM meta WHERE key != 'fingerprint' AND key != 'text_rowid'",
-    )?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-    for row in rows.flatten() {
+/// A test's hook, run once by the next build of this archive just before
+/// it puts its new index in place.
+#[cfg(test)]
+type InstallHook = (PathBuf, Box<dyn FnOnce() + Send>);
+#[cfg(test)]
+static BEFORE_INSTALL: Mutex<Vec<InstallHook>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn before_install(mbox: &Path) {
+    let hook = {
+        let mut hooks = BEFORE_INSTALL.lock().unwrap_or_else(|p| p.into_inner());
+        hooks
+            .iter()
+            .position(|(path, _)| path == mbox)
+            .map(|at| hooks.remove(at).1)
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+/// What a rebuild keeps of the index it replaces: its meta rows (all but
+/// the fingerprint and the text watermark) and its label updates, copied
+/// into the new one; the label updates are returned (id → labels) for the
+/// build to index under. The meta rows hold work not yet done (the pull's
+/// list of messages still to observe, its cursor), so an old index that
+/// can't be read now — busy, locked, out of reach — fails the build and
+/// stays in place for the next one. Only a file that is no database at
+/// all, or a damaged one, is replaced without what can't be read: nothing
+/// could ever read it. Meta rows that can't be read take the label updates
+/// with them (labels whose list is gone would never be observed — without
+/// both, the pull reads the labels from Gmail again and finds the changes
+/// anew); label updates that can't be read go alone — the meta rows read
+/// are kept, and the pull finds those labels again.
+fn carry_over(
+    old_index: &Path,
+    conn: &Connection,
+) -> Result<std::collections::HashMap<String, String>> {
+    let (meta, updates) = match read_carried(old_index) {
+        Ok((meta, Some(updates))) => (meta, updates),
+        Ok((meta, None)) => {
+            tracing::warn!(
+                "mbox index {}: the label updates of the index being replaced are damaged: rebuilt with its meta rows, without them",
+                old_index.display()
+            );
+            (meta, Vec::new())
+        }
+        Err(err) if unreadable_for_good(&err) => {
+            tracing::warn!(
+                "mbox index {}: the index being replaced is unreadable ({err:#}): rebuilt without its meta rows and label updates",
+                old_index.display()
+            );
+            return Ok(std::collections::HashMap::new());
+        }
+        Err(err) => {
+            return Err(err.context(format!(
+                "reading {} before rebuilding it (it stays as it is)",
+                old_index.display()
+            )))
+        }
+    };
+    for (key, value) in &meta {
         conn.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
-            rusqlite::params![row.0, row.1],
+            rusqlite::params![key, value],
         )?;
     }
-    Ok(())
+    let mut out = std::collections::HashMap::new();
+    for (id, labels) in updates {
+        conn.execute(
+            "INSERT OR REPLACE INTO label_updates(id, labels) VALUES (?1, ?2)",
+            rusqlite::params![id, labels],
+        )?;
+        out.insert(id, labels);
+    }
+    Ok(out)
+}
+
+type CarriedMeta = Vec<(rusqlite::types::Value, rusqlite::types::Value)>;
+/// Label updates carried: (message id, labels).
+type CarriedLabels = Vec<(String, String)>;
+
+/// How long a rebuild waits for the index it replaces to be free.
+const CARRY_BUSY: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(200)
+} else {
+    std::time::Duration::from_secs(10)
+};
+
+/// The old index's meta rows and label updates, read in one transaction;
+/// a table it doesn't have holds nothing to carry. Label updates that are
+/// damaged (`unreadable_for_good`) come back None — the meta rows read
+/// stand. Opened for writing (never created): a write that stopped
+/// half-way left a journal only such a connection rolls back, and a
+/// read-only one fails on every try.
+fn read_carried(old_index: &Path) -> Result<(CarriedMeta, Option<CarriedLabels>)> {
+    let old = Connection::open_with_flags(old_index, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    old.busy_timeout(CARRY_BUSY)?;
+    let tx = old.unchecked_transaction()?;
+    let has = |table: &str| -> rusqlite::Result<bool> {
+        tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            [table],
+            |r| r.get(0),
+        )
+    };
+    let mut meta = Vec::new();
+    if has("meta")? {
+        // the text watermark belongs to the old file's texts: a rebuild
+        // starts its text pass from the beginning
+        let mut stmt = tx.prepare(
+            "SELECT key, value FROM meta WHERE key != 'fingerprint' AND key != 'text_rowid'",
+        )?;
+        meta = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+    }
+    let updates = || -> Result<CarriedLabels> {
+        if !has("label_updates")? {
+            return Ok(Vec::new());
+        }
+        let mut stmt = tx.prepare("SELECT id, labels FROM label_updates")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    };
+    match updates() {
+        Ok(updates) => Ok((meta, Some(updates))),
+        Err(err) if unreadable_for_good(&err) => Ok((meta, None)),
+        Err(err) => Err(err),
+    }
+}
+
+/// An error saying the file is no SQLite database, or a damaged one: no
+/// later try reads it either.
+fn unreadable_for_good(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(e, _))
+                if matches!(
+                    e.code,
+                    rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt
+                )
+        )
+    })
 }
 
 /// Index every message found in `reader`, whose first byte sits at
 /// `base_offset` of the archive file. A caller starting mid-file must
 /// start at a message boundary (the live pull appends whole records
-/// after a trailing blank line, so its old-length offset is one).
+/// after a trailing blank line, so its old-length offset is one). A
+/// message indexed under its Message-ID shows the labels `updates` holds
+/// for that id, if any, instead of its archived ones.
 fn index_stream(
     conn: &Connection,
     reader: &mut impl BufRead,
     base_offset: u64,
     mbox: &Path,
+    updates: &std::collections::HashMap<String, String>,
 ) -> Result<usize> {
     let mut line = Vec::new();
     let mut offset: u64 = base_offset; // byte offset of the current line
@@ -233,15 +434,22 @@ fn index_stream(
             return Ok(());
         }
         conn.execute_batch("BEGIN")?;
-        for (id, start, len, f) in pending.drain(..) {
+        for (id, start, len, mut f) in pending.drain(..) {
             // Message-IDs are not actually unique across a real archive
             // (self-copies, list blasts): the first occurrence keeps the
             // id, later duplicates fall back to their byte offset.
+            let archived = f.labels.clone();
+            if let Some(now) = updates.get(&id) {
+                f.labels = now.clone();
+            }
             let changed = conn.execute(
                 "INSERT OR IGNORE INTO messages(id, offset, length, date, from_addr, subject, labels)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![id, start as i64, len as i64, f.date, f.from, f.subject, f.labels],
             )?;
+            if changed == 0 {
+                f.labels = archived; // a later copy: its own labels
+            }
             let id = if changed == 0 {
                 let fallback = format!("at:{start}");
                 conn.execute(
@@ -329,15 +537,24 @@ fn index_stream(
 /// the row inserts and the fingerprint stamp leaves the index stale,
 /// which the next register/build heals — never a wrong answer.
 pub fn append_index(mbox: &Path, from_offset: u64) -> Result<usize> {
+    let lock = writer(mbox);
+    let _one_writer = hold(&lock);
     let idx = index_path(mbox);
     if !idx.exists() {
-        return build(mbox);
+        return build_held(mbox);
     }
     let conn = Connection::open(&idx)?;
     let file = std::fs::File::open(mbox).with_context(|| format!("opening {}", mbox.display()))?;
     let mut reader = std::io::BufReader::with_capacity(1 << 20, file);
     reader.seek(SeekFrom::Start(from_offset))?;
-    let count = index_stream(&conn, &mut reader, from_offset, mbox)?;
+    // appended mail carries the labels Gmail gave it just now
+    let count = index_stream(
+        &conn,
+        &mut reader,
+        from_offset,
+        mbox,
+        &std::collections::HashMap::new(),
+    )?;
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES ('fingerprint', ?1)",
         [fingerprint(mbox)?],
@@ -345,25 +562,146 @@ pub fn append_index(mbox: &Path, from_offset: u64) -> Result<usize> {
     Ok(count)
 }
 
-/// Read a non-fingerprint meta value (the live pull's IMAP cursor).
+/// Read a non-fingerprint meta value (the live pull's IMAP cursor). None:
+/// no index, or no such key; an index that can't be read is an error.
 pub fn meta_get(mbox: &Path, key: &str) -> Result<Option<String>> {
     let idx = index_path(mbox);
     if !idx.exists() {
         return Ok(None);
     }
     let conn = Connection::open_with_flags(&idx, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    Ok(conn
-        .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
-        .ok())
+    conn.busy_timeout(std::time::Duration::from_secs(10))?;
+    conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+        .optional()
+        .map_err(Into::into)
 }
 
 pub fn meta_set(mbox: &Path, key: &str, value: &str) -> Result<()> {
+    let lock = writer(mbox);
+    let _one_writer = hold(&lock);
     let conn = Connection::open(index_path(mbox))?;
+    conn.busy_timeout(std::time::Duration::from_secs(10))?;
     conn.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
         rusqlite::params![key, value],
     )?;
     Ok(())
+}
+
+/// The labels the index shows for the message with this id (its
+/// `X-Gmail-Labels` as archived, or as last updated by `set_labels`).
+/// None: no such message; an index that can't be read is an error.
+pub fn labels_of(mbox: &Path, id: &str) -> Result<Option<String>> {
+    let conn =
+        Connection::open_with_flags(index_path(mbox), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.busy_timeout(std::time::Duration::from_secs(10))?;
+    Ok(conn
+        .query_row("SELECT labels FROM messages WHERE id = ?1", [id], |r| {
+            r.get::<_, Option<String>>(0)
+        })
+        .optional()?
+        .map(Option::unwrap_or_default))
+}
+
+/// Show these labels (id → labels) in search: the live pull's label
+/// re-read (Gmail's labels change after a message is archived). The
+/// archive's own bytes stay as received; the update is kept in the index
+/// (`label_updates`) and a rebuild indexes under it again. These `meta`
+/// rows (key, value) are set in the same transaction: all are in, or none.
+pub fn set_labels(mbox: &Path, updates: &[(String, String)], meta: &[(&str, &str)]) -> Result<()> {
+    if updates.is_empty() && meta.is_empty() {
+        return Ok(());
+    }
+    let lock = writer(mbox);
+    let _one_writer = hold(&lock);
+    let mut conn = Connection::open(index_path(mbox))?;
+    conn.busy_timeout(std::time::Duration::from_secs(10))?;
+    conn.execute(LABEL_UPDATES, [])?;
+    let tx = conn.transaction()?;
+    for (key, value) in meta {
+        tx.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+            rusqlite::params![key, value],
+        )?;
+    }
+    tx.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS relabel(id TEXT PRIMARY KEY, labels TEXT NOT NULL);
+         DELETE FROM temp.relabel;",
+    )?;
+    for (id, labels) in updates {
+        tx.execute(
+            "INSERT OR REPLACE INTO temp.relabel(id, labels) VALUES (?1, ?2)",
+            rusqlite::params![id, labels],
+        )?;
+    }
+    // one pass over the text index (its id column has no index of its own)
+    tx.execute_batch(
+        "UPDATE messages SET labels = (SELECT labels FROM temp.relabel r WHERE r.id = messages.id)
+             WHERE id IN (SELECT id FROM temp.relabel);
+         UPDATE messages_fts SET labels = (SELECT labels FROM temp.relabel r WHERE r.id = messages_fts.id)
+             WHERE id IN (SELECT id FROM temp.relabel);
+         INSERT OR REPLACE INTO label_updates(id, labels) SELECT id, labels FROM temp.relabel;
+         DELETE FROM temp.relabel;",
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// One archive record's place: its index row, its id (the Message-ID, or
+/// `at:<offset>` for a later copy or a message without one) and its `From `
+/// separator line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Separator {
+    pub row: i64,
+    pub id: String,
+    pub line: String,
+}
+
+/// The separator of each record after index row `after_row` (rows run in
+/// archive order), at most `limit`. The live pull writes each message's UID
+/// on its separator line (`gmail_imap::record_uid`).
+pub fn separators_after(mbox: &Path, after_row: i64, limit: usize) -> Result<Vec<Separator>> {
+    if is_stale(mbox) {
+        return Err(anyhow!(
+            "the index for {} is missing or stale — re-register the source to rebuild it",
+            mbox.display()
+        ));
+    }
+    let conn =
+        Connection::open_with_flags(index_path(mbox), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut stmt = conn.prepare(
+        "SELECT rowid, id, offset FROM messages WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(rusqlite::params![after_row, limit as i64], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut file = std::fs::File::open(mbox)?;
+    let mut out = Vec::with_capacity(rows.len());
+    for (row, id, offset) in rows {
+        // the record's text starts at `offset`, right after its separator
+        let end = offset.max(0) as u64;
+        let start = end.saturating_sub(256);
+        let mut buf = vec![0u8; (end - start) as usize];
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut buf)?;
+        let line = buf.strip_suffix(b"\n").unwrap_or(&buf);
+        let line = match line.iter().rposition(|b| *b == b'\n') {
+            Some(at) => &line[at + 1..],
+            None => line,
+        };
+        out.push(Separator {
+            row,
+            id,
+            line: String::from_utf8_lossy(line).into_owned(),
+        });
+    }
+    Ok(out)
 }
 
 /// One search hit: the message id (usable as a vfetch/promote path) and
@@ -563,6 +901,14 @@ pub fn since(mbox: &Path, since: chrono::DateTime<chrono::Utc>) -> Result<Vec<(S
 
 /// Read one message's raw text (headers + body) by its indexed offset.
 pub fn fetch(mbox: &Path, id: &str, cap_chars: usize) -> Result<String> {
+    Ok(String::from_utf8_lossy(&fetch_bytes(mbox, id)?)
+        .chars()
+        .take(cap_chars)
+        .collect())
+}
+
+/// One message's bytes as archived (8-bit text in its own charset).
+pub fn fetch_bytes(mbox: &Path, id: &str) -> Result<Vec<u8>> {
     if is_stale(mbox) {
         return Err(anyhow!(
             "the index for {} is missing or stale — re-register the source to rebuild it",
@@ -582,10 +928,7 @@ pub fn fetch(mbox: &Path, id: &str, cap_chars: usize) -> Result<String> {
     file.seek(SeekFrom::Start(offset as u64))?;
     let mut buf = vec![0u8; length as usize];
     file.read_exact(&mut buf)?;
-    Ok(String::from_utf8_lossy(&buf)
-        .chars()
-        .take(cap_chars)
-        .collect())
+    Ok(buf)
 }
 
 #[cfg(test)]
@@ -749,6 +1092,386 @@ Numbers attached.\n";
             "got: {}",
             hits[0].1
         );
+    }
+
+    /// Labels re-read after archiving show in search and stay through a
+    /// rebuild; a later copy of the message keeps its own labels, and so
+    /// does mail appended afterwards.
+    #[test]
+    fn test_label_updates_survive_a_rebuild() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mbox = tmp.path().join("live.mbox");
+        let rec = |uid: u32, id: &str, labels: &str, subject: &str| {
+            format!(
+                "From gmail-imap uid={uid}\nX-Gmail-Labels: {labels}\nFrom: A <a@x>\n\
+                 Subject: {subject}\nDate: Mon, 05 Jan 2026 10:00:00 -0400\nMessage-ID: <{id}>\n\nbody\n\n"
+            )
+        };
+        std::fs::write(
+            &mbox,
+            [
+                rec(1, "promo@x", "Category Promotions", "sale"),
+                rec(2, "other@x", "Inbox", "hello"),
+                rec(3, "promo@x", "Category Promotions", "sale again"),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        build(&mbox).unwrap();
+        set_labels(
+            &mbox,
+            &[(
+                "promo@x".to_string(),
+                "Category Promotions, Starred".to_string(),
+            )],
+            &[],
+        )
+        .unwrap();
+        let starred = |mbox: &Path| {
+            search(mbox, "starred", 10)
+                .unwrap()
+                .into_iter()
+                .map(|h| h.0)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(starred(&mbox), vec!["promo@x"]);
+
+        // the archive changes (more mail) and the index is rebuilt whole
+        let mut grown = std::fs::read_to_string(&mbox).unwrap();
+        grown.push_str(&rec(4, "new@x", "Inbox", "fresh"));
+        std::fs::write(&mbox, grown).unwrap();
+        assert!(is_stale(&mbox));
+        assert_eq!(build(&mbox).unwrap(), 4);
+        assert_eq!(starred(&mbox), vec!["promo@x"]);
+        assert_eq!(
+            labels_of(&mbox, "promo@x").unwrap().as_deref(),
+            Some("Category Promotions, Starred")
+        );
+        assert_eq!(labels_of(&mbox, "new@x").unwrap().as_deref(), Some("Inbox"));
+        // the second copy is indexed by its offset, with its own labels
+        let copy = search(&mbox, "again", 10).unwrap();
+        assert_eq!(copy.len(), 1);
+        assert!(copy[0].0.starts_with("at:"), "{copy:?}");
+        assert!(!copy[0].1.contains("Starred"), "{copy:?}");
+
+        // and a second rebuild still has them
+        build(&mbox).unwrap();
+        assert_eq!(starred(&mbox), vec!["promo@x"]);
+
+        // an index from before label updates were kept takes one
+        let conn = Connection::open(index_path(&mbox)).unwrap();
+        conn.execute_batch("DROP TABLE label_updates").unwrap();
+        drop(conn);
+        set_labels(
+            &mbox,
+            &[("other@x".to_string(), "Inbox, Starred".to_string())],
+            &[],
+        )
+        .unwrap();
+        build(&mbox).unwrap();
+        assert_eq!(starred(&mbox), vec!["other@x"]);
+    }
+
+    /// A label update and a meta row written while a rebuild runs are in
+    /// the index the rebuild leaves: the writes wait for it.
+    #[test]
+    fn test_writes_during_a_rebuild_are_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mbox = tmp.path().join("live.mbox");
+        std::fs::write(
+            &mbox,
+            "From gmail-imap uid=1\nX-Gmail-Labels: Category Promotions\nFrom: A <a@x>\n\
+             Subject: sale\nDate: Mon, 05 Jan 2026 10:00:00 -0400\nMessage-ID: <promo@x>\n\nbody\n\n",
+        )
+        .unwrap();
+        build(&mbox).unwrap();
+        meta_set(&mbox, "gmail_cursor", "1:1").unwrap();
+
+        // the rebuild stops just before it puts its index in place
+        let (paused, at_install) = std::sync::mpsc::channel::<()>();
+        let (resume, go) = std::sync::mpsc::channel::<()>();
+        BEFORE_INSTALL.lock().unwrap().push((
+            mbox.clone(),
+            Box::new(move || {
+                paused.send(()).unwrap();
+                go.recv().unwrap();
+            }),
+        ));
+        let rebuild = {
+            let mbox = mbox.clone();
+            std::thread::spawn(move || build(&mbox).unwrap())
+        };
+        at_install.recv().unwrap();
+        let write = {
+            let mbox = mbox.clone();
+            std::thread::spawn(move || {
+                set_labels(
+                    &mbox,
+                    &[(
+                        "promo@x".to_string(),
+                        "Category Promotions, Starred".to_string(),
+                    )],
+                    &[("gmail_cursor", "1:2")],
+                )
+                .unwrap();
+            })
+        };
+        // time for the write to land, were it not waiting
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        resume.send(()).unwrap();
+        rebuild.join().unwrap();
+        write.join().unwrap();
+
+        assert_eq!(
+            labels_of(&mbox, "promo@x").unwrap().as_deref(),
+            Some("Category Promotions, Starred")
+        );
+        assert_eq!(
+            meta_get(&mbox, "gmail_cursor").unwrap().as_deref(),
+            Some("1:2")
+        );
+        // and the next rebuild carries them on
+        build(&mbox).unwrap();
+        assert_eq!(
+            labels_of(&mbox, "promo@x").unwrap().as_deref(),
+            Some("Category Promotions, Starred")
+        );
+    }
+
+    /// A rebuild that can't read the index it would replace fails and
+    /// leaves it in place — its meta rows hold the pull's list of messages
+    /// still to observe; once it reads again, the rebuild carries the list
+    /// and the label updates on. A file that is no database at all is
+    /// rebuilt over, without either.
+    #[test]
+    fn test_a_rebuild_leaves_an_index_it_cannot_read_in_place() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let mbox = tmp.path().join("live.mbox");
+        std::fs::write(
+            &mbox,
+            "From gmail-imap uid=1\nX-Gmail-Labels: Category Promotions\nFrom: A <a@x>\n\
+             Subject: sale\nDate: Mon, 05 Jan 2026 10:00:00 -0400\nMessage-ID: <promo@x>\n\nbody\n\n",
+        )
+        .unwrap();
+        build(&mbox).unwrap();
+        let list = "gmail_observe_pending";
+        set_labels(
+            &mbox,
+            &[(
+                "promo@x".to_string(),
+                "Category Promotions, Starred".to_string(),
+            )],
+            &[(list, r#"["promo@x"]"#)],
+        )
+        .unwrap();
+        let index = index_path(&mbox);
+        let mode = |m: u32| {
+            std::fs::set_permissions(&index, std::fs::Permissions::from_mode(m)).unwrap();
+        };
+
+        // out of reach for a while (a reader permissions don't stop skips
+        // this step)
+        mode(0o000);
+        if std::fs::File::open(&index).is_err() {
+            let err = build(&mbox).unwrap_err();
+            assert!(format!("{err:#}").contains("stays as it is"), "{err:#}");
+        }
+        mode(0o644);
+        assert_eq!(
+            meta_get(&mbox, list).unwrap().as_deref(),
+            Some(r#"["promo@x"]"#)
+        );
+
+        // readable again: rebuilt, with both
+        build(&mbox).unwrap();
+        assert_eq!(
+            meta_get(&mbox, list).unwrap().as_deref(),
+            Some(r#"["promo@x"]"#)
+        );
+        assert_eq!(
+            labels_of(&mbox, "promo@x").unwrap().as_deref(),
+            Some("Category Promotions, Starred")
+        );
+
+        // no database at all: nothing in it can be read, ever
+        std::fs::write(&index, vec![b'x'; 4096]).unwrap();
+        build(&mbox).unwrap();
+        assert_eq!(meta_get(&mbox, list).unwrap(), None);
+        assert_eq!(
+            labels_of(&mbox, "promo@x").unwrap().as_deref(),
+            Some("Category Promotions")
+        );
+    }
+
+    /// An archive with a pending list, a cursor and a label update, indexed.
+    fn live_archive(tmp: &Path) -> PathBuf {
+        let mbox = tmp.join("live.mbox");
+        std::fs::write(
+            &mbox,
+            "From gmail-imap uid=1\nX-Gmail-Labels: Category Promotions\nFrom: A <a@x>\n\
+             Subject: sale\nDate: Mon, 05 Jan 2026 10:00:00 -0400\nMessage-ID: <promo@x>\n\nbody\n\n",
+        )
+        .unwrap();
+        build(&mbox).unwrap();
+        set_labels(
+            &mbox,
+            &[(
+                "promo@x".to_string(),
+                "Category Promotions, Starred".to_string(),
+            )],
+            &[
+                ("gmail_observe_pending", r#"["promo@x"]"#),
+                ("gmail_cursor", "1:1"),
+            ],
+        )
+        .unwrap();
+        mbox
+    }
+
+    /// A rebuild while another connection holds the index it would replace
+    /// (busy, locked) fails and leaves it in place, list and all; once the
+    /// index is free, the rebuild carries the list and the label updates on.
+    #[test]
+    fn test_a_rebuild_leaves_a_busy_index_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mbox = live_archive(tmp.path());
+        let list = "gmail_observe_pending";
+
+        let holder = Connection::open(index_path(&mbox)).unwrap();
+        holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let err = build(&mbox).unwrap_err();
+        assert!(format!("{err:#}").contains("stays as it is"), "{err:#}");
+        holder.execute_batch("COMMIT").unwrap();
+        drop(holder);
+        assert_eq!(
+            meta_get(&mbox, list).unwrap().as_deref(),
+            Some(r#"["promo@x"]"#)
+        );
+
+        build(&mbox).unwrap();
+        assert_eq!(
+            meta_get(&mbox, list).unwrap().as_deref(),
+            Some(r#"["promo@x"]"#)
+        );
+        assert_eq!(
+            labels_of(&mbox, "promo@x").unwrap().as_deref(),
+            Some("Category Promotions, Starred")
+        );
+    }
+
+    /// Label updates that are damaged are rebuilt over alone: the meta rows
+    /// read — the pull's cursor and its list of messages still to observe —
+    /// are kept, and the message shows its archived labels until the pull
+    /// reads them from Gmail again.
+    #[test]
+    fn test_damaged_label_updates_leave_the_meta_rows() {
+        use std::io::{Seek, Write};
+        let tmp = tempfile::tempdir().unwrap();
+        let mbox = live_archive(tmp.path());
+        let index = index_path(&mbox);
+        let (root, page): (i64, i64) = {
+            let conn = Connection::open(&index).unwrap();
+            let root = conn
+                .query_row(
+                    "SELECT rootpage FROM sqlite_master WHERE name = 'label_updates'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let page = conn
+                .query_row("PRAGMA page_size", [], |r| r.get(0))
+                .unwrap();
+            (root, page)
+        };
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&index)
+            .unwrap();
+        file.seek(std::io::SeekFrom::Start(((root - 1) * page) as u64))
+            .unwrap();
+        file.write_all(&vec![0xFF; page as usize]).unwrap();
+        drop(file);
+        let damaged = Connection::open(&index)
+            .unwrap()
+            .prepare("SELECT id, labels FROM label_updates")
+            .and_then(|mut stmt| {
+                stmt.query_map([], |r| r.get::<_, String>(1))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .is_err();
+        assert!(damaged, "the table is damaged");
+
+        build(&mbox).unwrap();
+        assert_eq!(
+            meta_get(&mbox, "gmail_observe_pending").unwrap().as_deref(),
+            Some(r#"["promo@x"]"#)
+        );
+        assert_eq!(
+            meta_get(&mbox, "gmail_cursor").unwrap().as_deref(),
+            Some("1:1")
+        );
+        assert_eq!(
+            labels_of(&mbox, "promo@x").unwrap().as_deref(),
+            Some("Category Promotions")
+        );
+    }
+
+    /// A Message-ID header folded onto its next line, or written with a
+    /// comment beside the id, indexes the message under the key the mail
+    /// import gives it — not as a message without one.
+    #[test]
+    fn test_message_ids_are_indexed_under_the_imports_key() {
+        for header in [
+            "Message-ID:\n <folded@x>",
+            "Message-ID: (desk) <hush@x>",
+            "message-id: <plain@x>",
+        ] {
+            let head = format!("From: A <a@x>\n{header}\nSubject: s\n");
+            assert_eq!(
+                scan_headers(&head).message_id,
+                hearthloom_adapters::mbox::message_id_ref(&head),
+                "{header}"
+            );
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let mbox = tmp.path().join("mail.mbox");
+        std::fs::write(
+            &mbox,
+            "From x@y Mon Jan 05 10:00:00 2026\nFrom: A <a@x>\nSubject: folded\n\
+             Message-ID:\n <folded@x>\n\nbody\n",
+        )
+        .unwrap();
+        build(&mbox).unwrap();
+        assert!(ids_current(&mbox));
+        let hits = search(&mbox, "folded", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        // the import's key: the header unfolded, the brackets at its ends
+        // trimmed
+        assert_eq!(hits[0].0, " <folded@x");
+        assert!(fetch(&mbox, &hits[0].0, 10_000).unwrap().contains("body"));
+    }
+
+    /// Each record's separator line, in archive order, from after a row.
+    #[test]
+    fn test_separator_lines_in_archive_order() {
+        let (_tmp, mbox) = fixture();
+        build(&mbox).unwrap();
+        let all = separators_after(&mbox, 0, 10).unwrap();
+        assert_eq!(
+            all.iter().map(|s| s.line.as_str()).collect::<Vec<_>>(),
+            vec![
+                "From a@x Mon Jan 05 10:00:00 2026",
+                "From b@x Mon Jan 05 11:00:00 2026"
+            ]
+        );
+        // each with its id: the Message-ID, or its offset when it has none
+        assert_eq!(all[0].id, "paris1@x");
+        assert!(all[1].id.starts_with("at:"), "{:?}", all[1]);
+        let rest = separators_after(&mbox, all[0].row, 10).unwrap();
+        assert_eq!(rest, vec![all[1].clone()]);
+        assert!(separators_after(&mbox, all[1].row, 10).unwrap().is_empty());
+        assert_eq!(separators_after(&mbox, 0, 1).unwrap(), vec![all[0].clone()]);
     }
 
     #[test]

@@ -54,6 +54,9 @@ tokio = { version = "1", features = ["full"] }
 imap = "3.0.0-alpha.15"
 # the same imap-proto imap uses (its folder attributes aren't re-exported)
 imap-proto = "0.16.7"
+# the TLS imap uses: the Gmail adapter opens the connection itself so every
+# step has a deadline (imap's ClientBuilder sets none)
+native-tls = "0.2"
 tract-onnx = "0.23"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

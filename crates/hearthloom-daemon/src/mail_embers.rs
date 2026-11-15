@@ -84,23 +84,31 @@ fn input(seen: &MailSeen) -> WatchInput<'_> {
 /// New mail: queue it for the watches it matches. `thread` is
 /// `Some(None)` when the message joined a thread this caller can't see —
 /// a private one — and nothing is queued then.
-pub fn on_seen(state: &AppState, seen: &MailSeen, thread: Option<Option<&MailThread>>) -> usize {
+/// Fails when a match it should queue couldn't be recorded; the others
+/// are queued all the same, and queuing the message again adds none twice
+/// (a match's id is its ember, watch and message).
+pub fn on_seen(
+    state: &AppState,
+    seen: &MailSeen,
+    thread: Option<Option<&MailThread>>,
+) -> anyhow::Result<usize> {
     if seen.private || seen.from_me {
-        return 0;
+        return Ok(0);
     }
     // only mailboxes the owner lets embers see (0.5.98: an added one is off
     // until they turn it on)
     if !crate::mailboxes::embers_see_account(state, &seen.account) {
-        return 0;
+        return Ok(0);
     }
     let thread = match thread {
-        Some(None) => return 0,
-        Some(Some(t)) if t.scope == "private" => return 0,
+        Some(None) => return Ok(0),
+        Some(Some(t)) if t.scope == "private" => return Ok(0),
         Some(t) => t,
         None => None,
     };
     let class = decided(thread).map(|t| t.state.as_str());
     let mut queued = 0;
+    let mut failed = None;
     for w in live_watches(state) {
         // a watch waiting for a class is checked once the thread has one
         if w.filter.needs_class() && class.is_none() {
@@ -112,18 +120,32 @@ pub fn on_seen(state: &AppState, seen: &MailSeen, thread: Option<Option<&MailThr
         match state.store.mail_match_add(&queue(&w, seen, thread)) {
             Ok(true) => queued += 1,
             Ok(false) => {}
-            Err(err) => tracing::warn!("mail: a match for {} didn't queue: {err:#}", w.plugin),
+            Err(err) => {
+                failed.get_or_insert(err.context(format!("a match for {} didn't queue", w.plugin)));
+            }
         }
     }
     if queued > 0 {
         crate::bus::touch(state, TOPIC);
     }
-    queued
+    match failed {
+        Some(err) => Err(err),
+        None => Ok(queued),
+    }
 }
 
 /// Triage labelled a thread: the watches waiting for a class look at
 /// its last message (read again from the live archive, labels and all).
 pub fn on_classified(state: &AppState, thread: &MailThread) -> usize {
+    on_classified_in(state, thread, &crate::mailboxes::all())
+}
+
+/// `on_classified`, reading the archives of these mailboxes.
+pub(crate) fn on_classified_in(
+    state: &AppState,
+    thread: &MailThread,
+    boxes: &[crate::mailboxes::Mailbox],
+) -> usize {
     if thread.scope == "private" {
         return 0;
     }
@@ -138,14 +160,17 @@ pub fn on_classified(state: &AppState, thread: &MailThread) -> usize {
         return 0;
     };
     // the thread's mailbox's archive first, then the others here
-    let Some((mb, raw)) = crate::mailboxes::read_local(state, &thread.account, id, 2_000_000)
+    let Some((mb, raw)) =
+        crate::mailboxes::read_local_in(state, boxes, &thread.account, id, 2_000_000)
     else {
         return 0;
     };
     if !crate::mailboxes::embers_see(state, &mb) {
         return 0;
     }
-    let labels = hearthloom_adapters::mbox::gmail_labels(&raw);
+    // the labels it has now (starred since it arrived, say), not the ones
+    // it was archived with
+    let labels = crate::mailboxes::labels_now(state, &mb, id, &raw);
     let mine = crate::mailboxes::owner_addresses(state);
     let Some(seen) = crate::mail_triage::seen(state, &mb.address, &mine, &labels, raw.as_bytes())
     else {
@@ -174,14 +199,38 @@ pub fn on_classified(state: &AppState, thread: &MailThread) -> usize {
 /// Private now (a privacy rule, or a private memory of the message)?
 /// Fails closed.
 pub fn held_back(state: &AppState, m: &MailMatch) -> bool {
-    state
-        .store
-        .privacy_rules_match(&format!("{}\n{}\n{}", m.sender, m.subject, m.text))
-        .unwrap_or(true)
+    held_back_by(
+        state,
+        m,
+        private_memories(state, std::slice::from_ref(&m.message_id)).as_ref(),
+    )
+}
+
+/// The Message-IDs among these whose memory is labelled private, under
+/// any key a mail import can have given it (a match keeps only the parsed
+/// Message-ID, which the import's key can differ from); None when that
+/// can't be read.
+fn private_memories(state: &AppState, ids: &[String]) -> Option<std::collections::HashSet<String>> {
+    match crate::virtual_source::private_mail_ids(state, ids) {
+        Ok(found) => Some(found),
+        Err(err) => {
+            tracing::warn!("mail: private memories unreadable: {err:#}");
+            None
+        }
+    }
+}
+
+/// `held_back`, with the private memories read for a batch of matches
+/// (None: unknown — everything is held back).
+fn held_back_by(
+    state: &AppState,
+    m: &MailMatch,
+    private: Option<&std::collections::HashSet<String>>,
+) -> bool {
+    private.is_none_or(|p| p.contains(&m.message_id))
         || state
             .store
-            .private_source_refs("mbox", std::slice::from_ref(&m.message_id))
-            .map(|s| !s.is_empty())
+            .privacy_rules_match(&format!("{}\n{}\n{}", m.sender, m.subject, m.text))
             .unwrap_or(true)
 }
 
@@ -223,9 +272,11 @@ pub fn deliver(state: &AppState, plugin: &str, after: i64, limit: usize) -> anyh
     let view = state.store.mail_ember_view(plugin)?;
     let rows = state.store.mail_matches_after(plugin, after, limit)?;
     let next = rows.last().map(|m| m.seq).unwrap_or(after);
+    let ids: Vec<String> = rows.iter().map(|m| m.message_id.clone()).collect();
+    let private = private_memories(state, &ids);
     let matches: Vec<Value> = rows
         .iter()
-        .filter(|m| !held_back(state, m))
+        .filter(|m| !held_back_by(state, m, private.as_ref()))
         .map(|m| shown(m, &view))
         .collect();
     Ok(json!({
@@ -391,10 +442,13 @@ mod tests {
             ..Default::default()
         };
         // non-thread mail: the domain watch matches, the class watch waits
-        assert_eq!(on_seen(&state, &seen("m1@x", false), None), 1);
+        assert_eq!(on_seen(&state, &seen("m1@x", false), None).unwrap(), 1);
         // private mail, or mail in a thread we can't see, never queues
-        assert_eq!(on_seen(&state, &seen("m2@x", true), None), 0);
-        assert_eq!(on_seen(&state, &seen("m3@x", false), Some(None)), 0);
+        assert_eq!(on_seen(&state, &seen("m2@x", true), None).unwrap(), 0);
+        assert_eq!(
+            on_seen(&state, &seen("m3@x", false), Some(None)).unwrap(),
+            0
+        );
         // a rule-decided opportunity thread: both watches match
         let thread = MailThread {
             id: "mt_1".into(),
@@ -417,7 +471,7 @@ mod tests {
             updated_at: String::new(),
         };
         assert_eq!(
-            on_seen(&state, &seen("m4@x", false), Some(Some(&thread))),
+            on_seen(&state, &seen("m4@x", false), Some(Some(&thread))).unwrap(),
             2
         );
         let got = deliver(&state, "leadfinder", 0, 50).unwrap();

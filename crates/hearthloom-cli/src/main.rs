@@ -822,14 +822,14 @@ enum IngestCmd {
         #[arg(long)]
         scope: Option<String>,
     },
-    /// Ingest an mbox mail archive (e.g. Gmail Takeout).
+    /// Ingest an mbox mail archive (e.g. Gmail Takeout). The scan runs
+    /// daemon-side in the background (progress in daemon.log).
     Mbox {
         file: PathBuf,
         #[arg(long)]
         scope: Option<String>,
         /// Keep only messages carrying any of these X-Gmail-Labels
         /// (comma-separated, e.g. "Sent,Category Personal,Starred").
-        /// With a filter set, the scan runs daemon-side in the background.
         #[arg(long, value_delimiter = ',')]
         include_labels: Vec<String>,
         /// Drop messages carrying any of these labels (Spam/Trash are
@@ -1010,8 +1010,9 @@ async fn main() -> Result<()> {
                 let client = Client::new(home)?;
                 return ingest_tcc_source(&client, adapter, path, scope).await;
             }
-            // Filtered mbox runs go daemon-side: a Takeout archive can be
-            // tens of GB, so the daemon scans it detached and reports
+            // Every mbox run goes daemon-side, filtered or not: a Takeout
+            // archive can be tens of GB, so the daemon streams it in batches
+            // (never the whole archive in memory), detached, and reports
             // through daemon.log instead of holding this process open.
             if let IngestCmd::Mbox {
                 file,
@@ -1020,27 +1021,21 @@ async fn main() -> Result<()> {
                 exclude_labels,
             } = &source
             {
-                if !include_labels.is_empty() || !exclude_labels.is_empty() {
-                    let client = Client::new(home)?;
-                    let result = client
-                        .post(
-                            "/v1/ingest/local",
-                            &json!({
-                                "actor": "human:cli",
-                                "adapter": "mbox",
-                                "path": file.display().to_string(),
-                                "scope": scope,
-                                "include_labels": include_labels,
-                                "exclude_labels": exclude_labels,
-                            }),
-                        )
-                        .await?;
-                    println!(
-                        "{}",
-                        result["note"].as_str().unwrap_or("started daemon-side")
-                    );
-                    return Ok(());
-                }
+                // the daemon runs elsewhere: it needs the whole path
+                let file = std::fs::canonicalize(file)
+                    .map_err(|e| anyhow::anyhow!("{}: {e}", file.display()))?;
+                let client = Client::new(home)?;
+                let result = client
+                    .post(
+                        "/v1/ingest/local",
+                        &mbox_ingest_body(&file, scope, include_labels, exclude_labels),
+                    )
+                    .await?;
+                println!(
+                    "{}",
+                    result["note"].as_str().unwrap_or("started daemon-side")
+                );
+                return Ok(());
             }
             // ChatGPT exports run daemon-side: thousands of conversations plus
             // image assets the daemon copies into its raw/ tree.
@@ -1076,11 +1071,8 @@ async fn main() -> Result<()> {
                     "adapter:ics",
                     file.display().to_string(),
                 ),
-                IngestCmd::Mbox { file, scope, .. } => (
-                    hearthloom_adapters::mbox::ingest(&file, scope.as_deref())?,
-                    "adapter:mbox",
-                    file.display().to_string(),
-                ),
+                // Intercepted and routed daemon-side above.
+                IngestCmd::Mbox { .. } => unreachable!("mbox runs daemon-side"),
                 IngestCmd::Chatlog { file, scope } => {
                     let read = hearthloom_adapters::chatlog::read(&file, scope.as_deref())?;
                     flagged = read.flagged;
@@ -2164,6 +2156,25 @@ async fn handle_intent(client: &Client, command: IntentCmd) -> Result<()> {
     Ok(())
 }
 
+/// The `/v1/ingest/local` request for an mbox import. Every mbox import
+/// runs daemon-side, where the archive is streamed in batches; empty label
+/// lists keep everything but Spam/Trash.
+fn mbox_ingest_body(
+    file: &std::path::Path,
+    scope: &Option<String>,
+    include_labels: &[String],
+    exclude_labels: &[String],
+) -> Value {
+    json!({
+        "actor": "human:cli",
+        "adapter": "mbox",
+        "path": file.display().to_string(),
+        "scope": scope,
+        "include_labels": include_labels,
+        "exclude_labels": exclude_labels,
+    })
+}
+
 /// Ingest a TCC-protected source: parse locally when this shell has
 /// access, otherwise ask the daemon to do it server-side.
 async fn ingest_tcc_source(
@@ -2475,4 +2486,35 @@ fn local_only(what: &str, url: &Option<String>) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An mbox import with no label filter is the daemon's streamed run
+    /// too: everything but Spam/Trash, by the archive's full path.
+    #[test]
+    fn test_an_unfiltered_mbox_import_is_streamed_daemon_side() {
+        let cli = Cli::try_parse_from(["hearthloom", "ingest", "mbox", "mail.mbox"]).unwrap();
+        let Cmd::Ingest {
+            source:
+                IngestCmd::Mbox {
+                    file,
+                    scope,
+                    include_labels,
+                    exclude_labels,
+                },
+        } = cli.command
+        else {
+            panic!("not an mbox import");
+        };
+        assert!(include_labels.is_empty() && exclude_labels.is_empty());
+        let full = std::env::temp_dir().join(&file);
+        let body = mbox_ingest_body(&full, &scope, &include_labels, &exclude_labels);
+        assert_eq!(body["adapter"], "mbox");
+        assert_eq!(body["path"], full.display().to_string());
+        assert_eq!(body["include_labels"], json!([]));
+        assert_eq!(body["exclude_labels"], json!([]));
+    }
 }

@@ -136,15 +136,27 @@ pub fn seen(
     let from_me = has("Sent")
         || from_addr.eq_ignore_ascii_case(account)
         || mine.contains(&from_addr.trim().to_lowercase());
-    let private = state
-        .store
-        .privacy_rules_match(&format!("{from}\n{subject}\n{text}"))
-        .unwrap_or(false)
+    // The checks a message read in place meets (virtual_source.rs
+    // `item_private`): its memory, found by the key the mail import gives
+    // it (which a parser's reading of the Message-ID can differ from — a
+    // comment beside the id), in every source a message's memory can be
+    // under; and the rules, over the whole message decoded and its labels.
+    // An error counts as private.
+    let key =
+        crate::virtual_source::mail_key(&String::from_utf8_lossy(raw), Some(message_id.as_str()));
+    let private = crate::virtual_source::mail_memory_private(state, &key).unwrap_or(true)
         || state
             .store
-            .private_source_refs("mbox", std::slice::from_ref(&message_id))
-            .map(|s| !s.is_empty())
-            .unwrap_or(false);
+            .privacy_rules_match(&format!(
+                "{}{}",
+                crate::mbox_text::privacy_text(raw),
+                labels.join(", ")
+            ))
+            .unwrap_or(true);
+    let memory_refs = match key {
+        crate::virtual_source::ItemKey::Refs(refs) => refs,
+        _ => Vec::new(),
+    };
     Some(MailSeen {
         account: account.to_string(),
         message_id,
@@ -164,14 +176,53 @@ pub fn seen(
             .chars()
             .take(hearthloom_core::store::mail_watch::STORED_CHARS)
             .collect(),
+        memory_refs,
     })
 }
 
+/// Whether a message is private as of now: what `seen` found, or a private
+/// label on its memory since — the pull makes a message's memory after
+/// reading it, and the memory can arrive private (its sender's identity is
+/// private, say). Looked up by `memory_refs`; without them (a memory keyed
+/// by its text) by the rule for such memories and its Message-ID.
+fn private_now(state: &AppState, s: &MailSeen) -> Result<bool> {
+    use crate::virtual_source::{mail_memory_private, ItemKey};
+    if s.private {
+        return Ok(true);
+    }
+    if s.memory_refs.is_empty() {
+        return Ok(mail_memory_private(state, &ItemKey::Unkeyed)?
+            || mail_memory_private(state, &ItemKey::Refs(vec![s.message_id.clone()]))?);
+    }
+    mail_memory_private(state, &ItemKey::Refs(s.memory_refs.clone()))
+}
+
 /// Record what the pull fetched; wake triage when anything changed.
-pub fn observe(state: &AppState, seen: &[MailSeen]) {
+/// Returns the positions in `seen` of the messages not wholly recorded
+/// (their thread, or an ember's match): observing one again finishes it
+/// and adds nothing twice.
+pub fn observe(state: &AppState, seen: &[MailSeen]) -> Vec<usize> {
     let mut changed = false;
-    for s in seen {
-        match state
+    let mut failed = Vec::new();
+    for (i, s) in seen.iter().enumerate() {
+        // its privacy as of now: the pull made its memory after reading it
+        let now_private;
+        let s = match private_now(state, s) {
+            Ok(private) if private != s.private => {
+                now_private = MailSeen {
+                    private,
+                    ..s.clone()
+                };
+                &now_private
+            }
+            Ok(_) => s,
+            Err(err) => {
+                tracing::warn!("mail: a message's privacy unreadable: {err:#}");
+                failed.push(i);
+                continue;
+            }
+        };
+        let queued = match state
             .store
             .mail_observe(&Actor::new("adapter:gmail-imap"), s)
         {
@@ -179,17 +230,31 @@ pub fn observe(state: &AppState, seen: &[MailSeen]) {
                 changed = true;
                 // a thread this (viewerless) read can't see is private
                 let thread = state.store.mail_thread(&id).ok().flatten();
-                crate::mail_embers::on_seen(state, s, Some(thread.as_ref()));
+                crate::mail_embers::on_seen(state, s, Some(thread.as_ref()))
             }
-            Ok(None) => {
-                crate::mail_embers::on_seen(state, s, None);
-            }
-            Err(err) => tracing::warn!("mail: a thread didn't update: {err:#}"),
+            // Seen before (a replay, or labels read again): it keeps the
+            // thread it joined then, and that thread's privacy and class
+            // decide what the watches see, as on arrival.
+            Ok(None) => match state.store.mail_thread_of_message(&s.message_id) {
+                Ok(Some(id)) => {
+                    let thread = state.store.mail_thread(&id).ok().flatten();
+                    crate::mail_embers::on_seen(state, s, Some(thread.as_ref()))
+                }
+                Ok(None) => crate::mail_embers::on_seen(state, s, None),
+                // its thread can't be told: nothing is queued
+                Err(err) => Err(err.context("a message's thread unreadable")),
+            },
+            Err(err) => Err(err.context("a thread didn't update")),
+        };
+        if let Err(err) = queued {
+            tracing::warn!("mail: {err:#}");
+            failed.push(i);
         }
     }
     if changed {
         kick();
     }
+    failed
 }
 
 /// The first time this node sorts a mailbox's mail, the last two weeks of
@@ -522,6 +587,38 @@ async fn ask_api(
     }
 }
 
+/// Of these threads waiting for triage, the ones a model may read. A
+/// message's memory can turn private after its thread formed (the pull
+/// makes it after reading the message), and a pull stopped before it saw
+/// the message again left the thread as it was; so the memories of each
+/// thread's messages are looked up again here, before any text is read for
+/// a model, and a thread with a private one is made private and left out.
+/// An error fails the round: nothing goes to a model.
+fn for_model(state: &AppState, threads: Vec<MailThread>) -> Result<Vec<MailThread>> {
+    let mut ids_of = Vec::with_capacity(threads.len());
+    for t in &threads {
+        // this node's index of the thread, and its latest message (the
+        // index is the observing node's own)
+        let mut ids = state.store.mail_thread_message_ids(&t.id)?;
+        ids.extend(t.last_message_id.clone());
+        ids.sort();
+        ids.dedup();
+        ids_of.push(ids);
+    }
+    let all: Vec<String> = ids_of.iter().flatten().cloned().collect();
+    let private = crate::virtual_source::private_mail_ids(state, &all)?;
+    let mut kept = Vec::new();
+    for (t, ids) in threads.into_iter().zip(ids_of) {
+        if ids.iter().any(|id| private.contains(id)) {
+            state.store.mail_thread_make_private(&actor(), &t.id)?;
+            tracing::info!("mail: a thread's mail is private now: made private, not sorted");
+        } else {
+            kept.push(t);
+        }
+    }
+    Ok(kept)
+}
+
 /// Sort the threads waiting for it, one batch. Returns how many were sorted.
 /// Sort what waits, of the mailboxes this node handles: each thread is
 /// sorted once, on the node that handles its mailbox (mailboxes::duty).
@@ -533,13 +630,23 @@ pub(crate) async fn triage_for(state: &AppState, duty: &crate::mailboxes::Duty) 
     if duty.is_idle() {
         return Ok(0);
     }
-    let threads =
-        state
-            .store
-            .mail_threads_to_triage_for(BATCH, &duty.mine, duty.unwatched.as_deref())?;
-    if threads.is_empty() {
-        return Ok(0);
-    }
+    let threads = loop {
+        let batch =
+            state
+                .store
+                .mail_threads_to_triage_for(BATCH, &duty.mine, duty.unwatched.as_deref())?;
+        if batch.is_empty() {
+            return Ok(0);
+        }
+        let st = state.clone();
+        let kept = tokio::task::spawn_blocking(move || for_model(&st, batch))
+            .await
+            .map_err(|err| anyhow!("checking threads' privacy: {err}"))??;
+        // a batch made private all leaves the queue: the next one is new
+        if !kept.is_empty() {
+            break kept;
+        }
+    };
     let plain: Vec<String> = state
         .store
         .mail_rules()?
@@ -687,6 +794,57 @@ pub async fn run_loop(state: AppState) {
     }
 }
 
+/// A test's stand-in for `claude`, the provider triage uses here: it writes
+/// what it was asked to `<dir>/asked.txt` (returned) and answers `items`.
+#[cfg(test)]
+pub(crate) fn stand_in_claude(
+    state: &AppState,
+    dir: &std::path::Path,
+    items: Value,
+) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let asked = dir.join("asked.txt");
+    let script = dir.join("claude");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s' \"$*\" > '{}'\ncat <<'EOF'\n{}\nEOF\n",
+            asked.display(),
+            json!({
+                "type": "result", "is_error": false, "duration_ms": 5,
+                "modelUsage": {"claude-sonnet-5-5": {"inputTokens": 900, "outputTokens": 60}},
+                "structured_output": {"items": items}
+            })
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    state
+        .store
+        .save_agent(
+            &Actor::new("human:test"),
+            None,
+            &hearthloom_core::store::AgentIn {
+                name: "Desk hand".into(),
+                harness: "claude_code".into(),
+                config: json!({"workdir": dir, "claude_path": script}),
+                enabled: Some(true),
+            },
+        )
+        .unwrap();
+    asked
+}
+
+/// This node handles every mailbox's mail (no mailbox is connected in a
+/// test, so the real duty would be none).
+#[cfg(test)]
+pub(crate) fn every_mailbox() -> crate::mailboxes::Duty {
+    crate::mailboxes::Duty {
+        mine: vec![],
+        unwatched: Some(vec![]),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -746,49 +904,17 @@ mod tests {
             .unwrap()
             .unwrap();
         // the stand-in records what it was asked and answers for the open one
-        let asked = tmp.path().join("asked.txt");
-        let script = tmp.path().join("claude");
-        std::fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\nprintf '%s' \"$*\" > '{}'\ncat <<'EOF'\n{}\nEOF\n",
-                asked.display(),
-                json!({
-                    "type": "result", "is_error": false, "duration_ms": 5,
-                    "modelUsage": {"claude-sonnet-5-5": {"inputTokens": 900, "outputTokens": 60}},
-                    "structured_output": {"items": [{
-                        "id": open, "class": "needs_reply", "confidence": 0.92,
-                        "span": "upload the statements to the portal by Friday",
-                        "due_by": "2026-11-07", "why": "Susan asks you to upload them."
-                    }]}
-                })
-            ),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        state
-            .store
-            .save_agent(
-                &actor,
-                None,
-                &hearthloom_core::store::AgentIn {
-                    name: "Desk hand".into(),
-                    harness: "claude_code".into(),
-                    config: json!({"workdir": tmp.path(), "claude_path": script}),
-                    enabled: Some(true),
-                },
-            )
-            .unwrap();
+        let asked = stand_in_claude(
+            &state,
+            tmp.path(),
+            json!([{
+                "id": open, "class": "needs_reply", "confidence": 0.92,
+                "span": "upload the statements to the portal by Friday",
+                "due_by": "2026-11-07", "why": "Susan asks you to upload them."
+            }]),
+        );
         assert_eq!(provider(&state), "claude-code");
-
-        // this node handles every mailbox's mail (no mailbox is connected
-        // in a test, so the real duty would be none)
-        let all = crate::mailboxes::Duty {
-            mine: vec![],
-            unwatched: Some(vec![]),
-        };
-        assert_eq!(triage_for(&state, &all).await.unwrap(), 1);
+        assert_eq!(triage_for(&state, &every_mailbox()).await.unwrap(), 1);
         state.store.vault_unlock(5);
         let t = state.store.mail_thread(&open).unwrap().unwrap();
         assert_eq!(
@@ -821,7 +947,7 @@ mod tests {
             "{usage}"
         );
         // nothing left to sort: the next round asks nothing
-        assert_eq!(triage_for(&state, &all).await.unwrap(), 0);
+        assert_eq!(triage_for(&state, &every_mailbox()).await.unwrap(), 0);
     }
 
     /// Mail from any of the owner's addresses is their own (0.5.98): sent

@@ -204,7 +204,7 @@ fn read(
 ) -> Option<Message> {
     let boxes: Vec<crate::mailboxes::Mailbox> = local.iter().map(|l| l.mailbox.clone()).collect();
     let (mb, raw) = crate::mailboxes::read_local_in(state, &boxes, prefer, id, 2_000_000)?;
-    let labels = hearthloom_adapters::mbox::gmail_labels(&raw);
+    let labels = crate::mailboxes::labels_now(state, &mb, id, &raw);
     let seen = crate::mail_triage::seen(state, &mb.address, mine, &labels, raw.as_bytes())?;
     let m = mail_parser::MessageParser::default().parse(raw.as_bytes())?;
     let ids = |v: Option<mail_parser::TextList>| -> Vec<String> {

@@ -290,9 +290,25 @@ Four ways in:
    same pull within seconds of new mail, with a catch-up every few
    minutes; the consolidation pass stays as its backstop. Since 0.5.98 a
    node can watch several mailboxes (`mailboxes.rs`): each has its own
-   IDLE connection, pull cursor, live archive and settings, and a refused
-   password stops only that mailbox. Mail from any of the owner's
-   mailboxes, or an alias listed on one, is the owner's own.
+   IDLE connection, pull cursor, live archive, pull lock and settings, and
+   a refused password stops only that mailbox. Every Gmail connection has
+   a deadline on each step, so a stalled one fails instead of holding its
+   mailbox. A pull also re-reads the labels of the mail it already holds
+   (the newest every time, the rest of its live archive in turn), so a
+   message starred later becomes a memory, reaches the Desk and the
+   embers' watches (as far as its thread's privacy and class allow), and
+   shows its labels as they are now in search. The labels are recorded
+   together with the list of messages still to be shown to triage and the
+   watches, so work a stopped pull left undone is finished by the next
+   re-read; a list or labels that can't be read stay for the next try,
+   never read as done, and an index rebuild that can't read the old index
+   leaves it in place. A message's privacy is read again after its memory
+   is made, since the memory can arrive private; a message found private
+   then makes the thread it joined private, so no model sorts it. Triage
+   also looks each thread's memories up again just before a model reads
+   it, so a pull that stopped in between leaves no private mail to sort.
+   Mail from any of the owner's mailboxes, or an alias listed on one, is
+   the owner's own.
 
 Adapters mint entities structurally where the source is unambiguous (a
 sender's address, a calendar attendee, a repository). Anything needing
@@ -329,7 +345,8 @@ ember — only for mailboxes the owner lets embers see (an added mailbox
 starts hidden from them). The queue syncs on its own leg, so the ember reads it, with a
 cursor, on whichever node it runs. The owner's view for that ember
 (headers, a snippet, or the text) and a fresh privacy check are applied
-when it reads. Watches and views mirror like mail rules.
+when it reads; the check finds the message's memory under any key the
+mail import can have given it. Watches and views mirror like mail rules.
 
 **Reply drafts (v65, `store/mail_draft.rs`, `mail_drafts.rs`).** A
 request (the owner's words, or an ember's finished text) is a mirrored
@@ -361,9 +378,19 @@ windows only, through `calendar.availability`.
 
 A mail archive's sidecar indexes the headers when it is built, and its
 message text and links in the background afterwards (`mbox_text.rs`; big
-archives wait for the owner). Archives are read in place, so every read
+archives wait for the owner). It keys each message by the mail import's
+key for its Message-ID, and a rebuild and the writes it carries over
+(labels re-read, the pull's cursor) take turns on one lock per archive. Archives are read in place, so every read
 goes through `virtual_source::{search,fetch}_for_viewer`, which applies
-the privacy rules and the caller's vault. Each node lists its archives in
+the privacy rules and the caller's vault — the rules to the whole message,
+decoded, and the vault to the message's memory under any path that
+reaches it (a promoted message is stored under its Message-ID, looked up
+under every source the record holds, registered or not, and matched by
+the message's identity rather than how its Message-ID header is written;
+one an older build kept under an archive's `at:` path is known by the
+Message-ID its stored text names, and while one kept under a Gmail `uid:`
+path — which can't be identified — is private, every message counts as
+private). Each node lists its archives in
 the node list, and Ask on any node can search an archive another node
 holds (see "Lookups on another node" below). Where Gmail is connected, the `gmail`
 source (`gmail_search.rs`) searches the whole mailbox with Gmail's own

@@ -389,13 +389,21 @@ mod tests {
         assert_eq!(parse_every(Some("soon")), DEFAULT_EVERY_MINUTES);
     }
 
+    /// A refusal stops the mailbox however far up the error travels; an
+    /// error at sign-in that isn't one (whatever its words) doesn't.
     #[test]
     fn test_a_refused_sign_in_is_told_apart_from_a_network_error() {
-        assert!(is_auth_failure(&anyhow::anyhow!(
-            "gmail login failed: No Response: [AUTHENTICATIONFAILED] Invalid credentials (Failure)"
-        )));
-        assert!(!is_auth_failure(&anyhow::anyhow!(
-            "connection reset by peer"
-        )));
+        use hearthloom_adapters::gmail_imap::SignInRefused;
+        let refused = anyhow::Error::new(SignInRefused(
+            "[AUTHENTICATIONFAILED] Invalid credentials (Failure)".into(),
+        ));
+        assert!(is_auth_failure(&refused.context("gmail pull")));
+        for other in [
+            "connection reset by peer",
+            "gmail login failed: Connection Lost",
+            "gmail sign-in did not complete: No Response: [UNAVAILABLE] Temporary System Problem",
+        ] {
+            assert!(!is_auth_failure(&anyhow::anyhow!("{other}")), "{other}");
+        }
     }
 }

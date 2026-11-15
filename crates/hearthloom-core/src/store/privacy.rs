@@ -83,6 +83,48 @@ pub(crate) fn load_rules(conn: &rusqlite::Connection) -> Result<Vec<PrivacyRule>
         .map_err(Into::into)
 }
 
+/// A memory labelled private, as `Store::private_prefixed_anywhere` finds
+/// it. The content hash names its text, which never changes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrivateMemory {
+    pub source: String,
+    pub source_ref: String,
+    pub content_hash: String,
+}
+
+/// Every source the record holds memories under, whatever is registered:
+/// one index step per source (the next source after the last), never a
+/// walk of the record.
+fn sources_held(conn: &rusqlite::Connection) -> Result<Vec<String>> {
+    let first: Option<String> = conn.query_row(
+        "SELECT MIN(source) FROM episodes /* all-episodes: which sources hold memories */",
+        [],
+        |row| row.get(0),
+    )?;
+    let mut next = conn.prepare(
+        "SELECT MIN(source) FROM episodes /* all-episodes: which sources hold memories */
+         WHERE source > ?1",
+    )?;
+    let mut out: Vec<String> = Vec::new();
+    let mut at = first;
+    while let Some(source) = at {
+        at = next.query_row([&source], |row| row.get(0))?;
+        out.push(source);
+    }
+    Ok(out)
+}
+
+/// The end of the range of refs starting with `prefix`: the prefix with
+/// its last character advanced.
+fn prefix_end(prefix: &str) -> Result<String> {
+    let mut upper = prefix.as_bytes().to_vec();
+    match upper.last_mut() {
+        Some(last) if prefix.is_ascii() && *last < 0x7f => *last += 1,
+        _ => return Err(anyhow!("a non-empty ASCII prefix is needed")),
+    }
+    Ok(String::from_utf8(upper)?)
+}
+
 impl Store {
     /// Create a rule and retroactively relabel everything it matches.
     /// Returns (rule, episodes relabeled).
@@ -237,25 +279,126 @@ impl Store {
         Ok(out)
     }
 
-    /// Whether any memory of `source` labelled private has a source ref
-    /// starting with `prefix` (ASCII). For an item whose memory key can't be
-    /// rebuilt from what a read sees, only the key's form is known.
-    pub fn private_ref_with_prefix(&self, source: &str, prefix: &str) -> Result<bool> {
-        // the refs in [prefix, prefix with its last character advanced) —
-        // a range the UNIQUE(source, source_ref) index answers
-        let mut upper = prefix.as_bytes().to_vec();
-        match upper.last_mut() {
-            Some(last) if prefix.is_ascii() && *last < 0x7f => *last += 1,
-            _ => return Err(anyhow!("a non-empty ASCII prefix is needed")),
+    /// Which of these refs is the source ref of a memory labelled private,
+    /// under ANY source the record holds — registered or not. A promoted
+    /// message keeps the name of the source it was promoted from, which may
+    /// since have been unregistered here, or never registered on this node
+    /// at all (the promotion synced from another); its label still holds
+    /// for every other path to the message.
+    pub fn private_refs_anywhere(
+        &self,
+        refs: &[String],
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut out = std::collections::HashSet::new();
+        if refs.is_empty() {
+            return Ok(out);
         }
-        let upper = String::from_utf8(upper)?;
         let conn = self.lock();
-        Ok(conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM episodes /* all-episodes: a private label holds even on a replaced memory */
-             WHERE source = ?1 AND source_ref >= ?2 AND source_ref < ?3 AND scope = 'private')",
-            rusqlite::params![source, prefix, upper],
-            |row| row.get::<_, bool>(0),
-        )?)
+        for source in sources_held(&conn)? {
+            for chunk in refs.chunks(400) {
+                let marks = vec!["?"; chunk.len()].join(",");
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT source_ref FROM episodes /* all-episodes: a private label holds even on a replaced memory */
+                     WHERE scope = 'private' AND source = ?1 AND source_ref IN ({marks})"
+                ))?;
+                let params: Vec<&dyn rusqlite::ToSql> =
+                    std::iter::once(&source as &dyn rusqlite::ToSql)
+                        .chain(chunk.iter().map(|r| r as &dyn rusqlite::ToSql))
+                        .collect();
+                let rows = stmt.query_map(params.as_slice(), |row| row.get::<_, String>(0))?;
+                for r in rows {
+                    out.insert(r?);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The source refs of memories labelled private, under any source,
+    /// that hold an angle bracket or whitespace. A mail import keys a
+    /// message by its Message-ID header with the brackets at its ends
+    /// trimmed, so a header written with more than the bare `<id>` (a
+    /// comment beside it, folding) leaves a key like these, which a MIME
+    /// parser's reading of the same header doesn't equal. Reads only the
+    /// private rows (the v41 private-id index), never the whole record.
+    pub fn private_refs_not_bare(&self) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT source_ref FROM episodes /* all-episodes: a private label holds even on a replaced memory */
+             WHERE id IN (SELECT id FROM episodes /* all-episodes: the private-id set */ WHERE scope = 'private')
+               AND (instr(source_ref, '<') > 0 OR instr(source_ref, '>') > 0
+                    OR instr(source_ref, ' ') > 0 OR instr(source_ref, char(9)) > 0)",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Whether any memory labelled private, under any source, has a source
+    /// ref starting with `prefix` (ASCII). For an item whose memory key
+    /// can't be rebuilt from what a read sees, only the key's form is known.
+    pub fn private_ref_prefixed_anywhere(&self, prefix: &str) -> Result<bool> {
+        let upper = prefix_end(prefix)?;
+        let conn = self.lock();
+        for source in sources_held(&conn)? {
+            let found: Option<i64> = conn
+                .query_row(
+                    "SELECT 1 FROM episodes /* all-episodes: a private label holds even on a replaced memory */
+                     WHERE source = ?1 AND source_ref >= ?2 AND source_ref < ?3 AND scope = 'private'
+                     LIMIT 1",
+                    rusqlite::params![source, prefix, upper],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if found.is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Every memory labelled private, under any source, whose source ref
+    /// starts with `prefix` (ASCII): its source, source ref and content
+    /// hash. All of them — the caller reads what it needs from each.
+    pub fn private_prefixed_anywhere(&self, prefix: &str) -> Result<Vec<PrivateMemory>> {
+        let upper = prefix_end(prefix)?;
+        let conn = self.lock();
+        let mut out = Vec::new();
+        for source in sources_held(&conn)? {
+            // the refs in [prefix, prefix with its last character advanced)
+            // — a range the UNIQUE(source, source_ref) index answers
+            let mut stmt = conn.prepare(
+                "SELECT source_ref, content_hash FROM episodes /* all-episodes: a private label holds even on a replaced memory */
+                 WHERE source = ?1 AND source_ref >= ?2 AND source_ref < ?3 AND scope = 'private'",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![source, prefix, upper], |row| {
+                Ok(PrivateMemory {
+                    source: source.clone(),
+                    source_ref: row.get(0)?,
+                    content_hash: row.get(1)?,
+                })
+            })?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The stored text of a memory labelled private — for a privacy check
+    /// to read the item's identity from (a promoted message's Message-ID),
+    /// never to show. None: no such private memory, or no text stored.
+    pub fn private_memory_text(&self, source: &str, source_ref: &str) -> Result<Option<String>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT f.body FROM episodes e /* all-episodes: a private label holds even on a replaced memory */
+             JOIN episode_fts f ON f.rowid = e.fts_rowid
+             WHERE e.source = ?1 AND e.source_ref = ?2 AND e.scope = 'private'",
+            [source, source_ref],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     pub fn list_privacy_rules(&self) -> Result<Vec<PrivacyRule>> {
