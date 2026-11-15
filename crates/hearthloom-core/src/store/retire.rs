@@ -238,17 +238,26 @@ pub(crate) fn undo_behind(
     mark: &str,
     behind: &str,
 ) -> Result<()> {
+    set_prior_superseded(conn, episode_id, mark, Some(behind))
+}
+
+/// What undoing the retirement `mark` (`retired:<id>`) gives a retired
+/// episode back: `superseded_by` = `prior` (None: in view). A repaired
+/// record settled while retired uses it, so the undo restores the state
+/// the record has now rather than the one it had when it was retired.
+pub(crate) fn set_prior_superseded(
+    conn: &Connection,
+    episode_id: &str,
+    mark: &str,
+    prior: Option<&str>,
+) -> Result<()> {
     let Some(rid) = mark.strip_prefix(RETIRED_PREFIX) else {
         return Ok(());
     };
     conn.execute(
         "UPDATE retirement_rows SET prior = ?1
          WHERE retirement_id = ?2 AND tbl = 'episodes' AND op = 'updated' AND row_key = ?3",
-        params![
-            json!({"superseded_by": behind}).to_string(),
-            rid,
-            episode_id
-        ],
+        params![json!({"superseded_by": prior}).to_string(), rid, episode_id],
     )?;
     Ok(())
 }

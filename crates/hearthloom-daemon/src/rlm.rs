@@ -551,6 +551,7 @@ fn run_tool(state: &AppState, tool: &str, args: &Value) -> Result<String> {
                 .get("query")
                 .and_then(|q| q.as_str())
                 .ok_or_else(|| anyhow!("sql needs args.query"))?;
+            crate::virtual_source::before_mail_sql(state, query);
             let (columns, rows) = state.store.read_query(query, 120)?;
             // Per-cell cap: generous, and NEVER silent — a 60-char cap
             // once amputated the answer off the end of a 78-char note
@@ -1548,6 +1549,7 @@ async fn run_map(
         .filter(|i| !i.is_empty())
         .ok_or_else(|| anyhow!("map needs args.instruction"))?;
     let instruction: String = instruction.chars().take(500).collect();
+    crate::virtual_source::before_mail_sql(state, sql);
     let (columns, rows) = state.store.read_query_public(sql, MAP_MAX_ROWS)?;
     if rows.is_empty() {
         return Ok("no rows".into());

@@ -90,6 +90,10 @@ pub struct PrivateMemory {
     pub source: String,
     pub source_ref: String,
     pub content_hash: String,
+    /// Who first wrote it: its recorded origin's writer (a peer's from the
+    /// origin it sent), or — written here before origins were kept — the
+    /// row's own actor. None: not known (a peer sent no origin).
+    pub writer: Option<String>,
 }
 
 /// Every source the record holds memories under, whatever is registered:
@@ -366,24 +370,32 @@ impl Store {
     }
 
     /// Every memory labelled private, under any source, whose source ref
-    /// starts with `prefix` (ASCII): its source, source ref and content
-    /// hash. All of them — the caller reads what it needs from each.
+    /// starts with `prefix` (ASCII): its source, source ref, content hash
+    /// and writer. All of them — the caller reads what it needs from each.
     pub fn private_prefixed_anywhere(&self, prefix: &str) -> Result<Vec<PrivateMemory>> {
         let upper = prefix_end(prefix)?;
         let conn = self.lock();
         let mut out = Vec::new();
         for source in sources_held(&conn)? {
             // the refs in [prefix, prefix with its last character advanced)
-            // — a range the UNIQUE(source, source_ref) index answers
+            // — a range the UNIQUE(source, source_ref) index answers. The
+            // writer as `provenance::origin_on` reads it: the recorded
+            // origin's, else (no record: written before v61) the row's own
+            // actor, which for a synced row names only the peer.
             let mut stmt = conn.prepare(
-                "SELECT source_ref, content_hash FROM episodes /* all-episodes: a private label holds even on a replaced memory */
-                 WHERE source = ?1 AND source_ref >= ?2 AND source_ref < ?3 AND scope = 'private'",
+                "SELECT e.source_ref, e.content_hash,
+                        CASE WHEN o.episode_id IS NULL THEN e.actor ELSE o.writer END
+                 FROM episodes e /* all-episodes: a private label holds even on a replaced memory */
+                 LEFT JOIN episode_origin o ON o.episode_id = e.id
+                 WHERE e.source = ?1 AND e.source_ref >= ?2 AND e.source_ref < ?3
+                   AND e.scope = 'private'",
             )?;
             let rows = stmt.query_map(rusqlite::params![source, prefix, upper], |row| {
                 Ok(PrivateMemory {
                     source: source.clone(),
                     source_ref: row.get(0)?,
                     content_hash: row.get(1)?,
+                    writer: row.get(2)?,
                 })
             })?;
             for row in rows {

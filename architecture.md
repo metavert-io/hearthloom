@@ -197,6 +197,67 @@ record their inputs) are rewritten without it rather than patched. The
 retirement EVENT syncs; each node applies it to its own rows, and one
 undo, anywhere, puts everything back everywhere. See `store/retire.rs`.
 
+**Owner repairs** (schema v69) replace a memory an earlier version stored
+wrongly — mail left encoded, a calendar event that took in its alarm's
+text — which importing again can't fix (the ref keeps its first text; a
+retired ref never lands again). The owner runs `hearthloom repair mail` or
+`hearthloom repair calendar --file …` (a dry run unless `--apply`); the
+daemon reads the original again with the current importer (mail from the
+node's own archives: every archived copy under the Message-ID, the one
+outside Spam and Trash with the memory's date and sender, left alone when
+such copies disagree or while any archive can't be read; calendar events
+only where the .ics importer stored them, never the phone's live feed, and
+an event stored under an earlier ref only when its Event entity holds the
+UID — a UID that merely begins the same way is another event) and the
+corrected copy lands as
+`<base>#repair:<hash>`, written as `repair:owner`. Whether an episode
+replaces another is decided by that recorded writer, never by its ref —
+mail and calendar refs are chosen by senders — and only the repair itself
+may write as it, so a look-alike ref from anyone else replaces nothing, on
+any node. Each node settles a repaired record (the memory and its
+corrected copies) from what it holds: the newest copy whose run wasn't
+undone stands in view, the rest behind it; copies share the record's
+label (a private one spreads; one the owner takes out of the vault comes
+out for the whole record), and its retirement (also on a node that held a
+copy from before it knew the rule, once the run reaches it). A run is a
+synced row carrying the copies it made (`repair_copies`, v71, a set every
+node unions — two nodes can make the same copy under runs of their own);
+undoing it brings the original back in view on every node, hides the
+copies it made even where the original hasn't arrived yet, and can't
+itself be taken back. Every node publishes `roles.repairs` in
+the node list; applying is refused while a node seen in the last 30 days
+lacks it (it would show the corrected copy beside the original), unless
+the owner says otherwise. The same
+mechanism repairs ChatGPT conversations (`hearthloom repair chatgpt
+--export …`: the branch each ended on, replacing only a transcript with
+abandoned turns mixed in whose every turn the export holds; "do not
+remember" into the vault before any copy lands) and Apple Health days and
+workouts (`repair health --export …`; a day only when the export holds
+every tracker and measure it shows — a sleep stage of a tracker whose
+night isn't shown counts as held). Sources
+with a revision rule of their own are re-minted under it instead of
+getting a `#repair:` copy, still written as `repair:owner` under the run:
+`repair copies` re-mints growing sources' days and sessions stored under
+an unversioned ref from their stored text (each node re-mints its own
+when the run reaches it, and the growing rule shows the fullest copy
+everywhere), and `repair photo-days` re-mints a photo day whose count is
+inflated by duplicate photos under its next revision when the photos held
+here cover every one it shows, its ledger set with it. Every node checks
+that coverage for itself: the correction stands on another node only over
+the copies of the day it holds there (by that node's photos, whenever
+they arrive), takes the day's private label there, and a node's finalize
+pass mints past every revision it stores — past another node's only when
+its photos hold every one that copy shows. Undoing a re-mint
+puts the copy that stood before back in view (a photo day's ledger at the
+run's revision, so the next finalize mint goes past it), a copy of an
+undone run that arrives later stays behind — behind the original's id
+when the original hasn't arrived yet — and asking again doesn't make
+an undone correction again. A later read of the owner's files that puts
+an undone `copies` copy back in view is recorded (`repair_revived`, v72)
+and travels with the run, so every node puts it back (one that holds the
+copy but not yet the original too). See
+`store/repair.rs` (the rule) and daemon `repair.rs` (the scans).
+
 ### 4.2 The graph: derived, bi-temporal, reversible
 
 `entities`, `entity_attributes`, `episode_entities`, `edges` and
@@ -330,9 +391,29 @@ Four ways in:
    never read as done, and an index rebuild that can't read the old index
    leaves it in place. A message's privacy is read again after its memory
    is made, since the memory can arrive private; a message found private
-   then makes the thread it joined private, so no model sorts it. Triage
-   also looks each thread's memories up again just before a model reads
-   it, so a pull that stopped in between leaves no private mail to sort.
+   then makes the thread it joined private, so no model sorts it — a label
+   re-read does so straight from the record, before it reads the index
+   again, so a sorted thread doesn't stay in view when that read fails.
+   Triage also looks each thread's memories up again just before a model
+   reads it, by every key the thread index kept for them (v70), so a
+   memory that turned private some other way leaves no private mail to
+   sort; a message recorded before v70, or one another node recorded in a
+   thread that reached this node (the thread index is each node's own),
+   has those keys read from its live archive here, and a thread whose
+   keys can't be read there waits — not sorted, its label left as it is —
+   until they can be (a node that took over another node's mailbox holds
+   none of its archive). While a
+   private promotion an earlier version kept under a Gmail uid is in the
+   vault, no message can be told apart from it: mail is held (readers
+   count every message private; a viewer whose vault is locked sees no
+   mail thread, draft or ember's queued message at all, though no thread
+   is relabelled; nothing records a thread as private on that account —
+   the pull, triage, embers' queues and the backfill wait), the log names
+   that memory, and so does the triage status for an owner whose vault is
+   open. Only a promotion a person may have made holds mail — not a
+   memory an importer or someone else's key wrote; one whose writer isn't
+   known does — whatever its source is registered as now, or whether it
+   is registered at all.
    Mail from any of the owner's mailboxes, or an alias listed on one, is
    the owner's own.
 
@@ -833,6 +914,10 @@ history are in `CLAUDE.md` and the design log.
 - Peer sync merges and never replaces; deletes cross only by journal.
 - Every reader of the record honours supersession (so retirement); a
   build-failing test scans for readers that don't.
+- A ref's shape never decides supersession for a source whose refs come
+  from outside: only the record's own revisioned sources, an ember's own
+  writing, and the owner's repairs supersede — the last two judged by the
+  recorded writer.
 
 **Privacy**
 - Every new read query carries the scope guard.
@@ -866,6 +951,31 @@ node)
 Things this document's author looked for and could not confirm, or that
 are decided but not built:
 
+- An owner repair re-derives a memory's entity links from the corrected
+  text and carries over only the links the extraction pass found; the
+  edges the old text asserted keep their support from the replaced copy
+  (as with every superseded episode), so a leaked calendar attendee's
+  `attended` edge stays until something retracts it. Repairs reach mail
+  stored under `mbox` and events the `.ics` importer stored; a promoted
+  message isn't covered, and an event the live calendar feed stored is
+  left as it is (`other_writer`), as is a memory whose original the node
+  didn't record the writer of (synced before provenance). A mail memory
+  whose Message-ID names archived messages that read differently is left
+  (`ambiguous`).
+- `repair copies` can't settle two nodes' copies of one day that hold the
+  same count with different texts (the growing rule names copies by their
+  count). `repair photo-days` sets the minted ledger only on the node it
+  runs on; another node keeps its own until the repair runs there too
+  (the re-minted day reaches it either way). It checks coverage against
+  the photos stored on its own node: a node holding photos not yet synced
+  there shows the re-minted day until they arrive and the finalize pass
+  mints the next revision (as with any finalize revision). A re-minted
+  copy keeps the links of the text it was made from, not its edges.
+- `repair chatgpt` and `repair health` can only tell an older export by
+  what it lacks: a ChatGPT transcript is left when it holds a turn the
+  export doesn't, a health day when it names a tracker or a kind of
+  measure the export doesn't hold for it — fewer samples from the same
+  tracker can't be seen. Give the newest export.
 - Retirement can't trace everything a memory touched: entity attributes
   (an email address it introduced) don't record their source, nor do
   relationship briefs and topic pages; digests and weekly reviews written

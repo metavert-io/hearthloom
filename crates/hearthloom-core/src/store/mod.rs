@@ -47,6 +47,7 @@ mod provenance;
 mod quarantine;
 mod recall;
 mod relationships;
+mod repair;
 mod resolve;
 mod retire;
 mod search;
@@ -106,13 +107,21 @@ pub use owned::{
     Judgement as OwnedJudgement, OwnableSource, OwnedSourceChange, OwnedSourceRow, NOT_OWNABLE,
     OWNABLE_SOURCES,
 };
-pub use photo::{keys_hash as photo_keys_hash, PhotoPointIn, StoredPhotoPoint};
+pub use photo::{
+    keys_hash as photo_keys_hash, photo_day_lines, photos_missing, HeldPhoto, PhotoDayRecord,
+    PhotoPointIn, StoredPhotoPoint,
+};
 pub use plugins::PluginRow;
 pub use privacy::{PrivacyRule, PrivateMemory};
 pub use provenance::{others_words, trust_for, Hop, Origin, OTHERS_WORDS_SOURCES};
 pub use quarantine::{outside_proposal, QuarantineEntry, PROPOSAL_KINDS};
 pub use recall::DayView;
 pub use relationships::{DirectoryRow, RelationshipRow, RELATIONSHIP_KINDS};
+pub use repair::{
+    replacement_base, replacement_ref, CopyFinding, PhotoLedger, RepairApplied, RepairItem,
+    RepairRun, RepairTarget, RepairWork, SameEvent, COPIES_KIND, PHOTO_DAYS_KIND,
+    REPAIRABLE_SOURCES, REPAIR_MARK, REPAIR_WRITER,
+};
 pub use retire::{
     base_ref, RetireCounts, RetirementRow, RewriteJob, RETIRED_PREFIX, SUMMARY_KINDS,
 };
@@ -183,6 +192,13 @@ pub struct Store {
     /// (vectors.rs). Once true it stays true — dual-write keeps parity and
     /// chunks are never deleted — so searches skip the coverage count.
     vec_ready: std::sync::atomic::AtomicBool,
+    /// Mail is held (the daemon's `virtual_source::MailHold`: a private
+    /// promotion an earlier version kept can't be told apart from any
+    /// message). While it is, the mail readers — threads, counts, drafts,
+    /// the raw-sql views (embers' queued matches too) — show a viewer whose
+    /// vault is locked nothing, without relabelling anything. Set by the daemon
+    /// each time it reads the hold; runtime only.
+    mail_held: std::sync::atomic::AtomicBool,
 }
 
 /// The life areas a scoped key can be limited to. `private` is never one
@@ -325,7 +341,7 @@ impl Drop for ReadScopeGuard {
     }
 }
 
-const SCHEMA_VERSION: i64 = 68;
+const SCHEMA_VERSION: i64 = 72;
 
 const SCHEMA_V1: &str = "
     -- L2: append-only ground truth. Raw content lives on disk at
@@ -606,6 +622,20 @@ const VAULT_SHADOW_DROP: &str = "
     DROP VIEW IF EXISTS temp.task_mentions;
     DROP VIEW IF EXISTS temp.social_connections;
     DROP VIEW IF EXISTS temp.semantic_pairs;
+    DROP VIEW IF EXISTS temp.mail_drafts;
+    DROP VIEW IF EXISTS temp.mail_matches;
+";
+
+/// While mail is held (`Store::mail_held`), a read that hides private rows
+/// sees no mail thread, no draft (of a thread, or an ember's of a message)
+/// and no message queued for an ember: any of them can be the message the
+/// hold is for. Created after VAULT_SHADOW_VIEWS, replacing its
+/// mail_threads view; dropped by VAULT_SHADOW_DROP.
+const MAIL_HELD_SHADOW_VIEWS: &str = "
+    DROP VIEW IF EXISTS temp.mail_threads;
+    CREATE TEMP VIEW mail_threads AS SELECT * FROM main.mail_threads WHERE 0;
+    CREATE TEMP VIEW mail_drafts AS SELECT * FROM main.mail_drafts WHERE 0;
+    CREATE TEMP VIEW mail_matches AS SELECT * FROM main.mail_matches WHERE 0;
 ";
 
 /// Register the sqlite-vec extension for every connection this process
@@ -2327,6 +2357,70 @@ impl Store {
                  );",
             )?;
         }
+        if version < 69 {
+            // v69: owner repairs (store/repair.rs) — a memory an earlier
+            // version stored wrongly is replaced by a corrected copy the
+            // owner asks for, written as `repair:owner` and recognised by
+            // that recorded writer. `repairs` is the run (synced, LWW by
+            // updated_at; its undo is a stamp); the partial index finds the
+            // copies a run made.
+            conn.execute_batch(
+                "CREATE TABLE repairs (
+                     id TEXT PRIMARY KEY,
+                     kind TEXT NOT NULL,
+                     replaced INTEGER NOT NULL DEFAULT 0,
+                     added INTEGER NOT NULL DEFAULT 0,
+                     actor TEXT NOT NULL,
+                     node TEXT,
+                     created_at TEXT NOT NULL,
+                     undone_at TEXT,
+                     updated_at TEXT NOT NULL
+                 );
+                 CREATE INDEX idx_episode_origin_repair ON episode_origin(session)
+                     WHERE writer = 'repair:owner';",
+            )?;
+            conn.execute_batch(&relay_stamp_sql("repairs", "synced_at", "updated_at", ""))?;
+        }
+        if version < 70 {
+            // v70: the keys each message's memory can be stored under, in the
+            // observing node's thread index (`MailSeen::memory_refs`, JSON;
+            // NULL for rows recorded before) — triage looks a thread's
+            // memories up by them before a model reads it, as `observe` does
+            // (the import's key can differ from a MIME parser's Message-ID).
+            conn.execute_batch("ALTER TABLE mail_thread_messages ADD COLUMN memory_refs TEXT;")?;
+        }
+        if version < 71 {
+            // v71: the copies each owner repair run made, on any node — a
+            // set every node unions (store/repair.rs). Two nodes that make
+            // the same correction before they sync hold one copy (its id is
+            // its content's) whose origin names a different run on each;
+            // an undo of either run reaches it through this set. Synced
+            // with each run on /v1/sync/repairs.
+            conn.execute_batch(
+                "CREATE TABLE repair_copies (
+                     run TEXT NOT NULL,
+                     episode_id TEXT NOT NULL,
+                     PRIMARY KEY (run, episode_id)
+                 );
+                 CREATE INDEX idx_repair_copies_episode ON repair_copies(episode_id);
+                 INSERT OR IGNORE INTO repair_copies (run, episode_id)
+                     SELECT session, episode_id FROM episode_origin
+                     WHERE writer = 'repair:owner' AND session IS NOT NULL;",
+            )?;
+        }
+        if version < 72 {
+            // v72: copies an undone owner repair run made that a later read
+            // of this machine's files put back in view (store/growing.rs
+            // `revive_undone_copy`) — a set every node unions, carried with
+            // each run on /v1/sync/repairs. A copy in it counts as a read's,
+            // not the undone run's, on every node.
+            conn.execute_batch(
+                "CREATE TABLE repair_revived (
+                     episode_id TEXT PRIMARY KEY,
+                     revived_at TEXT NOT NULL
+                 );",
+            )?;
+        }
         if version < SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -2334,10 +2428,23 @@ impl Store {
             conn: FairMutex::new(conn),
             vault_unlocks: Mutex::new(std::collections::HashMap::new()),
             vec_ready: std::sync::atomic::AtomicBool::new(false),
+            mail_held: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
     /* ————— the vault ————— */
+
+    /// Record whether mail is held (see the `mail_held` field).
+    pub fn set_mail_held(&self, held: bool) {
+        self.mail_held
+            .store(held, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Does the current read see no mail threads — mail is held and this
+    /// viewer's vault is locked?
+    pub(crate) fn mail_hidden(&self) -> bool {
+        self.mail_held.load(std::sync::atomic::Ordering::SeqCst) && !self.private_visible()
+    }
 
     /// Unlock private material for `minutes` (auto-relocks by deadline),
     /// for the CURRENT viewer only. With no viewer set (tests, tools) the
@@ -2544,7 +2651,14 @@ impl Store {
         } else {
             LIVE_SHADOW_VIEWS
         })?;
-        let result = Self::run_read_query(&conn, trimmed, max_rows);
+        let held = shadowed && self.mail_held.load(std::sync::atomic::Ordering::SeqCst);
+        let result = (|| {
+            // while mail is held no thread is shown where private ones aren't
+            if held {
+                conn.execute_batch(MAIL_HELD_SHADOW_VIEWS)?;
+            }
+            Self::run_read_query(&conn, trimmed, max_rows)
+        })();
         conn.execute_batch(VAULT_SHADOW_DROP)?;
         result
     }
@@ -2876,8 +2990,30 @@ pub(crate) fn journal_op(
     op: &str,
     post_image: Option<&JsonValue>,
 ) -> Result<()> {
+    journal_op_at(
+        conn,
+        actor,
+        entity_kind,
+        entity_id,
+        op,
+        post_image,
+        &now_utc(),
+    )
+}
+
+/// `journal_op` stamped `ts` — for a writer whose entry must not sort
+/// before the row's own stamp (a delete tombstone wins only at or after
+/// it).
+pub(crate) fn journal_op_at(
+    conn: &Connection,
+    actor: &Actor,
+    entity_kind: &str,
+    entity_id: &str,
+    op: &str,
+    post_image: Option<&JsonValue>,
+    ts: &str,
+) -> Result<()> {
     use std::hash::{Hash, Hasher};
-    let ts = now_utc();
     let body = post_image.map(|p| p.to_string()).unwrap_or_default();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     body.hash(&mut hasher);
@@ -2922,9 +3058,9 @@ mod tests {
     fn test_every_shadow_view_is_dropped() {
         // a view created for a locked read and never dropped makes the next
         // locked read fail ("view … already exists") — 0.5.92's mail_threads
-        for name in VAULT_SHADOW_VIEWS
-            .split("CREATE TEMP VIEW ")
-            .skip(1)
+        for name in [VAULT_SHADOW_VIEWS, MAIL_HELD_SHADOW_VIEWS]
+            .iter()
+            .flat_map(|views| views.split("CREATE TEMP VIEW ").skip(1))
             .filter_map(|v| v.split_whitespace().next())
         {
             assert!(

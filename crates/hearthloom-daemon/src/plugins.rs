@@ -948,6 +948,9 @@ pub fn plugin_route_allowed(path: &str, method: &str, scopes: &[String]) -> bool
             // the sources the owner says are theirs, and the owner's
             // addresses that decide them (the route checks the owner too)
             "/v1/owned-sources",
+            // owner repairs: what was replaced, and the runs (the routes
+            // check the owner and the vault too)
+            "/v1/repair",
         ];
         return path.starts_with("/v1/") && !DENIED.iter().any(|d| path.starts_with(d));
     }

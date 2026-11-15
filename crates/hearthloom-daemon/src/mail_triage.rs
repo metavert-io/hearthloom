@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 
 use crate::AppState;
 
-const BATCH: usize = 8;
+pub(crate) const BATCH: usize = 8;
 const TEXT_CHARS: usize = 1500;
 pub const KEY_ENABLED: &str = "mail.triage";
 pub const KEY_MODEL: &str = "mail.triage.model";
@@ -84,6 +84,9 @@ pub fn status(state: &AppState) -> Value {
         "provider": provider(state),
         "here": crate::gmail_watch::watching(state),
         "last": last,
+        // the memory mail is held for (virtual_source::MailHold) — only to
+        // a caller whose vault is open
+        "held": crate::virtual_source::mail_hold_for_viewer(state),
         "counts": state.store.mail_counts().unwrap_or_default()
             .into_iter().map(|(s, n)| json!({"state": s, "n": n})).collect::<Vec<_>>(),
     })
@@ -100,6 +103,28 @@ fn set_status(v: Value) {
 /// (mailboxes::owner_addresses) — mail from any of them is their own.
 pub fn seen(
     state: &AppState,
+    account: &str,
+    mine: &std::collections::BTreeSet<String>,
+    labels: &[String],
+    raw: &[u8],
+) -> Option<MailSeen> {
+    seen_with(
+        state,
+        &crate::virtual_source::MailPrivacy::new(state),
+        account,
+        mine,
+        labels,
+        raw,
+    )
+}
+
+/// `seen`, with the record's mail privacy read once for a batch (`privacy`).
+/// While mail is held (virtual_source::MailHold) a message nothing else
+/// says is private comes back `private` for whoever reads it, and `held`:
+/// `observe` records nothing of it.
+pub fn seen_with(
+    state: &AppState,
+    privacy: &crate::virtual_source::MailPrivacy,
     account: &str,
     mine: &std::collections::BTreeSet<String>,
     labels: &[String],
@@ -144,7 +169,7 @@ pub fn seen(
     // An error counts as private.
     let key =
         crate::virtual_source::mail_key(&String::from_utf8_lossy(raw), Some(message_id.as_str()));
-    let private = crate::virtual_source::mail_memory_private(state, &key).unwrap_or(true)
+    let private = privacy.key_found(&key).unwrap_or(true)
         || state
             .store
             .privacy_rules_match(&format!(
@@ -153,6 +178,7 @@ pub fn seen(
                 labels.join(", ")
             ))
             .unwrap_or(true);
+    let held = !private && matches!(privacy.hold(), Ok(Some(_)));
     let memory_refs = match key {
         crate::virtual_source::ItemKey::Refs(refs) => refs,
         _ => Vec::new(),
@@ -170,7 +196,8 @@ pub fn seen(
         primary: has("Category Personal") || has("Starred"),
         list_id,
         snippet: text.chars().take(300).collect(),
-        private,
+        private: private || held,
+        held,
         labels: labels.to_vec(),
         text: text
             .chars()
@@ -180,47 +207,78 @@ pub fn seen(
     })
 }
 
+/// A message's privacy as of now (`private_now`).
+#[derive(Debug, PartialEq)]
+enum Now {
+    Private,
+    Public,
+    /// Can't be told while mail is held (virtual_source::MailHold).
+    Held,
+}
+
 /// Whether a message is private as of now: what `seen` found, or a private
 /// label on its memory since — the pull makes a message's memory after
 /// reading it, and the memory can arrive private (its sender's identity is
 /// private, say). Looked up by `memory_refs`; without them (a memory keyed
-/// by its text) by the rule for such memories and its Message-ID.
-fn private_now(state: &AppState, s: &MailSeen) -> Result<bool> {
-    use crate::virtual_source::{mail_memory_private, ItemKey};
-    if s.private {
-        return Ok(true);
+/// by its text) by the rule for such memories and its Message-ID. While
+/// mail is held, one nothing says is private can't be told.
+fn private_now(privacy: &crate::virtual_source::MailPrivacy, s: &MailSeen) -> Result<Now> {
+    use crate::virtual_source::ItemKey;
+    // a rule, or its memory, said so when it was read
+    if s.private && !s.held {
+        return Ok(Now::Private);
     }
-    if s.memory_refs.is_empty() {
-        return Ok(mail_memory_private(state, &ItemKey::Unkeyed)?
-            || mail_memory_private(state, &ItemKey::Refs(vec![s.message_id.clone()]))?);
-    }
-    mail_memory_private(state, &ItemKey::Refs(s.memory_refs.clone()))
+    let found = if s.memory_refs.is_empty() {
+        privacy.key_found(&ItemKey::Unkeyed)?
+            || privacy.key_found(&ItemKey::Refs(vec![s.message_id.clone()]))?
+    } else {
+        privacy.key_found(&ItemKey::Refs(s.memory_refs.clone()))?
+    };
+    Ok(if found {
+        Now::Private
+    } else if privacy.hold()?.is_some() {
+        Now::Held
+    } else {
+        Now::Public
+    })
 }
 
 /// Record what the pull fetched; wake triage when anything changed.
 /// Returns the positions in `seen` of the messages not wholly recorded
 /// (their thread, or an ember's match): observing one again finishes it
-/// and adds nothing twice.
+/// and adds nothing twice. While mail is held, a message nothing says is
+/// private is not recorded at all (its thread could be made private for
+/// good on the hold's strength alone): it is among those returned.
 pub fn observe(state: &AppState, seen: &[MailSeen]) -> Vec<usize> {
     let mut changed = false;
     let mut failed = Vec::new();
+    // read after the pull made the memories, once for the batch
+    let privacy = crate::virtual_source::MailPrivacy::new(state);
     for (i, s) in seen.iter().enumerate() {
         // its privacy as of now: the pull made its memory after reading it
-        let now_private;
-        let s = match private_now(state, s) {
-            Ok(private) if private != s.private => {
-                now_private = MailSeen {
-                    private,
-                    ..s.clone()
-                };
-                &now_private
+        let private = match private_now(&privacy, s) {
+            Ok(Now::Private) => true,
+            Ok(Now::Public) => false,
+            Ok(Now::Held) => {
+                failed.push(i);
+                continue;
             }
-            Ok(_) => s,
             Err(err) => {
                 tracing::warn!("mail: a message's privacy unreadable: {err:#}");
                 failed.push(i);
                 continue;
             }
+        };
+        let now_private;
+        let s = if private != s.private || s.held {
+            now_private = MailSeen {
+                private,
+                held: false,
+                ..s.clone()
+            };
+            &now_private
+        } else {
+            s
         };
         let queued = match state
             .store
@@ -273,11 +331,18 @@ pub fn backfilled(state: &AppState, mb: &crate::mailboxes::Mailbox) -> bool {
         .is_some()
 }
 
+/// Returns how many messages it read; 0 without marking the mailbox done
+/// while mail is held (nothing it read could be recorded): it runs again
+/// once the hold ends.
 pub fn backfill(state: &AppState, mb: &crate::mailboxes::Mailbox) -> Result<usize> {
     let account = mb.address.clone();
     let mine = crate::mailboxes::owner_addresses(state);
     let mbox = mb.live_mbox_path(state);
     if !mbox.exists() || crate::mbox_index::is_stale(&mbox) {
+        return Ok(0);
+    }
+    let privacy = crate::virtual_source::MailPrivacy::new(state);
+    if privacy.hold()?.is_some() {
         return Ok(0);
     }
     let since = chrono::Utc::now() - chrono::Duration::days(BACKFILL_DAYS);
@@ -291,16 +356,28 @@ pub fn backfill(state: &AppState, mb: &crate::mailboxes::Mailbox) -> Result<usiz
         let Ok(raw) = crate::mbox_index::fetch(&mbox, &id, 2_000_000) else {
             continue;
         };
-        if let Some(s) = seen(state, &account, &mine, &labels, raw.as_bytes()) {
+        if let Some(s) = seen_with(state, &privacy, &account, &mine, &labels, raw.as_bytes()) {
             seen_all.push(s);
         }
     }
     let n = seen_all.len();
-    observe(state, &seen_all);
+    let failed = observe(state, &seen_all);
+    // a hold that began meanwhile left them all unrecorded: try again later
+    if !failed.is_empty() && failed.len() == n && privacy_held_now(state) {
+        return Ok(0);
+    }
     state
         .store
         .set_consolidation_state(&mb.key(KEY_BACKFILLED), &hearthloom_core::time::now_utc())?;
     Ok(n)
+}
+
+/// Whether mail is held now (an error reads as held: nothing is decided on it).
+fn privacy_held_now(state: &AppState) -> bool {
+    !matches!(
+        crate::virtual_source::MailPrivacy::new(state).hold(),
+        Ok(None)
+    )
 }
 
 /* ————— triage ————— */
@@ -592,31 +669,199 @@ async fn ask_api(
 /// makes it after reading the message), and a pull stopped before it saw
 /// the message again left the thread as it was; so the memories of each
 /// thread's messages are looked up again here, before any text is read for
-/// a model, and a thread with a private one is made private and left out.
-/// An error fails the round: nothing goes to a model.
-fn for_model(state: &AppState, threads: Vec<MailThread>) -> Result<Vec<MailThread>> {
-    let mut ids_of = Vec::with_capacity(threads.len());
+/// a model, by every key `observe` looked them up by (the thread index
+/// keeps each message's `memory_refs`), and a thread with a private one is
+/// made private and left out. A message recorded before the index kept
+/// those keys (v70) has them read again from the live archive it was
+/// pulled into (`keys_from_archive`) and kept; so does a thread's latest
+/// message when this node's index doesn't hold it (another node recorded
+/// it: the thread mirrored here, the index didn't). One whose keys can't
+/// be read there — the import keyed it under another Message-ID than the
+/// one the index knows, this node hasn't pulled it, or its archive is
+/// gone — can't be checked, so its thread waits: left out, its label as
+/// it is (nothing says its mail is private; a node that took over another
+/// node's mailbox holds none of its archive), and checked again next
+/// round. Returns the threads kept and how many wait. None while mail is
+/// held: no thread goes to a model, and none is made private on the
+/// hold's strength. An error fails the round: nothing goes to a model.
+fn for_model(
+    state: &AppState,
+    threads: Vec<MailThread>,
+) -> Result<Option<(Vec<MailThread>, usize)>> {
+    use crate::virtual_source::ItemKey;
+    let archives = crate::mailboxes::live_archives(state)?;
+    // per thread: each message's id and the keys its memory can be under
+    // (None: keys that can't be read — the id alone), and whether a
+    // message's keys can't be known
+    let mut messages_of = Vec::with_capacity(threads.len());
+    let mut unknown_of = Vec::with_capacity(threads.len());
     for t in &threads {
         // this node's index of the thread, and its latest message (the
         // index is the observing node's own)
-        let mut ids = state.store.mail_thread_message_ids(&t.id)?;
-        ids.extend(t.last_message_id.clone());
-        ids.sort();
-        ids.dedup();
-        ids_of.push(ids);
+        let mut messages = Vec::new();
+        let mut unknown = false;
+        for (id, refs) in state.store.mail_thread_message_keys(&t.id)? {
+            let refs = match refs {
+                Some(refs) => Some(refs),
+                None => {
+                    let refs = keys_from_archive(&archives, &id)?;
+                    match &refs {
+                        Some(refs) => state.store.mail_thread_message_set_refs(&id, refs)?,
+                        // the id alone: not a memory keyed by its text
+                        None => unknown = true,
+                    }
+                    refs
+                }
+            };
+            messages.push((id, refs));
+        }
+        // A latest message this node's index doesn't hold: another node
+        // recorded it (threads mirror, the index doesn't). Its keys are read
+        // from a live archive here, as for one recorded before v70; when
+        // they can't be, it can't be checked.
+        if let Some(last) = &t.last_message_id {
+            if !messages.iter().any(|(id, _)| id == last) {
+                let refs = keys_from_archive(&archives, last)?;
+                unknown |= refs.is_none();
+                messages.push((last.clone(), refs));
+            }
+        }
+        messages_of.push(messages);
+        unknown_of.push(unknown);
     }
-    let all: Vec<String> = ids_of.iter().flatten().cloned().collect();
-    let private = crate::virtual_source::private_mail_ids(state, &all)?;
+    let all: Vec<String> = messages_of
+        .iter()
+        .flatten()
+        .flat_map(|(id, refs)| std::iter::once(id).chain(refs.iter().flatten()))
+        .cloned()
+        .collect();
+    let privacy = crate::virtual_source::MailPrivacy::new(state);
+    let found = privacy.found(&all)?;
+    // a message whose memory is keyed by its text: as `private_now` judges it
+    let unkeyed = if messages_of
+        .iter()
+        .flatten()
+        .any(|(_, refs)| refs.as_ref().is_some_and(|r| r.is_empty()))
+    {
+        privacy.key_found(&ItemKey::Unkeyed)?
+    } else {
+        false
+    };
+    let held = privacy.hold()?.is_some();
     let mut kept = Vec::new();
-    for (t, ids) in threads.into_iter().zip(ids_of) {
-        if ids.iter().any(|id| private.contains(id)) {
+    let mut waiting = 0;
+    for ((t, messages), unknown) in threads.into_iter().zip(messages_of).zip(unknown_of) {
+        let private = messages.iter().any(|(id, refs)| {
+            found.contains(id)
+                || match refs {
+                    Some(refs) if refs.is_empty() => unkeyed,
+                    Some(refs) => refs.iter().any(|r| found.contains(r)),
+                    None => false,
+                }
+        });
+        if private {
             state.store.mail_thread_make_private(&actor(), &t.id)?;
             tracing::info!("mail: a thread's mail is private now: made private, not sorted");
+        } else if unknown {
+            waiting += 1;
         } else {
             kept.push(t);
         }
     }
-    Ok(kept)
+    if waiting > 0 {
+        tracing::debug!(
+            "mail: {waiting} thread(s) whose mail this node can't check yet (no memory keys \
+             here, none in a live archive here): left waiting, not sorted"
+        );
+    }
+    Ok((!held).then_some((kept, waiting)))
+}
+
+/// The keys a message's memory can be stored under (`message_keys`), read
+/// from the live archive that holds it under `id`; None when none does
+/// (the import keyed it under another Message-ID than the one the thread
+/// index knows — a comment beside it, a second Message-ID header — or the
+/// archive is gone). A message held under `id` whose own Message-ID reads
+/// otherwise is another message. An archive that can't be read is an
+/// error.
+fn keys_from_archive(archives: &[std::path::PathBuf], id: &str) -> Result<Option<Vec<String>>> {
+    use crate::virtual_source::ItemKey;
+    for archive in archives {
+        let Some(head) = crate::mbox_index::head_of(archive, id)? else {
+            continue;
+        };
+        match message_keys(&head) {
+            Some((parsed, key)) if parsed == id => {
+                return Ok(Some(match key {
+                    ItemKey::Refs(refs) => refs,
+                    _ => Vec::new(),
+                }))
+            }
+            _ => continue,
+        }
+    }
+    Ok(None)
+}
+
+/// A message's id as the thread index keys it (a MIME parser's reading of
+/// its Message-ID) and the key its memory is read by (`mail_key`); None
+/// without a Message-ID.
+pub(crate) fn message_keys(raw: &[u8]) -> Option<(String, crate::virtual_source::ItemKey)> {
+    let parsed = mail_parser::MessageParser::default()
+        .parse_headers(raw)?
+        .message_id()?
+        .to_string();
+    let key = crate::virtual_source::mail_key(&String::from_utf8_lossy(raw), Some(&parsed));
+    Some((parsed, key))
+}
+
+/// Make private, at once, the threads of these messages (`message_keys`)
+/// whose memory is labelled private — read from the record alone, so it
+/// holds when the archive's index can't be read: the label re-read calls
+/// it right after making memories, before it reads the index again. What
+/// the hold can't tell is left as it is. Returns the threads it changed.
+pub(crate) fn close_private_threads(
+    state: &AppState,
+    messages: &[(String, crate::virtual_source::ItemKey)],
+) -> Result<usize> {
+    use crate::virtual_source::ItemKey;
+    if messages.is_empty() {
+        return Ok(0);
+    }
+    let privacy = crate::virtual_source::MailPrivacy::new(state);
+    let ids: Vec<String> = messages
+        .iter()
+        .flat_map(|(id, key)| match key {
+            ItemKey::Refs(refs) => refs.clone(),
+            _ => vec![id.clone()],
+        })
+        .collect();
+    let found = privacy.found(&ids)?;
+    let unkeyed = if messages
+        .iter()
+        .any(|(_, key)| matches!(key, ItemKey::Unkeyed))
+    {
+        privacy.key_found(&ItemKey::Unkeyed)?
+    } else {
+        false
+    };
+    let mut closed = 0;
+    for (id, key) in messages {
+        let private = match key {
+            ItemKey::Refs(refs) => refs.iter().any(|r| found.contains(r)),
+            ItemKey::Unkeyed => unkeyed || found.contains(id),
+            ItemKey::Path => false,
+        };
+        if !private {
+            continue;
+        }
+        if let Some(thread) = state.store.mail_thread_of_message(id)? {
+            if state.store.mail_thread_make_private(&actor(), &thread)? {
+                closed += 1;
+            }
+        }
+    }
+    Ok(closed)
 }
 
 /// Sort the threads waiting for it, one batch. Returns how many were sorted.
@@ -630,11 +875,15 @@ pub(crate) async fn triage_for(state: &AppState, duty: &crate::mailboxes::Duty) 
     if duty.is_idle() {
         return Ok(0);
     }
+    // threads that wait stay in the queue, ahead of the next page
+    let mut skip = 0;
     let threads = loop {
-        let batch =
-            state
-                .store
-                .mail_threads_to_triage_for(BATCH, &duty.mine, duty.unwatched.as_deref())?;
+        let batch = state.store.mail_threads_to_triage_from(
+            skip,
+            BATCH,
+            &duty.mine,
+            duty.unwatched.as_deref(),
+        )?;
         if batch.is_empty() {
             return Ok(0);
         }
@@ -642,9 +891,17 @@ pub(crate) async fn triage_for(state: &AppState, duty: &crate::mailboxes::Duty) 
         let kept = tokio::task::spawn_blocking(move || for_model(&st, batch))
             .await
             .map_err(|err| anyhow!("checking threads' privacy: {err}"))??;
-        // a batch made private all leaves the queue: the next one is new
-        if !kept.is_empty() {
-            break kept;
+        match kept {
+            // mail is held: nothing is sorted until it ends
+            None => return Ok(0),
+            Some((kept, _)) if !kept.is_empty() => break kept,
+            // a batch made private leaves the queue, one that waits is
+            // paged past: the next one is new (after a pause for whoever
+            // waits on the store)
+            Some((_, waiting)) => {
+                skip += waiting;
+                tokio::time::sleep(Duration::from_millis(50)).await
+            }
         }
     };
     let plain: Vec<String> = state
@@ -758,6 +1015,9 @@ pub async fn run_loop(state: AppState) {
                 }
                 let (st, m) = (state.clone(), mb.clone());
                 match tokio::task::spawn_blocking(move || backfill(&st, &m)).await {
+                    // nothing read: nothing to say (while mail is held it
+                    // waits, and tries again next round)
+                    Ok(Ok(0)) => {}
                     Ok(Ok(n)) => tracing::info!(
                         "mail: the last two weeks of {} read into threads ({n} messages)",
                         mb.address

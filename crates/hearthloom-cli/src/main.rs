@@ -12,6 +12,7 @@ mod mail;
 mod mine;
 mod ops;
 mod registry;
+mod repair;
 
 use std::path::PathBuf;
 
@@ -191,6 +192,19 @@ enum Cmd {
         #[arg(long)]
         verbose: bool,
     },
+    /// Repair memories an earlier version stored wrongly: a corrected copy
+    /// takes each one's place (owner only, vault unlocked). A dry run —
+    /// counts, episode ids and short reasons — unless --apply; `undo` puts
+    /// a run's memories back.
+    Repair {
+        /// Apply even while one of your nodes runs a version that doesn't
+        /// know repairs (there the corrected copy shows beside the original
+        /// until it is upgraded).
+        #[arg(long, global = true)]
+        allow_older_nodes: bool,
+        #[command(subcommand)]
+        command: RepairCmd,
+    },
     /// Recall a day (--on), a span (--from/--to), or an entity's episodes.
     Recall {
         #[arg(long)]
@@ -336,6 +350,93 @@ enum KeyCmd {
     List,
     Revoke {
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum RepairCmd {
+    /// Mail stored still encoded (an encoded subject or name, a base64 or
+    /// quoted-printable body, raw MIME parts): read again from this node's
+    /// archives and decoded. A message no local archive holds is listed
+    /// and left.
+    Mail {
+        /// Replace them (default: a dry run that changes nothing).
+        #[arg(long, conflicts_with = "dry_run")]
+        apply: bool,
+        /// List what would change (the default).
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Calendar events stored with text the current importer reads
+    /// otherwise (an alarm's attendee or description taken in), and
+    /// occurrences not stored yet, from these .ics files.
+    Calendar {
+        /// A calendar file (repeat for more).
+        #[arg(long = "file", required = true)]
+        files: Vec<PathBuf>,
+        #[arg(long, conflicts_with = "dry_run")]
+        apply: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// ChatGPT conversations read again from an export (a folder or zip
+    /// with conversations.json or conversations-NNN.json): a stored
+    /// conversation whose transcript differs (abandoned branches mixed in)
+    /// is replaced, one flagged "do not remember" ends private. Reads the
+    /// export on this machine.
+    Chatgpt {
+        /// The export: a folder or a zip.
+        #[arg(long)]
+        export: PathBuf,
+        #[arg(long, conflicts_with = "dry_run")]
+        apply: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Apple Health day summaries and workouts read again from an export
+    /// (export.zip, its export.xml, or the folder holding it): one whose
+    /// text differs is replaced. Days and workouts the export doesn't
+    /// cover are listed and left. Reads the export on this machine.
+    Health {
+        /// The export: export.zip, export.xml, or its folder.
+        #[arg(long)]
+        export: PathBuf,
+        #[arg(long, conflicts_with = "dry_run")]
+        apply: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Chrome days, iMessage chat-days and Claude Code sessions an earlier
+    /// version stored under an unversioned ref, re-minted from their stored
+    /// text as copies named by what they hold, so every node shows the
+    /// fullest. Each re-mint is a new episode on every node; your other
+    /// nodes re-mint their own copies when the run reaches them.
+    Copies {
+        #[arg(long, conflicts_with = "dry_run")]
+        apply: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Photo days minted while photos were stored twice (an inflated
+    /// count): re-minted when the photos stored here cover every one the
+    /// day shows; a day showing photos this node doesn't hold is left.
+    PhotoDays {
+        #[arg(long, conflicts_with = "dry_run")]
+        apply: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// The repair runs, newest first.
+    List,
+    /// Undo a run: the memories it replaced are back in view here and on
+    /// your other nodes (at their next sync). What it added stays. It
+    /// can't be taken back — the same corrections aren't made again — so
+    /// it only explains itself unless --yes.
+    Undo {
+        run: String,
+        /// Undo it.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -1786,6 +1887,29 @@ async fn main() -> Result<()> {
             let client = Client::with_url(home, url.clone())?;
             mine::run(&client, op, as_json).await?;
         }
+        Cmd::Repair {
+            command,
+            allow_older_nodes,
+        } => {
+            let op = match command {
+                RepairCmd::Mail { apply, .. } => repair::Op::Mail { apply },
+                RepairCmd::Calendar { files, apply, .. } => repair::Op::Calendar { files, apply },
+                RepairCmd::Chatgpt { export, apply, .. } => {
+                    local_only("repair chatgpt", &url)?;
+                    repair::Op::Chatgpt { export, apply }
+                }
+                RepairCmd::Health { export, apply, .. } => {
+                    local_only("repair health", &url)?;
+                    repair::Op::Health { export, apply }
+                }
+                RepairCmd::Copies { apply, .. } => repair::Op::Copies { apply },
+                RepairCmd::PhotoDays { apply, .. } => repair::Op::PhotoDays { apply },
+                RepairCmd::List => repair::Op::List,
+                RepairCmd::Undo { run, yes } => repair::Op::Undo { run, yes },
+            };
+            let client = Client::with_url(home, url.clone())?;
+            repair::run(&client, op, as_json, allow_older_nodes).await?;
+        }
         Cmd::Agents {
             command: AgentsCmd::Accounts { command },
         } => {
@@ -2586,5 +2710,156 @@ mod tests {
         }
         assert!(parse(&["mine", "remove"]).is_err());
         assert!(parse(&["mine", "remove", "a", "b", "c"]).is_err());
+    }
+
+    #[test]
+    fn test_a_repair_is_a_dry_run_unless_applied() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(["hearthloom"].iter().chain(args)).map(|c| (c.command, c.json))
+        };
+        for args in [&["repair", "mail"][..], &["repair", "mail", "--dry-run"]] {
+            let Ok((
+                Cmd::Repair {
+                    command: RepairCmd::Mail { apply: false, .. },
+                    ..
+                },
+                false,
+            )) = parse(args)
+            else {
+                panic!("{args:?} is a dry run");
+            };
+        }
+        let Ok((
+            Cmd::Repair {
+                command: RepairCmd::Mail { apply: true, .. },
+                ..
+            },
+            true,
+        )) = parse(&["repair", "mail", "--apply", "--json"])
+        else {
+            panic!("--apply applies");
+        };
+        assert!(parse(&["repair", "mail", "--apply", "--dry-run"]).is_err());
+        let Ok((
+            Cmd::Repair {
+                command:
+                    RepairCmd::Calendar {
+                        files,
+                        apply: false,
+                        ..
+                    },
+                ..
+            },
+            _,
+        )) = parse(&["repair", "calendar", "--file", "a.ics", "--file", "b.ics"])
+        else {
+            panic!("not a calendar repair");
+        };
+        assert_eq!(files, [PathBuf::from("a.ics"), PathBuf::from("b.ics")]);
+        assert!(
+            parse(&["repair", "calendar"]).is_err(),
+            "a calendar repair names its files"
+        );
+        // an undo explains itself unless --yes
+        for (args, confirmed) in [
+            (&["repair", "undo", "rp_1"][..], false),
+            (&["repair", "undo", "rp_1", "--yes"], true),
+        ] {
+            let Ok((
+                Cmd::Repair {
+                    command: RepairCmd::Undo { run, yes },
+                    ..
+                },
+                _,
+            )) = parse(args)
+            else {
+                panic!("not an undo");
+            };
+            assert_eq!((run.as_str(), yes), ("rp_1", confirmed), "{args:?}");
+        }
+        // applying past older nodes is asked for by name, on any repair
+        for (args, allowed) in [
+            (&["repair", "mail", "--apply"][..], false),
+            (&["repair", "mail", "--apply", "--allow-older-nodes"], true),
+            (
+                &["repair", "--allow-older-nodes", "copies", "--apply"],
+                true,
+            ),
+        ] {
+            let Ok((
+                Cmd::Repair {
+                    allow_older_nodes, ..
+                },
+                _,
+            )) = parse(args)
+            else {
+                panic!("{args:?}");
+            };
+            assert_eq!(allow_older_nodes, allowed, "{args:?}");
+        }
+    }
+
+    /// The export repairs name their export and are dry runs unless
+    /// applied; `copies` and `photo-days` take no file.
+    #[test]
+    fn test_the_export_and_record_repairs_parse() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(["hearthloom"].iter().chain(args)).map(|c| (c.command, c.json))
+        };
+        let Ok((
+            Cmd::Repair {
+                command:
+                    RepairCmd::Chatgpt {
+                        export,
+                        apply: false,
+                        ..
+                    },
+                ..
+            },
+            _,
+        )) = parse(&["repair", "chatgpt", "--export", "chatgpt.zip"])
+        else {
+            panic!("a chatgpt dry run");
+        };
+        assert_eq!(export, PathBuf::from("chatgpt.zip"));
+        assert!(
+            parse(&["repair", "chatgpt"]).is_err(),
+            "a chatgpt repair names its export"
+        );
+        let Ok((
+            Cmd::Repair {
+                command: RepairCmd::Health { apply: true, .. },
+                ..
+            },
+            true,
+        )) = parse(&[
+            "repair",
+            "health",
+            "--export",
+            "export.zip",
+            "--apply",
+            "--json",
+        ])
+        else {
+            panic!("an applied health repair");
+        };
+        assert!(parse(&["repair", "health"]).is_err());
+        for (args, applied) in [
+            (&["repair", "copies"][..], false),
+            (&["repair", "copies", "--apply"], true),
+            (&["repair", "photo-days", "--dry-run"], false),
+            (&["repair", "photo-days", "--apply"], true),
+        ] {
+            let Ok((Cmd::Repair { command, .. }, _)) = parse(args) else {
+                panic!("{args:?}");
+            };
+            match command {
+                RepairCmd::Copies { apply, .. } | RepairCmd::PhotoDays { apply, .. } => {
+                    assert_eq!(apply, applied, "{args:?}")
+                }
+                _ => panic!("{args:?}"),
+            }
+        }
+        assert!(parse(&["repair", "copies", "--apply", "--dry-run"]).is_err());
     }
 }

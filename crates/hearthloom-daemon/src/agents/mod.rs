@@ -296,6 +296,9 @@ pub fn publish_self(state: &AppState) {
         "calendar": crate::google_calendar::connected(),
         // the mail archives this node holds, for Ask on any node (0.5.88)
         "archives": crate::lookups::archives_here(state),
+        // settles owner repairs (v69): a repair waits for every node to
+        // say so (repair.rs `REPAIRS_ROLE`, `older_nodes`)
+        "repairs": true,
     });
     // where archives should live: always on, room, the owner's choice (0.5.90)
     let mut roles = roles;

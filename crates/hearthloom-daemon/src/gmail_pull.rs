@@ -212,12 +212,17 @@ fn pull_once_unserialized(state: &AppState, mb: &Mailbox) -> Result<(usize, usiz
 
     let filter = LabelFilter::core_strata();
     let mut drafts = Vec::new();
-    // what each message means for its thread (mail_triage.rs, 0.5.92)
+    // what each message means for its thread (mail_triage.rs, 0.5.92);
+    // the record's mail privacy read once for the pull (`observe` reads it
+    // again after the memories are made)
     let mut seen = Vec::new();
+    let privacy = crate::virtual_source::MailPrivacy::new(state);
     let outcome = gmail_imap::pull_new(&mut feed, cursor, &pull_options(), |msgs| {
         for m in &msgs {
             file.write_all(&gmail_imap::mbox_record(m))?;
-            if let Some(s) = crate::mail_triage::seen(state, user, &mine, &m.labels, &m.raw) {
+            if let Some(s) =
+                crate::mail_triage::seen_with(state, &privacy, user, &mine, &m.labels, &m.raw)
+            {
                 seen.push(s);
             }
             match hearthloom_adapters::mbox::draft_from_bytes_filtered(
@@ -384,12 +389,19 @@ fn relabel(
     limits: RelabelLimits,
 ) -> Result<(usize, usize)> {
     let mut gained = Vec::new();
-    let plan = relabel_plan(feed, mbox, pulled, limits, |id, _, _| {
+    let mut gained_keys = Vec::new();
+    let plan = relabel_plan(feed, mbox, pulled, limits, |id, _, raw| {
         gained.push(id.to_string());
+        gained_keys.extend(crate::mail_triage::message_keys(raw));
     })?;
     // a memory that didn't land leaves the change unrecorded: the next
     // re-read finds it again
     let new = apply_drafts(state, &plan.drafts)?;
+    // A memory that arrived private makes its message's thread private at
+    // once, from the record alone: the index reads below can fail, and the
+    // thread (sorted already, say — triage won't look at it again) mustn't
+    // stay in view until a later re-read gets through.
+    crate::mail_triage::close_private_threads(state, &gained_keys)?;
     // Recorded before the threads: triage, woken by them, reads a thread's
     // labels from the index (`mailboxes::labels_now`). The messages that
     // gained a label are recorded as still to be observed in the same
@@ -412,6 +424,9 @@ thread_local! {
     /// A test's stop between recording a re-read's labels and observing
     /// the mail that gained one (as a pull ended there would).
     static STOP_AFTER_RECORD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// A test's busy index: the list of messages still to observe can't be
+    /// read.
+    static PENDING_UNREADABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The messages still to be observed (`PENDING_KEY`). An index that can't
@@ -419,6 +434,10 @@ thread_local! {
 /// would drop the messages it holds. A value that isn't a list (none this
 /// code writes) can't be read on a later try either: a new list starts.
 fn pending_observations(mbox: &Path) -> Result<Vec<String>> {
+    #[cfg(test)]
+    if PENDING_UNREADABLE.with(|busy| busy.get()) {
+        anyhow::bail!("database is locked");
+    }
     let Some(list) = crate::mbox_index::meta_get(mbox, PENDING_KEY)? else {
         return Ok(Vec::new());
     };
@@ -442,7 +461,8 @@ fn merge_pending(pending: &mut Vec<String>, more: Vec<String>) {
 /// archived copy under the labels last recorded for it — and keep pending
 /// only those that couldn't be read or recorded. A message gone from the
 /// index, or one triage doesn't read (`mail_triage::seen` finds no
-/// Message-ID), is done.
+/// Message-ID), is done. While mail is held nothing could be recorded: the
+/// list is left as it is.
 fn observe_pending(
     state: &AppState,
     account: &str,
@@ -453,7 +473,12 @@ fn observe_pending(
     if pending.is_empty() {
         return Ok(());
     }
+    let privacy = crate::virtual_source::MailPrivacy::new(state);
+    if privacy.hold()?.is_some() {
+        return Ok(());
+    }
     let mut left = Vec::new();
+    let mut seen = Vec::new();
     for id in pending {
         let labels = match crate::mbox_index::labels_of(mbox, &id) {
             Ok(Some(labels)) => labels,
@@ -483,12 +508,16 @@ fn observe_pending(
             labels: labels.clone(),
             raw: archived,
         });
-        let Some(seen) = crate::mail_triage::seen(state, account, mine, &labels, &raw) else {
-            continue;
-        };
-        if !crate::mail_triage::observe(state, &[seen]).is_empty() {
-            left.push(id);
+        if let Some(s) =
+            crate::mail_triage::seen_with(state, &privacy, account, mine, &labels, &raw)
+        {
+            seen.push((id, s));
         }
+    }
+    // one batch: the record's mail privacy is read once for all of them
+    let batch: Vec<_> = seen.iter().map(|(_, s)| s.clone()).collect();
+    for i in crate::mail_triage::observe(state, &batch) {
+        left.push(seen[i].0.clone());
     }
     crate::mbox_index::meta_set(mbox, PENDING_KEY, &serde_json::to_string(&left)?)
 }
@@ -1394,6 +1423,29 @@ mod tests {
         hearthloom_adapters::mbox::message_id_ref(&String::from_utf8_lossy(&m.raw)).unwrap()
     }
 
+    /// A pulled message's memory, labelled private, landing without the
+    /// pull (as a copy from another node would).
+    fn private_memory(state: &AppState, m: &PulledMessage) {
+        let draft = hearthloom_adapters::mbox::draft_from_bytes_filtered(
+            &gmail_imap::message_bytes(m),
+            &LabelFilter::default(),
+            Some("private"),
+        )
+        .unwrap()
+        .unwrap();
+        state
+            .store
+            .apply_batch(
+                &state.home,
+                &IngestBatch {
+                    actor: "adapter:mbox".into(),
+                    session_id: None,
+                    episodes: vec![draft],
+                },
+            )
+            .unwrap();
+    }
+
     /// A message whose memory is private under the key the mail import gave
     /// it — which a MIME parser's reading of the Message-ID differs from,
     /// for a header with a comment beside the id — opens no thread a model
@@ -1660,8 +1712,9 @@ mod tests {
         );
     }
 
-    /// A re-read that made a message's memory — private — and stopped
-    /// before it saw the message again left the thread it joined as it was.
+    /// A message's memory that turns private after its thread formed, by a
+    /// path that doesn't see the message again (a copy arriving private
+    /// from another node, the owner's label), leaves the thread as it was.
     /// Triage looks the thread's memories up again before a model reads it:
     /// the thread is made private and left out, and the others are sorted.
     #[tokio::test]
@@ -1672,10 +1725,6 @@ mod tests {
         state
             .store
             .mail_rule_add(&owner, "from", "ann@x.example", "triage", None)
-            .unwrap();
-        state
-            .store
-            .claim_identity(&owner, "Ann", "email", "ann@x.example", Some("private"))
             .unwrap();
         let mbox = tmp.path().join("gmail-live.mbox");
         std::fs::File::create(&mbox).unwrap();
@@ -1716,20 +1765,8 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        feed.messages[0].labels.push("Starred".into());
-        let pulled = read_cursor(&mbox).unwrap();
-        STOP_AFTER_RECORD.with(|stop| stop.set(true));
-        let stopped = relabel(
-            &state,
-            "jon@y.example",
-            &BTreeSet::new(),
-            &mut feed,
-            &mbox,
-            pulled,
-            RELABEL,
-        );
-        STOP_AFTER_RECORD.with(|stop| stop.set(false));
-        assert!(stopped.is_err());
+        // its memory, private, from elsewhere
+        private_memory(&state, &feed.messages[0]);
         assert!(!state
             .store
             .private_source_refs("mbox", &["ruled@x".to_string()])
@@ -1742,7 +1779,7 @@ mod tests {
                 .unwrap()
                 .len()
         };
-        assert_eq!(waiting(), 2, "the thread is as the stop left it");
+        assert_eq!(waiting(), 2, "the thread is as it was");
 
         let asked = crate::mail_triage::stand_in_claude(
             &state,
@@ -1768,6 +1805,759 @@ mod tests {
             state.store.mail_thread(&thread).unwrap().unwrap().scope,
             "private"
         );
+    }
+
+    /// A thread sorted already — triage won't look at it again — whose
+    /// message's memory arrives private when a label re-read makes it (its
+    /// sender's identity is private) turns private at once, from the record
+    /// alone, even when the archive's index can't be read right after and
+    /// the re-read fails before it records anything.
+    #[tokio::test]
+    async fn test_a_sorted_thread_turns_private_when_the_index_cannot_be_read_after() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_at(tmp.path());
+        let owner = Actor::new("human:test");
+        state
+            .store
+            .mail_rule_add(&owner, "from", "ann@x.example", "triage", None)
+            .unwrap();
+        state
+            .store
+            .claim_identity(&owner, "Ann", "email", "ann@x.example", Some("private"))
+            .unwrap();
+        let mbox = tmp.path().join("gmail-live.mbox");
+        std::fs::File::create(&mbox).unwrap();
+        crate::mbox_index::build(&mbox).unwrap();
+        let mut feed = FakeFeed {
+            messages: vec![mail(
+                1,
+                "ruled@x",
+                None,
+                &["Category Promotions"],
+                "dinner friday?",
+            )],
+            ..Default::default()
+        };
+        pull_into(&mbox, &mut feed, None);
+        observe_as_pulled(&state, "jon@y.example", &feed.messages);
+        let thread = state
+            .store
+            .mail_thread_of_message("ruled@x")
+            .unwrap()
+            .expect("the rule made a thread");
+        assert!(state
+            .store
+            .mail_classify(&owner, &thread, "fyi", "a note", 0.9, None)
+            .unwrap());
+
+        feed.messages[0].labels.push("Starred".into());
+        let pulled = read_cursor(&mbox).unwrap();
+        // the index busy once the memory is made: the list of messages still
+        // to observe can't be read
+        PENDING_UNREADABLE.with(|busy| busy.set(true));
+        let failed = relabel(
+            &state,
+            "jon@y.example",
+            &BTreeSet::new(),
+            &mut feed,
+            &mbox,
+            pulled,
+            RELABEL,
+        );
+        PENDING_UNREADABLE.with(|busy| busy.set(false));
+        assert!(failed.is_err());
+        assert!(!state
+            .store
+            .private_source_refs("mbox", &["ruled@x".to_string()])
+            .unwrap()
+            .is_empty());
+        assert!(
+            state.store.mail_thread(&thread).unwrap().is_none(),
+            "out of view with the vault locked"
+        );
+        state.store.vault_unlock(5);
+        let t = state.store.mail_thread(&thread).unwrap().unwrap();
+        assert_eq!((t.scope.as_str(), t.state.as_str()), ("private", "fyi"));
+    }
+
+    /// A message with two Message-ID headers: the mail import keys its
+    /// memory by the first, a MIME parser reads the last. A memory under the
+    /// first that turns private after its thread formed is found by triage
+    /// through the keys the thread index kept: the thread is made private
+    /// and never reaches the model.
+    #[tokio::test]
+    async fn test_triage_finds_a_private_memory_under_the_imports_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_at(tmp.path());
+        let mbox = tmp.path().join("gmail-live.mbox");
+        std::fs::File::create(&mbox).unwrap();
+        crate::mbox_index::build(&mbox).unwrap();
+        let mut feed = FakeFeed {
+            messages: vec![
+                mail_with_id_header(
+                    1,
+                    "Message-ID: <first@x>\r\nMessage-ID: <second@x>",
+                    &["Category Personal"],
+                    "dinner friday?",
+                ),
+                mail(2, "open@x", None, &["Category Personal"], "lunch monday?"),
+            ],
+            ..Default::default()
+        };
+        pull_into(&mbox, &mut feed, None);
+        observe_as_pulled(&state, "jon@y.example", &feed.messages);
+        assert_eq!(import_key(&feed.messages[0]), "first@x");
+        let thread = state
+            .store
+            .mail_thread_of_message("second@x")
+            .unwrap()
+            .expect("the thread index keys it by the parser's reading");
+        let open = state
+            .store
+            .mail_thread_of_message("open@x")
+            .unwrap()
+            .unwrap();
+
+        private_memory(&state, &feed.messages[0]);
+        let asked = crate::mail_triage::stand_in_claude(
+            &state,
+            tmp.path(),
+            serde_json::json!([{
+                "id": open, "class": "fyi", "confidence": 0.9,
+                "span": "lunch monday", "why": "A lunch."
+            }]),
+        );
+        let sorted = crate::mail_triage::triage_for(&state, &crate::mail_triage::every_mailbox())
+            .await
+            .unwrap();
+        assert_eq!(sorted, 1);
+        let asked = std::fs::read_to_string(&asked).unwrap();
+        assert!(asked.contains("lunch monday"), "{asked}");
+        assert!(
+            !asked.contains(&thread) && !asked.contains("dinner friday"),
+            "private mail never goes to the model: {asked}"
+        );
+        state.store.vault_unlock(5);
+        assert_eq!(
+            state.store.mail_thread(&thread).unwrap().unwrap().scope,
+            "private"
+        );
+    }
+
+    /// The same, for threads recorded before the thread index kept each
+    /// message's memory keys (v70: `memory_refs` NULL) and not observed
+    /// since. Triage reads the keys from the live archive: a message the
+    /// archive holds under the id the index knows gets them back (and
+    /// keeps them); the two-Message-ID message, which the archive holds
+    /// under the import's key, can't be read that way — its thread can't be
+    /// checked, so it waits, never reaching the model, its label as it was
+    /// (a private memory of some message without a Message-ID says nothing
+    /// of it). Once the pull observes the message again (the label re-read
+    /// reaches every message in time), its keys are kept and its thread is
+    /// made private.
+    #[tokio::test]
+    async fn test_triage_checks_threads_recorded_before_their_keys_were_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_at(tmp.path());
+        let archives = tmp.path().join("archives");
+        std::fs::create_dir_all(&archives).unwrap();
+        let mbox = archives.join("gmail-live.mbox");
+        std::fs::File::create(&mbox).unwrap();
+        crate::mbox_index::build(&mbox).unwrap();
+        let mut feed = FakeFeed {
+            messages: vec![
+                mail_with_id_header(
+                    1,
+                    "Message-ID: <first@x>\r\nMessage-ID: <second@x>",
+                    &["Category Personal"],
+                    "dinner friday?",
+                ),
+                mail(2, "open@x", None, &["Category Personal"], "lunch monday?"),
+            ],
+            ..Default::default()
+        };
+        pull_into(&mbox, &mut feed, None);
+        observe_as_pulled(&state, "jon@y.example", &feed.messages);
+        let thread = state
+            .store
+            .mail_thread_of_message("second@x")
+            .unwrap()
+            .unwrap();
+        let open = state
+            .store
+            .mail_thread_of_message("open@x")
+            .unwrap()
+            .unwrap();
+        // as an earlier version recorded them
+        rusqlite::Connection::open(state.home.db_path())
+            .unwrap()
+            .execute("UPDATE mail_thread_messages SET memory_refs = NULL", [])
+            .unwrap();
+        assert_eq!(
+            state.store.mail_thread_message_keys(&open).unwrap(),
+            vec![("open@x".to_string(), None)]
+        );
+
+        private_memory(&state, &feed.messages[0]);
+        // another message's memory, private, keyed by its text
+        private_memory(
+            &state,
+            &mail_with_id_header(3, "X-Note: no id", &["Category Personal"], "a receipt"),
+        );
+        assert!(crate::virtual_source::MailPrivacy::new(&state)
+            .key_found(&crate::virtual_source::ItemKey::Unkeyed)
+            .unwrap());
+        let asked = crate::mail_triage::stand_in_claude(
+            &state,
+            tmp.path(),
+            serde_json::json!([{
+                "id": open, "class": "fyi", "confidence": 0.9,
+                "span": "lunch monday", "why": "A lunch."
+            }]),
+        );
+        let sorted = crate::mail_triage::triage_for(&state, &crate::mail_triage::every_mailbox())
+            .await
+            .unwrap();
+        assert_eq!(sorted, 1);
+        let asked = std::fs::read_to_string(&asked).unwrap();
+        assert!(asked.contains("lunch monday"), "{asked}");
+        assert!(
+            !asked.contains(&thread) && !asked.contains("dinner friday"),
+            "private mail never goes to the model: {asked}"
+        );
+        assert_eq!(
+            state.store.mail_thread_message_keys(&open).unwrap(),
+            vec![("open@x".to_string(), Some(vec!["open@x".to_string()]))],
+            "keys read from the archive are kept"
+        );
+        let waiting = |id: &str| {
+            state
+                .store
+                .mail_threads_to_triage_for(10, &[], Some(&[]))
+                .unwrap()
+                .iter()
+                .any(|t| t.id == id)
+        };
+        assert!(waiting(&thread), "it waits to be checked");
+        assert_eq!(
+            state.store.mail_thread(&thread).unwrap().unwrap().scope,
+            "personal"
+        );
+
+        // observed again: its keys are kept, and its private memory found
+        observe_as_pulled(&state, "jon@y.example", &feed.messages[..1]);
+        assert!(!waiting(&thread));
+        state.store.vault_unlock(5);
+        assert_eq!(
+            state.store.mail_thread(&thread).unwrap().unwrap().scope,
+            "private"
+        );
+    }
+
+    /// The same, for threads another node recorded: threads mirror, the
+    /// thread index doesn't, so this node's index holds none of their
+    /// messages — only the thread's latest message id is known. Its keys
+    /// are read from the live archive here: the message it holds under that
+    /// id is checked and sorted; the two-Message-ID message, held under the
+    /// import's key, can't be checked — it waits, never sent to the model
+    /// (not even the thread's synced snippet), its label left to the node
+    /// that recorded it.
+    #[tokio::test]
+    async fn test_triage_checks_threads_another_node_recorded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_at(tmp.path());
+        let archives = tmp.path().join("archives");
+        std::fs::create_dir_all(&archives).unwrap();
+        let mbox = archives.join("gmail-live.mbox");
+        std::fs::File::create(&mbox).unwrap();
+        crate::mbox_index::build(&mbox).unwrap();
+        let mut feed = FakeFeed {
+            messages: vec![
+                mail_with_id_header(
+                    1,
+                    "Message-ID: <first@x>\r\nMessage-ID: <second@x>",
+                    &["Category Personal"],
+                    "dinner friday?",
+                ),
+                mail(2, "open@x", None, &["Category Personal"], "lunch monday?"),
+            ],
+            ..Default::default()
+        };
+        pull_into(&mbox, &mut feed, None);
+        observe_as_pulled(&state, "jon@y.example", &feed.messages);
+        let thread = state
+            .store
+            .mail_thread_of_message("second@x")
+            .unwrap()
+            .unwrap();
+        let open = state
+            .store
+            .mail_thread_of_message("open@x")
+            .unwrap()
+            .unwrap();
+        // as the threads reach a node that didn't record their mail
+        rusqlite::Connection::open(state.home.db_path())
+            .unwrap()
+            .execute("DELETE FROM mail_thread_messages", [])
+            .unwrap();
+        assert!(state
+            .store
+            .mail_thread_message_keys(&thread)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            state
+                .store
+                .mail_thread(&thread)
+                .unwrap()
+                .unwrap()
+                .last_message_id
+                .as_deref(),
+            Some("second@x")
+        );
+
+        private_memory(&state, &feed.messages[0]);
+        let asked = crate::mail_triage::stand_in_claude(
+            &state,
+            tmp.path(),
+            serde_json::json!([{
+                "id": open, "class": "fyi", "confidence": 0.9,
+                "span": "lunch monday", "why": "A lunch."
+            }]),
+        );
+        let sorted = crate::mail_triage::triage_for(&state, &crate::mail_triage::every_mailbox())
+            .await
+            .unwrap();
+        assert_eq!(sorted, 1);
+        let asked = std::fs::read_to_string(&asked).unwrap();
+        assert!(asked.contains("lunch monday"), "{asked}");
+        assert!(
+            !asked.contains(&thread) && !asked.contains("dinner friday"),
+            "private mail never goes to the model: {asked}"
+        );
+        let t = state.store.mail_thread(&thread).unwrap().unwrap();
+        assert_eq!((t.scope.as_str(), t.state.as_str()), ("personal", "new"));
+    }
+
+    /// A node that takes over another node's mailbox while that node is away
+    /// (mailboxes::duty) holds the threads it recorded — threads mirror —
+    /// but none of their mail: no thread index rows, no live archive. Those
+    /// threads can't be checked here, so they wait: none goes to the model,
+    /// none is labelled (a private label is for good, and would sync back),
+    /// and more of them than a round's batch, older than this node's own
+    /// mail, don't hold that mail up. Once a live archive here holds their
+    /// mail, the next round checks them and sorts them.
+    #[tokio::test]
+    async fn test_threads_this_node_cannot_check_yet_wait_and_are_sorted_later() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_at(tmp.path());
+        // node a watches the work mailbox and is away; this node watches its own
+        let cutoff = (chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+        let away = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+        let duty = crate::mailboxes::duty_from(
+            "node-b",
+            &["jon@y.example".to_string()],
+            &[serde_json::json!({
+                "node_id": "node-a",
+                "last_seen": away,
+                "roles": {"mail": true, "mailboxes": [
+                    {"address": "work@y.example", "watching": true}
+                ]}
+            })],
+            &cutoff,
+        );
+        assert!(duty.handles("work@y.example") && duty.handles("jon@y.example"));
+
+        // the work mailbox's threads, as node a recorded them: older mail
+        let work = tmp.path().join("node-a.mbox");
+        std::fs::File::create(&work).unwrap();
+        crate::mbox_index::build(&work).unwrap();
+        let count = crate::mail_triage::BATCH as u32 + 2;
+        let mut work_feed = FakeFeed {
+            messages: (1..=count)
+                .map(|n| {
+                    mail(
+                        n,
+                        &format!("work{n}@x"),
+                        None,
+                        &["Category Personal"],
+                        "the quarterly figures",
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        };
+        pull_into(&work, &mut work_feed, None);
+        observe_as_pulled(&state, "work@y.example", &work_feed.messages);
+        let work_threads: Vec<String> = (1..=count)
+            .map(|n| {
+                state
+                    .store
+                    .mail_thread_of_message(&format!("work{n}@x"))
+                    .unwrap()
+                    .unwrap()
+            })
+            .collect();
+        // as they reach this node: the thread index is node a's own
+        rusqlite::Connection::open(state.home.db_path())
+            .unwrap()
+            .execute("DELETE FROM mail_thread_messages", [])
+            .unwrap();
+
+        // this node's own mail, newer, in its live archive
+        let archives = tmp.path().join("archives");
+        std::fs::create_dir_all(&archives).unwrap();
+        let mbox = archives.join("gmail-live.mbox");
+        std::fs::File::create(&mbox).unwrap();
+        crate::mbox_index::build(&mbox).unwrap();
+        let mut own = FakeFeed {
+            messages: vec![mail(
+                50,
+                "own@x",
+                None,
+                &["Category Personal"],
+                "lunch monday?",
+            )],
+            ..Default::default()
+        };
+        pull_into(&mbox, &mut own, None);
+        observe_as_pulled(&state, "jon@y.example", &own.messages);
+        let own_thread = state
+            .store
+            .mail_thread_of_message("own@x")
+            .unwrap()
+            .unwrap();
+
+        let mut items = vec![serde_json::json!({
+            "id": own_thread, "class": "fyi", "confidence": 0.9,
+            "span": "lunch monday", "why": "A lunch."
+        })];
+        items.extend(work_threads.iter().map(|id| {
+            serde_json::json!({
+                "id": id, "class": "fyi", "confidence": 0.9,
+                "span": "the quarterly figures", "why": "Figures."
+            })
+        }));
+        let asked = crate::mail_triage::stand_in_claude(
+            &state,
+            tmp.path(),
+            serde_json::Value::Array(items),
+        );
+        let round = || crate::mail_triage::triage_for(&state, &duty);
+        assert_eq!(round().await.unwrap(), 1);
+        let prompt = std::fs::read_to_string(&asked).unwrap();
+        assert!(prompt.contains("lunch monday"), "{prompt}");
+        assert!(
+            !prompt.contains("quarterly figures"),
+            "mail that can't be checked never goes to the model: {prompt}"
+        );
+        for id in &work_threads {
+            let t = state.store.mail_thread(id).unwrap().unwrap();
+            assert_eq!((t.scope.as_str(), t.state.as_str()), ("personal", "new"));
+        }
+        // nothing else can be sorted: the round ends
+        std::fs::remove_file(&asked).unwrap();
+        assert_eq!(round().await.unwrap(), 0);
+        assert!(!asked.exists());
+
+        // this node pulls the work mailbox: its live archive holds the mail
+        let work_here = archives.join("gmail-live-work.mbox");
+        std::fs::File::create(&work_here).unwrap();
+        crate::mbox_index::build(&work_here).unwrap();
+        pull_into(&work_here, &mut work_feed, None);
+        let mut sorted = 0;
+        loop {
+            match round().await.unwrap() {
+                0 => break,
+                n => sorted += n,
+            }
+        }
+        assert_eq!(sorted, work_threads.len());
+        let prompt = std::fs::read_to_string(&asked).unwrap();
+        assert!(prompt.contains("quarterly figures"), "{prompt}");
+        for id in &work_threads {
+            let t = state.store.mail_thread(id).unwrap().unwrap();
+            assert_eq!((t.scope.as_str(), t.state.as_str()), ("personal", "fyi"));
+        }
+    }
+
+    /// The thread index read failing before a model is asked fails the
+    /// round: nothing goes to the model. Once it reads again, the round runs.
+    #[tokio::test]
+    async fn test_triage_fails_the_round_when_a_threads_mail_cannot_be_looked_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_at(tmp.path());
+        let mbox = tmp.path().join("gmail-live.mbox");
+        std::fs::File::create(&mbox).unwrap();
+        crate::mbox_index::build(&mbox).unwrap();
+        let mut feed = FakeFeed {
+            messages: vec![mail(
+                1,
+                "open@x",
+                None,
+                &["Category Personal"],
+                "lunch monday?",
+            )],
+            ..Default::default()
+        };
+        pull_into(&mbox, &mut feed, None);
+        observe_as_pulled(&state, "jon@y.example", &feed.messages);
+        let open = state
+            .store
+            .mail_thread_of_message("open@x")
+            .unwrap()
+            .unwrap();
+        let asked = crate::mail_triage::stand_in_claude(
+            &state,
+            tmp.path(),
+            serde_json::json!([{
+                "id": open, "class": "fyi", "confidence": 0.9,
+                "span": "lunch monday", "why": "A lunch."
+            }]),
+        );
+        let index = |from: &str, to: &str| {
+            rusqlite::Connection::open(state.home.db_path())
+                .unwrap()
+                .execute_batch(&format!("ALTER TABLE {from} RENAME TO {to}"))
+                .unwrap();
+        };
+        let duty = crate::mail_triage::every_mailbox();
+        let round = || crate::mail_triage::triage_for(&state, &duty);
+
+        index("mail_thread_messages", "mail_thread_messages_aside");
+        assert!(round().await.is_err());
+        assert!(!asked.exists(), "nothing went to the model");
+        index("mail_thread_messages_aside", "mail_thread_messages");
+        assert_eq!(round().await.unwrap(), 1);
+        assert!(asked.exists());
+    }
+
+    /// While mail is held — a private Gmail promotion an earlier version
+    /// kept under a `uid:` path can't be told apart from any message —
+    /// nothing is recorded about a message's privacy on the hold's strength:
+    /// new mail forms no thread and stays to be observed, triage asks no
+    /// model and makes no thread private, an ember's queue waits with its
+    /// cursor where it was. Only an owner whose vault is open is told which
+    /// memory holds mail. Once it leaves the vault, the waiting mail is
+    /// recorded as it is — not private — sorted and delivered.
+    #[tokio::test]
+    async fn test_a_legacy_hold_records_nothing_and_mail_flows_once_it_ends() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_at(tmp.path());
+        let owner = Actor::new("human:test");
+        watch(&state, "stars", &["Starred"], &[]);
+        let mbox = tmp.path().join("gmail-live.mbox");
+        std::fs::File::create(&mbox).unwrap();
+        crate::mbox_index::build(&mbox).unwrap();
+        // a thread waiting for triage from before the hold
+        let mut feed = FakeFeed {
+            messages: vec![mail(
+                1,
+                "before@x",
+                None,
+                &["Category Personal"],
+                "can you call me?",
+            )],
+            ..Default::default()
+        };
+        pull_into(&mbox, &mut feed, None);
+        observe_as_pulled(&state, "jon@y.example", &feed.messages);
+        let waiting = state
+            .store
+            .mail_thread_of_message("before@x")
+            .unwrap()
+            .unwrap();
+        let to_sort = || {
+            state
+                .store
+                .mail_threads_to_triage_for(10, &[], Some(&[]))
+                .unwrap()
+                .len()
+        };
+        assert_eq!(to_sort(), 1);
+        // a match an ember hasn't read yet
+        let earlier = hearthloom_core::store::mail_watch::MailMatch {
+            plugin: "stars".into(),
+            watch: "mw_earlier".into(),
+            watch_name: "watched mail".into(),
+            message_id: "before@x".into(),
+            sender: "Ann <ann@x.example>".into(),
+            subject: "plans".into(),
+            text: "can you call me?".into(),
+            ..Default::default()
+        };
+        assert!(state.store.mail_match_add(&earlier).unwrap());
+
+        // what an earlier version kept: a Gmail message promoted private
+        // under its uid, from the dashboard
+        state
+            .store
+            .apply_batch(
+                &state.home,
+                &IngestBatch {
+                    actor: "human:dashboard".into(),
+                    session_id: None,
+                    episodes: vec![hearthloom_core::EpisodeDraft {
+                        source: crate::gmail_search::SOURCE.into(),
+                        source_ref: "uid:42".into(),
+                        kind: "email".into(),
+                        title: "promoted".into(),
+                        body: "From: Ann <ann@x.example>\nSubject: plans\n\nSee you then.".into(),
+                        event_time: hearthloom_core::EventTime::unknown(),
+                        trust: "imported".into(),
+                        scope: Some("private".into()),
+                        entities: vec![],
+                        edges: vec![],
+                    }],
+                },
+            )
+            .unwrap();
+
+        // new mail, starred, arrives: read as private, recorded as nothing
+        let arriving = [mail(
+            2,
+            "during@x",
+            None,
+            &["Category Personal", "Starred"],
+            "lunch monday?",
+        )];
+        let seen: Vec<_> = arriving
+            .iter()
+            .filter_map(|m| {
+                crate::mail_triage::seen(
+                    &state,
+                    "jon@y.example",
+                    &BTreeSet::new(),
+                    &m.labels,
+                    &gmail_imap::message_bytes(m),
+                )
+            })
+            .collect();
+        assert!(seen[0].held && seen[0].private);
+        assert_eq!(crate::mail_triage::observe(&state, &seen), vec![0]);
+        assert!(state
+            .store
+            .mail_thread_of_message("during@x")
+            .unwrap()
+            .is_none());
+        assert!(state
+            .store
+            .mail_match_for("stars", "during@x")
+            .unwrap()
+            .is_none());
+
+        // the ember's queue waits, its cursor where it was
+        let got = crate::mail_embers::deliver(&state, "stars", 0, 50).unwrap();
+        assert_eq!(got["matches"].as_array().unwrap().len(), 0);
+        assert_eq!(got["next"], 0);
+
+        // triage asks no model and makes no thread private
+        let asked = crate::mail_triage::stand_in_claude(
+            &state,
+            tmp.path(),
+            serde_json::json!([{
+                "id": waiting, "class": "needs_reply", "confidence": 0.9,
+                "span": "can you call me", "why": "Ann asks."
+            }]),
+        );
+        let duty = crate::mail_triage::every_mailbox();
+        let round = || crate::mail_triage::triage_for(&state, &duty);
+        assert_eq!(round().await.unwrap(), 0);
+        assert!(!asked.exists(), "nothing went to the model");
+        assert_eq!(to_sort(), 1, "still waiting, and not private");
+
+        // which memory holds mail: told only to a viewer whose vault is open
+        assert!(crate::mail_triage::status(&state)["held"].is_null());
+        state.store.vault_unlock(5);
+        let held = crate::mail_triage::status(&state)["held"].clone();
+        assert_eq!(
+            (held["source"].as_str(), held["source_ref"].as_str()),
+            (Some(crate::gmail_search::SOURCE), Some("uid:42"))
+        );
+
+        // the owner takes it out of the vault: mail flows
+        state
+            .store
+            .set_episode_scopes(
+                &owner,
+                &[hearthloom_core::ids::episode_id(
+                    crate::gmail_search::SOURCE,
+                    "uid:42",
+                )],
+                "personal",
+            )
+            .unwrap();
+        assert!(crate::mail_triage::status(&state)["held"].is_null());
+        state.store.vault_lock();
+        assert!(crate::mail_triage::observe(&state, &seen).is_empty());
+        let during = state
+            .store
+            .mail_thread_of_message("during@x")
+            .unwrap()
+            .expect("recorded once the hold ended");
+        assert_eq!(
+            state.store.mail_thread(&during).unwrap().unwrap().scope,
+            "personal"
+        );
+        assert!(state
+            .store
+            .mail_match_for("stars", "during@x")
+            .unwrap()
+            .is_some());
+        assert!(round().await.unwrap() >= 1);
+        assert_eq!(
+            state.store.mail_thread(&waiting).unwrap().unwrap().state,
+            "needs_reply"
+        );
+        let got = crate::mail_embers::deliver(&state, "stars", 0, 50).unwrap();
+        let mut delivered: Vec<&str> = got["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["message_id"].as_str())
+            .collect();
+        delivered.sort();
+        assert_eq!(delivered, vec!["before@x", "during@x"]);
+    }
+
+    /// The record's private set is scanned once for a batch of messages —
+    /// once for what the pull reads, once when their threads are recorded —
+    /// not once per message.
+    #[test]
+    fn test_mail_privacy_is_read_once_per_batch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_at(tmp.path());
+        let messages: Vec<PulledMessage> = (1..=6)
+            .map(|uid| {
+                mail(
+                    uid,
+                    &format!("m{uid}@x"),
+                    None,
+                    &["Category Personal"],
+                    "hello",
+                )
+            })
+            .collect();
+        let reads = || crate::virtual_source::NOT_BARE_READS.with(|n| n.get());
+        let before = reads();
+        let privacy = crate::virtual_source::MailPrivacy::new(&state);
+        let seen: Vec<_> = messages
+            .iter()
+            .filter_map(|m| {
+                crate::mail_triage::seen_with(
+                    &state,
+                    &privacy,
+                    "jon@y.example",
+                    &BTreeSet::new(),
+                    &m.labels,
+                    &gmail_imap::message_bytes(m),
+                )
+            })
+            .collect();
+        assert_eq!(seen.len(), 6);
+        assert_eq!(reads() - before, 1);
+        assert!(crate::mail_triage::observe(&state, &seen).is_empty());
+        assert_eq!(reads() - before, 2);
     }
 
     /// A message whose Message-ID header is folded onto its next line is

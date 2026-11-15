@@ -906,7 +906,20 @@ impl Store {
         {
             return Ok((row, false));
         }
-        let now = now_utc();
+        // Stamped after the entry's last removal (here or received): a
+        // tombstone at or after a row's stamp removes it on every node, and
+        // stamps have whole seconds — a re-add in the removal's second would
+        // stand here and be refused everywhere else.
+        let removed: Option<String> = conn.query_row(
+            "SELECT MAX(ts) FROM op_journal
+             WHERE entity_kind = 'owned_source' AND entity_id = ?1 AND op = 'delete'",
+            [&id],
+            |r| r.get(0),
+        )?;
+        let now = match removed {
+            Some(removed) => super::repair::stamp_after(&removed),
+            None => now_utc(),
+        };
         conn.execute(
             "INSERT INTO owned_sources (id, source, key, set_by, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
@@ -946,13 +959,25 @@ impl Store {
         else {
             return Ok(None);
         };
-        super::journal_row(&conn, actor, "owned_source", "owned_sources", id, "delete")?;
+        // never before the row's own stamp (a re-add can be stamped a
+        // second ahead): a tombstone removes a row only at or after it
+        let ts = std::cmp::max(now_utc(), row.updated_at.clone());
+        let image = super::row_as_json(&conn, "owned_sources", id)?;
+        super::journal_op_at(
+            &conn,
+            actor,
+            "owned_source",
+            id,
+            "delete",
+            image.as_ref(),
+            &ts,
+        )?;
         conn.execute("DELETE FROM owned_sources WHERE id = ?1", [id])?;
         record_mutation(
             &conn,
             actor,
             "owned_source_removed",
-            &format!("owned_source_removed:{id}:{}", now_utc()),
+            &format!("owned_source_removed:{id}:{ts}"),
             &json!({"id": id, "source": row.source, "key": row.key}),
         )?;
         Ok(Some(row))
@@ -1818,5 +1843,70 @@ mod tests {
             .unwrap()
             .iter()
             .any(|h| h.op == "delete" && h.actor == "peer:laptop"));
+    }
+
+    /// Taken off and marked again within the removal's second (stamps have
+    /// whole seconds; here the removal is stamped a little ahead, as it can
+    /// be in the same second or on a node whose clock runs ahead): the
+    /// entry stands on the peer too, whichever leg arrives first, and
+    /// taking it off again right away reaches the peer as well.
+    #[test]
+    fn test_marking_again_right_after_a_removal_reaches_a_peer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (laptop_home, laptop) = node(tmp.path(), "laptop");
+        let (hub_home, hub) = node(tmp.path(), "hub");
+        let (other_home, other) = node(tmp.path(), "other");
+        let owner = Actor::new("human:owner");
+        let (entry, _) = laptop
+            .owned_source_add(&owner, "git", REPO, "session")
+            .unwrap();
+        let mirror = laptop.export_operational(&laptop_home).unwrap();
+        hub.apply_operational(&hub_home, &mirror).unwrap();
+        other.apply_operational(&other_home, &mirror).unwrap();
+
+        laptop.owned_source_remove(&owner, &entry.id).unwrap();
+        let ahead = (chrono::Utc::now() + chrono::Duration::seconds(3))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        laptop
+            .lock()
+            .execute(
+                "UPDATE op_journal SET ts = ?1 WHERE entity_kind = 'owned_source' AND op = 'delete'",
+                [&ahead],
+            )
+            .unwrap();
+        let (again, new) = laptop
+            .owned_source_add(&owner, "git", REPO, "session")
+            .unwrap();
+        assert!(new);
+
+        let journal = laptop.journal_export(0, 100).unwrap();
+        let mirror = laptop.export_operational(&laptop_home).unwrap();
+        let peer = Actor::new("peer:laptop");
+        // the journal's removal first, then the mirror's copy
+        hub.apply_journal(&peer, &journal).unwrap();
+        hub.apply_operational(&hub_home, &mirror).unwrap();
+        // the other way round
+        other.apply_operational(&other_home, &mirror).unwrap();
+        other.apply_journal(&peer, &journal).unwrap();
+        for (name, store) in [("hub", &hub), ("other", &other)] {
+            assert_eq!(
+                store.owned_sources().unwrap(),
+                vec![again.clone()],
+                "{name}"
+            );
+        }
+        assert!(again.updated_at > ahead, "{} vs {ahead}", again.updated_at);
+
+        // taken off again at once: the tombstone is stamped no earlier than
+        // the entry, so it removes it on the peers too
+        laptop.owned_source_remove(&owner, &again.id).unwrap();
+        let journal = laptop.journal_export(0, 100).unwrap();
+        let mirror = laptop.export_operational(&laptop_home).unwrap();
+        for (home, store) in [(&hub_home, &hub), (&other_home, &other)] {
+            store.apply_journal(&peer, &journal).unwrap();
+            store.apply_operational(home, &mirror).unwrap();
+            assert!(store.owned_sources().unwrap().is_empty());
+        }
+        assert!(laptop.owned_sources().unwrap().is_empty());
     }
 }

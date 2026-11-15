@@ -269,6 +269,30 @@ pub fn status(state: &AppState) -> Result<Value> {
     }))
 }
 
+/// Apply a pulled page of repair runs (`apply`) and say where the pull
+/// cursor goes: past the page only when it applied. A run's row is the one
+/// carrier of its undo, so a page that failed (a busy store, a row that
+/// aborted the transaction) is asked for again next cycle. Returns the runs
+/// whose row changed here, and the cursor to store (None: leave it).
+fn take_repairs_page(
+    batch: &Value,
+    since: &str,
+    apply: impl FnOnce(&Value) -> Result<Vec<String>>,
+) -> (Vec<String>, Option<String>) {
+    let changed = match apply(batch) {
+        Ok(changed) => changed,
+        Err(err) => {
+            tracing::warn!(
+                "sync: a peer's page of repair runs couldn't be applied here ({err:#}); asked for again next cycle"
+            );
+            return (Vec::new(), None);
+        }
+    };
+    let next = batch.get("next").and_then(|n| n.as_str()).unwrap_or("");
+    let cursor = (!next.is_empty() && next > since).then(|| next.to_string());
+    (changed, cursor)
+}
+
 /// One full cycle: push local-new, pull remote-new. The outcome —
 /// success OR failure — is persisted for the status surface.
 pub async fn sync_once(state: &AppState) -> Result<Value> {
@@ -881,7 +905,7 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
                         .get("next")
                         .and_then(|n| n.as_i64())
                         .unwrap_or(pull_seq);
-                    let _ = state.store.photo_points_apply(&batch);
+                    let _ = crate::live_photos::apply_peer_points(state, batch).await;
                     if next > pull_seq {
                         state
                             .store
@@ -1029,6 +1053,69 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
                         state
                             .store
                             .set_consolidation_state("peer_retire_pull_ts", &next)?;
+                    }
+                }
+            }
+        }
+    }
+
+    // Repairs exchange (v69): the owner's repair runs and their undo, both
+    // ways. The corrected copies travel on the episodes leg with their
+    // origins; each node settles a run's records itself. Own cursors, so a
+    // peer too old for the leg (404) gets every run once it upgrades.
+    {
+        let since = state
+            .store
+            .consolidation_state("peer_repair_push_ts")?
+            .unwrap_or_default();
+        if let Ok(batch) = state.store.repairs_sync_export(&since) {
+            let next = batch
+                .get("next")
+                .and_then(|n| n.as_str())
+                .unwrap_or(&since)
+                .to_string();
+            let has_rows = batch
+                .get("repairs")
+                .and_then(|v| v.as_array())
+                .is_some_and(|a| !a.is_empty());
+            if has_rows {
+                if let Ok(res) = client
+                    .post(format!("{url}/v1/sync/repairs"))
+                    .bearer_auth(&key)
+                    .json(&batch)
+                    .send()
+                    .await
+                {
+                    if res.status().is_success() && next > since {
+                        state
+                            .store
+                            .set_consolidation_state("peer_repair_push_ts", &next)?;
+                    }
+                }
+            }
+        }
+        let since_pull = state
+            .store
+            .consolidation_state("peer_repair_pull_ts")?
+            .unwrap_or_default();
+        if let Ok(res) = client
+            .get(format!("{url}/v1/sync/repairs?since={since_pull}"))
+            .bearer_auth(&key)
+            .send()
+            .await
+        {
+            if res.status().is_success() {
+                if let Ok(batch) = res.json::<Value>().await {
+                    let (changed, cursor) = take_repairs_page(&batch, &since_pull, |b| {
+                        state.store.repairs_sync_apply(b)
+                    });
+                    if !changed.is_empty() {
+                        crate::repair::catch_up(state).await;
+                    }
+                    if let Some(next) = cursor {
+                        state
+                            .store
+                            .set_consolidation_state("peer_repair_pull_ts", &next)?;
                     }
                 }
             }
@@ -1718,7 +1805,26 @@ pub async fn run_loop(state: AppState) {
 
 #[cfg(test)]
 mod tests {
-    use super::total_pct;
+    use super::{take_repairs_page, total_pct};
+    use serde_json::json;
+
+    /// A page of repair runs that couldn't be applied leaves the pull
+    /// cursor where it was, so the page — an undo, say — comes again; one
+    /// that applied moves it past.
+    #[test]
+    fn test_the_repairs_pull_cursor_moves_only_past_an_applied_page() {
+        let page = json!({"repairs": [{"id": "rp_1"}], "next": "2026-11-15T10:00:00.000Z"});
+        let (changed, cursor) =
+            take_repairs_page(&page, "", |_| Err(anyhow::anyhow!("database is locked")));
+        assert!(changed.is_empty());
+        assert_eq!(cursor, None);
+        let (changed, cursor) = take_repairs_page(&page, "", |_| Ok(vec!["rp_1".into()]));
+        assert_eq!(changed, ["rp_1"]);
+        assert_eq!(cursor.as_deref(), Some("2026-11-15T10:00:00.000Z"));
+        // a page that ends where the cursor is moves nothing
+        let (_, cursor) = take_repairs_page(&page, "2026-11-15T10:00:00.000Z", |_| Ok(vec![]));
+        assert_eq!(cursor, None);
+    }
 
     #[test]
     fn test_total_pct_weights_by_item_share() {

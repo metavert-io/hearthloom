@@ -193,7 +193,17 @@ location index (GPS lines parsed at consolidation).
   can't be marked.
 
 ## What re-imports do NOT do
-- Never delete or rewrite existing episodes (append-only law).
+- Never delete or rewrite existing episodes (append-only law). A memory
+  an earlier version stored wrongly is fixed by `hearthloom repair`
+  instead — a corrected copy takes its place (see `docs/cli.md`): mail
+  left encoded (`repair mail`), an event holding its alarm's text
+  (`repair calendar --file …`), a ChatGPT transcript with abandoned
+  branches mixed in or a "do not remember" flag ignored (`repair chatgpt
+  --export …`), an Apple Health day or workout read in the wrong units
+  (`repair health --export …`), Chrome/iMessage/Claude Code days stored
+  under an unversioned ref with a different text on each node (`repair
+  copies`), and photo days counted with duplicate photos (`repair
+  photo-days`).
 - Never re-run LLM extraction on bulk sources (facebook, mbox,
   apple-health are outside the extraction allowlist — entities are
   minted structurally).

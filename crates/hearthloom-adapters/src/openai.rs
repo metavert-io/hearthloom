@@ -137,6 +137,137 @@ pub fn read_export(
     Ok(ExportRead { drafts, flagged })
 }
 
+/// One conversation of a ChatGPT export as each import route stores it
+/// with this reader: the full export's (`openai`, images named as that
+/// route names them) and the single file's (`chatlog-chatgpt`, image parts
+/// left out). What `hearthloom repair chatgpt` compares stored copies with.
+#[derive(Debug, Clone)]
+pub struct ConversationRoutes {
+    pub id: String,
+    /// The owner flagged it "do not remember".
+    pub do_not_remember: bool,
+    /// The full export route's draft; None when the kept branch holds no
+    /// turns (and so for the other route).
+    pub export: Option<EpisodeDraft>,
+    /// The single-file route's draft.
+    pub single_file: Option<EpisodeDraft>,
+    /// The image pointers the export route's transcript names.
+    pub images: Vec<String>,
+    /// Every turn of the conversation's tree — the branch it ended on and
+    /// every branch moved away from — as the export route writes a turn
+    /// ([`turn_entry`]), in no particular order. A transcript an earlier
+    /// reader made of this export holds only these.
+    pub every_turn_export: Vec<String>,
+    /// The same, as the single-file route writes a turn (no image parts).
+    pub every_turn_single_file: Vec<String>,
+}
+
+/// One turn as both routes write it in a transcript: `<speaker>: <text>`,
+/// the text trimmed and capped (each followed by a blank line).
+pub fn turn_entry(speaker: &str, text: &str) -> String {
+    format!("{speaker}: {}", cap(text.trim(), MESSAGE_CAP))
+}
+
+/// Read an extracted ChatGPT export (chunk files, or one
+/// `conversations.json`) the way both import routes read it now, writing
+/// nothing: an image is named as the export route would name it when
+/// copied under `media_out` (see [`copy_images`] for the copy itself).
+pub fn read_routes(dir: &Path, media_out: Option<&Path>) -> Result<Vec<ConversationRoutes>> {
+    if !dir.is_dir() {
+        return Err(anyhow!("{} is not a directory", dir.display()));
+    }
+    let owner = std::fs::read_to_string(dir.join("user.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|u| Some(u.get("email")?.as_str()?.to_lowercase()));
+    let single_owner = crate::chatlog::owner_of(&dir.join("conversations.json"));
+    let asset_names: HashMap<String, String> =
+        std::fs::read_to_string(dir.join("conversation_asset_file_names.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<HashMap<String, String>>(&raw).ok())
+            .unwrap_or_default();
+    let mut chunks = chunk_files(dir).with_context(|| format!("reading {}", dir.display()))?;
+    if chunks.is_empty() && dir.join("conversations.json").is_file() {
+        chunks.push(dir.join("conversations.json"));
+    }
+    if chunks.is_empty() {
+        return Err(anyhow!(
+            "no conversations.json or conversations-*.json in {}",
+            dir.display()
+        ));
+    }
+    let mut out = Vec::new();
+    for chunk in &chunks {
+        let raw = std::fs::read_to_string(chunk)
+            .with_context(|| format!("reading {}", chunk.display()))?;
+        let convs: Value =
+            serde_json::from_str(&raw).with_context(|| format!("parsing {}", chunk.display()))?;
+        for conversation in convs.as_array().into_iter().flatten() {
+            let mut images = Vec::new();
+            let mut name = |pointer: &str, conversation_id: &str| {
+                images.push(pointer.to_string());
+                match plan_asset(pointer, conversation_id, dir, media_out, &asset_names)? {
+                    AssetPlan::Named(name) | AssetPlan::Copy { name, .. } => Some(name),
+                }
+            };
+            let Ok(read) = read_chatgpt(conversation, Some(&mut name)) else {
+                continue;
+            };
+            let mut name_only = |pointer: &str, conversation_id: &str| match plan_asset(
+                pointer,
+                conversation_id,
+                dir,
+                media_out,
+                &asset_names,
+            )? {
+                AssetPlan::Named(name) | AssetPlan::Copy { name, .. } => Some(name),
+            };
+            let every_turn_export = every_turn(conversation, &read.id, Some(&mut name_only));
+            let every_turn_single_file = every_turn(conversation, &read.id, None);
+            let id = read.id.clone();
+            let do_not_remember = read.do_not_remember;
+            let export = build_conversation(read, None, owner.as_deref());
+            let single_file =
+                crate::chatlog::single_file_draft(conversation, single_owner.as_ref())
+                    .ok()
+                    .flatten();
+            out.push(ConversationRoutes {
+                id,
+                do_not_remember,
+                export,
+                single_file,
+                images,
+                every_turn_export,
+                every_turn_single_file,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Copy the images a conversation's transcript names (`pointers`, as
+/// [`read_routes`] lists them) from the export in `dir` into `media_out`,
+/// as the export route's import does: nothing already there is written
+/// over. Returns how many are in place.
+pub fn copy_images(
+    dir: &Path,
+    media_out: &Path,
+    conversation_id: &str,
+    pointers: &[String],
+) -> usize {
+    let asset_names: HashMap<String, String> =
+        std::fs::read_to_string(dir.join("conversation_asset_file_names.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<HashMap<String, String>>(&raw).ok())
+            .unwrap_or_default();
+    pointers
+        .iter()
+        .filter(|p| {
+            preserve_asset(p, conversation_id, dir, Some(media_out), &asset_names).is_some()
+        })
+        .count()
+}
+
 /// A chunk of the multi-chunk export (`conversations-000.json`, …).
 fn is_chunk_name(name: &str) -> bool {
     name.starts_with("conversations-") && name.ends_with(".json")
@@ -212,6 +343,37 @@ fn preserve_asset(
     media_out: Option<&Path>,
     asset_names: &HashMap<String, String>,
 ) -> Option<String> {
+    match plan_asset(pointer, conversation_id, dir, media_out, asset_names)? {
+        AssetPlan::Named(name) => Some(name), // no home to copy into — just name it
+        AssetPlan::Copy {
+            src,
+            target_dir,
+            name,
+        } => copy_asset(&src, &target_dir, name),
+    }
+}
+
+/// What preserving one asset takes: naming it only (no home to copy
+/// into), or copying the export's blob into the conversation's folder.
+enum AssetPlan {
+    Named(String),
+    Copy {
+        src: PathBuf,
+        target_dir: PathBuf,
+        name: String,
+    },
+}
+
+/// The checks `preserve_asset` makes before it writes anything: the blob's
+/// and the original's names are plain file names, the conversation id a
+/// plain folder name, the blob a regular file.
+fn plan_asset(
+    pointer: &str,
+    conversation_id: &str,
+    dir: &Path,
+    media_out: Option<&Path>,
+    asset_names: &HashMap<String, String>,
+) -> Option<AssetPlan> {
     let id = asset_id(pointer)?;
     let dat = format!("{id}.dat");
     if !plain_file_name(&dat) {
@@ -223,7 +385,7 @@ fn preserve_asset(
         .cloned()
         .unwrap_or_else(|| dat.clone());
     let Some(base) = media_out else {
-        return Some(original); // no home to copy into — just name it
+        return Some(AssetPlan::Named(original));
     };
     if !folder_name_ok(conversation_id) {
         return None;
@@ -233,8 +395,16 @@ fn preserve_asset(
         Ok(meta) if meta.file_type().is_file() => {}
         _ => return None,
     }
-    let target_dir = base.join(conversation_id);
-    if !real_dir(&target_dir) {
+    Some(AssetPlan::Copy {
+        src,
+        target_dir: base.join(conversation_id),
+        name: original,
+    })
+}
+
+/// Copy a blob into `target_dir` under `original` (see `preserve_asset`).
+fn copy_asset(src: &Path, target_dir: &Path, original: String) -> Option<String> {
+    if !real_dir(target_dir) {
         return None;
     }
     let target = target_dir.join(&original);
@@ -249,7 +419,7 @@ fn preserve_asset(
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Some(original),
         Err(_) => return None,
     };
-    let copied = std::fs::File::open(&src).and_then(|mut from| std::io::copy(&mut from, &mut out));
+    let copied = std::fs::File::open(src).and_then(|mut from| std::io::copy(&mut from, &mut out));
     if copied.is_err() {
         drop(out);
         let _ = std::fs::remove_file(&target); // not a half copy for the next import to keep
@@ -372,49 +542,10 @@ pub(crate) fn read_chatgpt(
             .unwrap_or(false)
     };
 
-    let mut turns = Vec::new();
-    for node in selected_branch(conversation) {
-        let Some(message) = node.get("message") else {
-            continue;
-        };
-        let role = message
-            .pointer("/author/role")
-            .and_then(|r| r.as_str())
-            .unwrap_or("unknown");
-        if role != "user" && role != "assistant" {
-            continue; // system/tool turns aren't conversation
-        }
-        let speaker = if role == "user" { "you" } else { "chatgpt" };
-        let mut text = String::new();
-        for part in message
-            .pointer("/content/parts")
-            .and_then(|p| p.as_array())
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-        {
-            if let Some(t) = part.as_str() {
-                text.push_str(t);
-                text.push('\n');
-            } else if part.get("content_type").and_then(|c| c.as_str())
-                == Some("image_asset_pointer")
-            {
-                let Some(image) = image.as_mut() else {
-                    continue;
-                };
-                let pointer = part
-                    .get("asset_pointer")
-                    .and_then(|p| p.as_str())
-                    .unwrap_or("");
-                match image(pointer, &id) {
-                    Some(name) => text.push_str(&format!("[image: {name}]\n")),
-                    None => text.push_str("[image: unavailable]\n"),
-                }
-            }
-        }
-        if !text.trim().is_empty() {
-            turns.push((speaker.to_string(), text));
-        }
-    }
+    let turns = selected_branch(conversation)
+        .into_iter()
+        .filter_map(|node| node_turn(node, &id, &mut image))
+        .collect();
     Ok(ChatgptConversation {
         id,
         title,
@@ -423,6 +554,69 @@ pub(crate) fn read_chatgpt(
         starred: flag("is_starred"),
         do_not_remember: flag("is_do_not_remember"),
     })
+}
+
+/// One node's turn: (speaker, text) for a user's or the assistant's
+/// message with text; None for anything else (system and tool turns
+/// aren't conversation). `image` names an image part's asset; without one,
+/// image parts are left out.
+fn node_turn(
+    node: &Value,
+    conversation_id: &str,
+    image: &mut Option<ImageNamer<'_>>,
+) -> Option<(String, String)> {
+    let message = node.get("message")?;
+    let role = message
+        .pointer("/author/role")
+        .and_then(|r| r.as_str())
+        .unwrap_or("unknown");
+    if role != "user" && role != "assistant" {
+        return None;
+    }
+    let speaker = if role == "user" { "you" } else { "chatgpt" };
+    let mut text = String::new();
+    for part in message
+        .pointer("/content/parts")
+        .and_then(|p| p.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+    {
+        if let Some(t) = part.as_str() {
+            text.push_str(t);
+            text.push('\n');
+        } else if part.get("content_type").and_then(|c| c.as_str()) == Some("image_asset_pointer") {
+            let Some(image) = image.as_mut() else {
+                continue;
+            };
+            let pointer = part
+                .get("asset_pointer")
+                .and_then(|p| p.as_str())
+                .unwrap_or("");
+            match image(pointer, conversation_id) {
+                Some(name) => text.push_str(&format!("[image: {name}]\n")),
+                None => text.push_str("[image: unavailable]\n"),
+            }
+        }
+    }
+    (!text.trim().is_empty()).then(|| (speaker.to_string(), text))
+}
+
+/// Every turn of a conversation's tree, on any branch, as a transcript
+/// writes it ([`turn_entry`]), in the mapping's key order.
+fn every_turn(
+    conversation: &Value,
+    conversation_id: &str,
+    mut image: Option<ImageNamer<'_>>,
+) -> Vec<String> {
+    let Some(mapping) = conversation.get("mapping").and_then(|m| m.as_object()) else {
+        return vec![];
+    };
+    let mut keys: Vec<&String> = mapping.keys().collect();
+    keys.sort();
+    keys.into_iter()
+        .filter_map(|k| node_turn(&mapping[k], conversation_id, &mut image))
+        .map(|(speaker, text)| turn_entry(&speaker, &text))
+        .collect()
 }
 
 /// The draft of a conversation read from the export; None when it has no

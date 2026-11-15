@@ -189,10 +189,23 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// While mail is held, a viewer whose vault is locked sees no draft
+    /// (`Store::mail_hidden`): a draft is written from its thread, or (an
+    /// ember's) from the message it answers, and carries its subject and
+    /// recipients — any of them can be the held message's.
+    fn held_drafts_guard(&self) -> &'static str {
+        if self.mail_hidden() {
+            " AND 0"
+        } else {
+            ""
+        }
+    }
+
     pub fn mail_draft(&self, id: &str) -> Result<Option<MailDraft>> {
+        let held = self.held_drafts_guard();
         let conn = self.lock();
         conn.query_row(
-            &format!("SELECT {COLS} FROM mail_drafts WHERE id = ?1 AND {NOT_PRIVATE}"),
+            &format!("SELECT {COLS} FROM mail_drafts WHERE id = ?1 AND {NOT_PRIVATE}{held}"),
             [id],
             row_to_draft,
         )
@@ -207,10 +220,11 @@ impl Store {
         requested_by: Option<&str>,
         limit: usize,
     ) -> Result<Vec<MailDraft>> {
+        let held = self.held_drafts_guard();
         let conn = self.lock();
         let mut stmt = conn.prepare(&format!(
             "SELECT {COLS} FROM mail_drafts
-             WHERE (?1 IS NULL OR thread_id = ?1) AND (?2 IS NULL OR requested_by = ?2) AND {NOT_PRIVATE}
+             WHERE (?1 IS NULL OR thread_id = ?1) AND (?2 IS NULL OR requested_by = ?2) AND {NOT_PRIVATE}{held}
              ORDER BY created_at DESC LIMIT ?3"
         ))?;
         let rows = stmt.query_map(

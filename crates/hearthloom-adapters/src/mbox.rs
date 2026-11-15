@@ -222,6 +222,17 @@ pub fn draft_from_bytes_filtered(
     message_to_draft(message, &labels, scope).map(Some)
 }
 
+/// One message's draft as the import reads it now, with the labels given
+/// rather than its own header's — a repair keeps the labels its memory was
+/// made under (`hearthloom repair mail`).
+pub fn draft_with_labels(
+    message: &[u8],
+    labels: &[String],
+    scope: Option<&str>,
+) -> Result<EpisodeDraft> {
+    message_to_draft(message, labels, scope)
+}
+
 /// Split on mbox `From ` separator lines (start-of-line, after a blank
 /// line or at file start). Test-only reference implementation; the
 /// production path is the streaming `ingest_batched`.

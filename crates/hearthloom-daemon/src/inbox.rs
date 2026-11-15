@@ -176,7 +176,7 @@ const UNPACK_RESERVE: u64 = 1 << 30;
 /// Bytes an archive may unpack to: what the extraction folder's disk and
 /// the data home's disk can both spare, keeping `UNPACK_RESERVE` free on
 /// each (unlimited only where neither can be measured).
-fn unpack_budget(home: &hearthloom_core::Home) -> u64 {
+pub(crate) fn unpack_budget(home: &hearthloom_core::Home) -> u64 {
     [std::env::temp_dir(), home.root().to_path_buf()]
         .iter()
         .filter_map(|dir| crate::mbox_text::free_bytes(&dir.join("probe")))
@@ -188,7 +188,7 @@ fn unpack_budget(home: &hearthloom_core::Home) -> u64 {
 /// Extract an archive to a temp dir, in-process on every platform (a Linux
 /// node has no `ditto`): a zip, or a gzipped tar. Both write only plain
 /// files and folders inside the folder, and no more than `budget` bytes.
-fn extract_archive(path: &Path, budget: u64) -> Result<tempfile::TempDir> {
+pub(crate) fn extract_archive(path: &Path, budget: u64) -> Result<tempfile::TempDir> {
     let dir = tempfile::tempdir().context("creating extraction dir")?;
     let ext = path
         .extension()

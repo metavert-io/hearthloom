@@ -1101,6 +1101,8 @@ pub async fn consolidate(state: &AppState) -> anyhow::Result<Value> {
     // node hasn't (one made elsewhere, or a crash mid-way), then rewrite
     // the summaries a retirement ticked — on the thinking node only.
     let retirements_caught_up = crate::retire::catch_up(state).await;
+    // Owner repairs (v69): settle the runs made or undone on another node.
+    crate::repair::catch_up(state).await;
     let summaries_rewritten = match &state.llm {
         Some(llm) if crate::agents::thinking_here(state) => {
             match rewrite_summaries(state, llm.as_ref(), &actor).await {
@@ -2816,7 +2818,7 @@ async fn refresh_local_sources(state: &AppState, actor: &Actor) -> anyhow::Resul
                     let drafts = hearthloom_adapters::photos::day_drafts(points, None)
                         .ok_or_else(|| anyhow::anyhow!("no dated photos found"));
                     apply("photos", drafts)?;
-                    let _ = store.photos_add_points("mac", &rows);
+                    let _ = store.photos_add_points_and_settle(&home, "mac", &rows);
                 }
                 Err(err) => apply("photos", Err(err))?,
             }
