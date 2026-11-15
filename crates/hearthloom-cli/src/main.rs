@@ -9,6 +9,7 @@ mod client;
 mod embers;
 mod eval;
 mod mail;
+mod mine;
 mod ops;
 mod registry;
 
@@ -45,6 +46,13 @@ enum Cmd {
     Mail {
         #[command(subcommand)]
         command: Option<MailCmd>,
+    },
+    /// Sources that are yours: a repository's commits by your own
+    /// addresses, or a publication's posts, count as your own words (Ask's
+    /// friend gate and the agents' taint rule).
+    Mine {
+        #[command(subcommand)]
+        command: Option<MineCmd>,
     },
     /// Google Calendar (free/busy only): set up, connect, your working
     /// hours, and when you're free — what reply drafts offer for a time.
@@ -328,6 +336,21 @@ enum KeyCmd {
     List,
     Revoke {
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum MineCmd {
+    /// What you marked as yours (default), and your addresses.
+    List,
+    /// Mark one as yours (the vault must be unlocked): `git <remote
+    /// address>` or `substack <publication address>`.
+    Add { source: String, address: String },
+    /// Take one off the list: by its id, or by source and address.
+    #[command(alias = "rm")]
+    Remove {
+        #[arg(num_args = 1..=2, required = true)]
+        target: Vec<String>,
     },
 }
 
@@ -1754,6 +1777,15 @@ async fn main() -> Result<()> {
             let client = Client::with_url(home, url.clone())?;
             mail::run(&client, op, as_json).await?;
         }
+        Cmd::Mine { command } => {
+            let op = match command.unwrap_or(MineCmd::List) {
+                MineCmd::List => mine::Op::List,
+                MineCmd::Add { source, address } => mine::Op::Add { source, address },
+                MineCmd::Remove { target } => mine::Op::Remove(target),
+            };
+            let client = Client::with_url(home, url.clone())?;
+            mine::run(&client, op, as_json).await?;
+        }
         Cmd::Agents {
             command: AgentsCmd::Accounts { command },
         } => {
@@ -2516,5 +2548,43 @@ mod tests {
         assert_eq!(body["path"], full.display().to_string());
         assert_eq!(body["include_labels"], json!([]));
         assert_eq!(body["exclude_labels"], json!([]));
+    }
+
+    #[test]
+    fn test_mine_takes_a_source_and_an_address_or_an_id() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(["hearthloom"].iter().chain(args)).map(|c| (c.command, c.json))
+        };
+        let Ok((Cmd::Mine { command: None }, false)) = parse(&["mine"]) else {
+            panic!("bare `mine` lists");
+        };
+        let Ok((
+            Cmd::Mine {
+                command: Some(MineCmd::Add { source, address }),
+            },
+            true,
+        )) = parse(&["mine", "add", "git", "git@host.example:me/repo", "--json"])
+        else {
+            panic!("not an add");
+        };
+        assert_eq!(
+            (source.as_str(), address.as_str()),
+            ("git", "git@host.example:me/repo")
+        );
+        for target in [&["os_1"][..], &["substack", "me.substack.com"]] {
+            let args: Vec<&str> = ["mine", "remove"].iter().chain(target).copied().collect();
+            let Ok((
+                Cmd::Mine {
+                    command: Some(MineCmd::Remove { target: got }),
+                },
+                _,
+            )) = parse(&args)
+            else {
+                panic!("not a remove");
+            };
+            assert_eq!(got, target);
+        }
+        assert!(parse(&["mine", "remove"]).is_err());
+        assert!(parse(&["mine", "remove", "a", "b", "c"]).is_err());
     }
 }

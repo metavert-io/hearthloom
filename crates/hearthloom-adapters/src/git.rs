@@ -18,7 +18,7 @@ const MAX_FILE_ENTITIES: usize = 20;
 
 /// Record separator at the *start* of each commit so `--name-only` file
 /// lists stay attached to their own commit when splitting.
-const PRETTY: &str = "--pretty=format:%x1e%H%x1f%an%x1f%ae%x1f%aI%x1f%s%x1f%b%x1f";
+const PRETTY: &str = "--pretty=format:%x1e%H%x1f%an%x1f%ae%x1f%aI%x1f%cI%x1f%P%x1f%s%x1f%b%x1f";
 
 /// Walk a repository's history into episode drafts. `scope: None` lets the
 /// store infer each episode's scope (known project > identity > personal).
@@ -206,7 +206,7 @@ fn parse_commit(
     attr_kind: &str,
     scope: Option<&str>,
 ) -> Result<EpisodeDraft> {
-    let mut fields = record.splitn(7, '\x1f');
+    let mut fields = record.splitn(9, '\x1f');
     let sha = fields.next().unwrap_or("").trim();
     let author_name = fields.next().unwrap_or("").trim().to_string();
     let author_email = fields
@@ -216,6 +216,12 @@ fn parse_commit(
         .to_lowercase()
         .to_string();
     let author_date = fields.next().unwrap_or("").trim();
+    // when the commit itself was made: an amend, rebase or cherry-pick
+    // keeps the author date and sets this one
+    let committed = chrono::DateTime::parse_from_rfc3339(fields.next().unwrap_or("").trim())
+        .ok()
+        .map(|t| t.to_utc().format("%Y-%m-%dT%H:%M:%SZ").to_string());
+    let parents: Vec<&str> = fields.next().unwrap_or("").split_whitespace().collect();
     let subject = fields.next().unwrap_or("").trim().to_string();
     let body_msg = fields.next().unwrap_or("").trim().to_string();
     // After the final \x1f: blank line(s) + the --name-only file list.
@@ -235,7 +241,19 @@ fn parse_commit(
 
     let mut body = String::new();
     body.push_str(&format!("commit {sha}\nrepo: {repo_identity}\n"));
-    body.push_str(&format!("author: {author_name} <{author_email}>\n\n"));
+    body.push_str(&format!("author: {author_name} <{author_email}>\n"));
+    // When the commit was made, and its parents (more than one: a merge,
+    // whose message comes from the merged branch). Core store/owned.rs
+    // counts a commit as the owner's words only when its record says both.
+    if let Some(committed) = &committed {
+        body.push_str(&format!("committed: {committed}\n"));
+    }
+    body.push_str("parents:");
+    for parent in &parents {
+        body.push(' ');
+        body.push_str(parent);
+    }
+    body.push_str("\n\n");
     body.push_str(&subject);
     if !body_msg.is_empty() {
         body.push_str("\n\n");
@@ -300,7 +318,12 @@ fn parse_commit(
         event_time,
         // A history holds every contributor's messages, and an author line
         // is whatever its writer typed: commits are not taken as the
-        // owner's own words (core `OTHERS_WORDS_SOURCES`).
+        // owner's own words (core `OTHERS_WORDS_SOURCES`) — except, read
+        // at check time, commits by the owner's own addresses in a
+        // repository the owner marked as theirs (core store/owned.rs reads
+        // this ref, the body's header lines — the first three, then
+        // `committed:` and `parents:` — and the message's trailers; keep
+        // their format).
         trust: "imported".into(),
         scope: scope.map(String::from),
         entities,
@@ -393,6 +416,240 @@ mod tests {
                 "repo-url".to_string(),
                 "https://git.example.com/team/repo.git".to_string()
             )
+        );
+
+        // "This source is mine" reads this adapter's ref and author line
+        // (core store/owned.rs): every commit names its repository's key
+        // and its author's address there.
+        for d in &drafts {
+            assert_eq!(
+                hearthloom_core::store::key_of_ref("git", &d.source_ref).as_deref(),
+                Some("git.example.com/team/repo")
+            );
+            assert_eq!(
+                hearthloom_core::store::git_author(&d.source_ref, &d.body).as_deref(),
+                Some("author@example.com")
+            );
+        }
+    }
+
+    /// Every commit's head names its parents, so a merge is known as one
+    /// whatever its message says: its message comes from the merged branch,
+    /// so "this source is mine" never counts it (core store/owned.rs
+    /// `git_commit_concern`).
+    #[test]
+    fn test_a_merge_commit_is_marked_as_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        let run = |args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Test Author")
+                .env("GIT_AUTHOR_EMAIL", "author@example.com")
+                .env("GIT_COMMITTER_NAME", "Test Author")
+                .env("GIT_COMMITTER_EMAIL", "author@example.com")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {:?}: {:?}", args, output);
+        };
+        run(&["init", "-q"]);
+        fs::write(repo.join("a.txt"), "a").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "one"]);
+        run(&["checkout", "-q", "-b", "topic"]);
+        fs::write(repo.join("b.txt"), "b").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "on the branch"]);
+        run(&["checkout", "-q", "-"]);
+        fs::write(repo.join("c.txt"), "c").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "two"]);
+        run(&[
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "fold the branch in",
+            "topic",
+        ]);
+
+        let drafts = ingest(repo, None).unwrap();
+        assert_eq!(drafts.len(), 4);
+        let mine: std::collections::BTreeSet<String> =
+            ["author@example.com".to_string()].into_iter().collect();
+        for d in &drafts {
+            let merge = d.title == "fold the branch in";
+            let head = hearthloom_core::store::git_commit_head(&d.body).unwrap();
+            let parents = match d.title.as_str() {
+                "one" => 0,
+                "fold the branch in" => 2,
+                _ => 1,
+            };
+            assert_eq!(head.parents, parents, "{}", d.body);
+            assert_eq!(
+                hearthloom_core::store::git_commit_concern(&d.body, &mine).is_some(),
+                merge,
+                "{}",
+                d.title
+            );
+            // the author line still reads
+            assert_eq!(
+                hearthloom_core::store::git_author(&d.source_ref, &d.body).as_deref(),
+                Some("author@example.com")
+            );
+        }
+    }
+
+    /// An amend keeps the author date and sets the commit time. A commit
+    /// the owner wrote one day and an agent reworded during its run the
+    /// next keeps yesterday's author date — and still doesn't count as the
+    /// owner's words in a repository they marked: its record carries the
+    /// commit time, and the check reads it (core store/owned.rs). Nor once
+    /// the owner rewrites it again after the run: the run falls between its
+    /// author date and its commit time.
+    #[test]
+    fn test_a_commit_amended_during_an_agent_run_stays_outside_text() {
+        use hearthloom_core::store::Store;
+        use hearthloom_core::{Actor, Home, IngestBatch};
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let run = |args: &[&str], author_date: Option<&str>, commit_date: &str| {
+            let mut cmd = Command::new("git");
+            cmd.arg("-C")
+                .arg(&repo)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Owner Name")
+                .env("GIT_AUTHOR_EMAIL", "me@own.example")
+                .env("GIT_COMMITTER_NAME", "Owner Name")
+                .env("GIT_COMMITTER_EMAIL", "me@own.example")
+                .env("GIT_COMMITTER_DATE", commit_date)
+                .env_remove("GIT_AUTHOR_DATE");
+            if let Some(at) = author_date {
+                cmd.env("GIT_AUTHOR_DATE", at);
+            }
+            let output = cmd.output().unwrap();
+            assert!(output.status.success(), "git {:?}: {:?}", args, output);
+        };
+        let day = "2026-11-01T09:00:00Z";
+        run(&["init", "-q"], None, day);
+        run(
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://git.example.com/owner/project.git",
+            ],
+            None,
+            day,
+        );
+        fs::write(repo.join("a.txt"), "a").unwrap();
+        run(&["add", "."], None, day);
+        run(&["commit", "-q", "-m", "a change"], Some(day), day);
+        let original = ingest(&repo, None).unwrap().remove(0);
+        // reworded the next day, during the agent's run below
+        run(
+            &["commit", "-q", "--amend", "-m", "a change, reworded"],
+            None,
+            "2026-11-02T10:30:00Z",
+        );
+        let amended = ingest(&repo, None).unwrap().remove(0);
+        assert_eq!(amended.title, "a change, reworded");
+        assert_eq!(amended.event_time.utc.as_deref(), Some(day));
+        let head = hearthloom_core::store::git_commit_head(&amended.body).unwrap();
+        assert_eq!(head.committed, "2026-11-02T10:30:00Z");
+        assert_eq!(head.parents, 0);
+
+        let home = Home::at(tmp.path().join("home"));
+        home.init().unwrap();
+        let store = Store::open(&home.db_path()).unwrap();
+        store
+            .apply_batch(
+                &home,
+                &IngestBatch {
+                    actor: "adapter:git".into(),
+                    session_id: None,
+                    episodes: vec![original.clone(), amended.clone()],
+                },
+            )
+            .unwrap();
+        store
+            .set_consolidation_state(
+                "network.profile",
+                &serde_json::json!({"emails": ["me@own.example"]}).to_string(),
+            )
+            .unwrap();
+        store
+            .owned_source_add(
+                &Actor::new("human:owner"),
+                "git",
+                "https://git.example.com/owner/project",
+                "session",
+            )
+            .unwrap();
+        let judge = |d: &EpisodeDraft| {
+            let id = hearthloom_core::ids::episode_id("git", &d.source_ref);
+            store.owned_judgement(&id).unwrap().unwrap()
+        };
+        assert!(judge(&amended).counts, "{:?}", judge(&amended).why);
+
+        let at = |t: &str| serde_json::Value::String(t.into());
+        store
+            .agents_sync_apply(&serde_json::json!({"tasks": [{
+                "id": "tk_agent", "request": "r", "brief": "b", "classes": "[]",
+                "sensitive": 0, "status": "done", "actions": 0,
+                "inputs": "[]", "outputs": "[]",
+                "created_at": at("2026-11-02T10:00:00Z"),
+                "updated_at": at("2026-11-02T11:00:00Z"),
+                "started_at": at("2026-11-02T10:00:00Z"),
+                "finished_at": at("2026-11-02T11:00:00Z"),
+            }]}))
+            .unwrap();
+        let j = judge(&amended);
+        assert!(!j.counts);
+        assert!(
+            j.why.as_deref().unwrap_or("").contains("tk_agent"),
+            "{:?}",
+            j.why
+        );
+        // the commit as the owner first made it still counts
+        assert!(judge(&original).counts, "{:?}", judge(&original).why);
+
+        // rewritten again the day after the run (a rebase or a cherry-pick
+        // sets the commit time the same way): neither time it keeps falls
+        // in the run, and the agent's words are still in it
+        run(
+            &["commit", "-q", "--amend", "--no-edit"],
+            None,
+            "2026-11-03T09:00:00Z",
+        );
+        let rewritten = ingest(&repo, None).unwrap().remove(0);
+        assert_eq!(rewritten.title, "a change, reworded");
+        assert_eq!(rewritten.event_time.utc.as_deref(), Some(day));
+        assert_eq!(
+            hearthloom_core::store::git_commit_head(&rewritten.body)
+                .unwrap()
+                .committed,
+            "2026-11-03T09:00:00Z"
+        );
+        store
+            .apply_batch(
+                &home,
+                &IngestBatch {
+                    actor: "adapter:git".into(),
+                    session_id: None,
+                    episodes: vec![rewritten.clone()],
+                },
+            )
+            .unwrap();
+        let j = judge(&rewritten);
+        assert!(!j.counts);
+        assert!(
+            j.why.as_deref().unwrap_or("").contains("tk_agent"),
+            "{:?}",
+            j.why
         );
     }
 

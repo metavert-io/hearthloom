@@ -93,6 +93,8 @@ pub const TABLE_CLASSES: &[(&str, TableClass)] = &[
     ("intents", TableClass::Exported),
     ("mail_threads", TableClass::Exported),
     ("mail_rules", TableClass::Exported),
+    // v68: the sources the owner says are theirs ("this source is mine")
+    ("owned_sources", TableClass::Exported),
     ("mail_thread_messages", TableClass::Exported),
     ("mail_watches", TableClass::Exported),
     ("mail_drafts", TableClass::Exported),

@@ -148,6 +148,15 @@ pub fn router(state: AppState) -> Router {
             axum::routing::delete(mail_rule_remove),
         )
         .route(
+            "/v1/owned-sources",
+            get(owned_sources_get).post(owned_source_add),
+        )
+        .route("/v1/owned-sources/check", get(owned_source_check))
+        .route(
+            "/v1/owned-sources/{id}",
+            axum::routing::delete(owned_source_remove),
+        )
+        .route(
             "/v1/mail/triage",
             get(mail_triage_get).post(mail_triage_set),
         )
@@ -929,6 +938,754 @@ mod write_actor_tests {
             &key(&[], Some(scoped)),
             &capture_key
         ));
+    }
+}
+
+#[cfg(test)]
+mod owned_source_tests {
+    use super::*;
+    use hearthloom_core::store::{ApiKeyClaims, KeyGrants};
+
+    const REPO: &str = "https://git.example.com/owner/project.git";
+    const SHA: &str = "1111111111111111111111111111111111111111";
+
+    fn state() -> (AppState, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::paths::Home::at(tmp.path());
+        home.init().unwrap();
+        let state = AppState {
+            store: std::sync::Arc::new(
+                hearthloom_core::store::Store::open(&home.db_path()).unwrap(),
+            ),
+            home,
+            embedder: None,
+            llm: None,
+            auth_locked: Default::default(),
+            bus: Default::default(),
+            killswitch: Default::default(),
+            running: Default::default(),
+        };
+        (state, tmp)
+    }
+
+    fn key(scopes: &[&str], grants: Option<KeyGrants>) -> AuthInfo {
+        AuthInfo(Some(ApiKeyClaims {
+            id: "ak_1".into(),
+            name: "someone".into(),
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            grants,
+        }))
+    }
+
+    fn body(source: &str, address: &str) -> Json<OwnedSourceQuery> {
+        Json(OwnedSourceQuery {
+            source: source.into(),
+            address: address.into(),
+        })
+    }
+
+    async fn add(state: &AppState, auth: AuthInfo, source: &str, address: &str) -> StatusCode {
+        match owned_source_add(
+            State(state.clone()),
+            axum::Extension(auth),
+            body(source, address),
+        )
+        .await
+        {
+            Ok(_) => StatusCode::OK,
+            Err(ApiError(code, _)) => code,
+        }
+    }
+
+    /// Only the owner adds to the list, and only with the vault open; only
+    /// the owner takes something off it.
+    #[tokio::test]
+    async fn test_only_the_owner_with_the_vault_open_marks_a_source() {
+        let (state, _tmp) = state();
+        state.store.vault_unlock(5);
+        let agent = KeyGrants::default();
+        for (who, auth) in [
+            ("an agent's key", key(&[], Some(agent))),
+            ("a write key", key(&["read", "write"], None)),
+            ("an ingest key", key(&["ingest"], None)),
+            ("a peer's key", key(&["peer"], None)),
+            ("a friend's key", key(&["friend"], None)),
+            ("an ember's read key", key(&["read"], None)),
+        ] {
+            assert_eq!(
+                add(&state, auth, "git", REPO).await,
+                StatusCode::FORBIDDEN,
+                "{who}"
+            );
+        }
+        assert!(state.store.owned_sources().unwrap().is_empty());
+
+        // the owner, vault locked
+        state.store.vault_lock();
+        assert_eq!(
+            add(&state, key(&["admin"], None), "git", REPO).await,
+            StatusCode::FORBIDDEN
+        );
+        assert!(state.store.owned_sources().unwrap().is_empty());
+
+        // the owner, vault open: a session and the owner's admin key
+        state.store.vault_unlock(5);
+        assert_eq!(
+            add(&state, AuthInfo(None), "git", REPO).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            add(
+                &state,
+                key(&["admin"], None),
+                "substack",
+                "owner.substack.com"
+            )
+            .await,
+            StatusCode::OK
+        );
+        let entries = state.store.owned_sources().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].set_by, "session");
+        assert_eq!(entries[1].set_by, "key:someone");
+
+        // a source whose items mix authors is refused, with why
+        let refused = owned_source_add(
+            State(state.clone()),
+            axum::Extension(AuthInfo(None)),
+            body("imessage", "anything"),
+        )
+        .await;
+        match refused {
+            Err(ApiError(StatusCode::BAD_REQUEST, why)) => {
+                assert!(why.contains("other people's messages"), "{why}")
+            }
+            _ => panic!("imessage was accepted"),
+        }
+
+        // reading the list and taking an entry off: the owner only
+        let listed =
+            owned_sources_get(State(state.clone()), axum::Extension(key(&["read"], None))).await;
+        assert!(matches!(listed, Err(ApiError(StatusCode::FORBIDDEN, _))));
+        let removed = owned_source_remove(
+            State(state.clone()),
+            axum::Extension(key(&["peer"], None)),
+            Path(entries[0].id.clone()),
+        )
+        .await;
+        assert!(matches!(removed, Err(ApiError(StatusCode::FORBIDDEN, _))));
+        state.store.vault_lock();
+        assert!(owned_source_remove(
+            State(state.clone()),
+            axum::Extension(key(&["admin"], None)),
+            Path(entries[0].id.clone()),
+        )
+        .await
+        .is_ok());
+        assert_eq!(state.store.owned_sources().unwrap().len(), 1);
+    }
+
+    /// Through the whole router and `auth_middleware`: an ember's key, a
+    /// scoped key, a friend's key and every ordinary key that isn't the
+    /// owner's are refused on all four routes of the list; the owner's
+    /// admin key reaches them (adding still needs the vault).
+    #[tokio::test]
+    async fn test_no_key_but_the_owners_reaches_the_list() {
+        use tower::ServiceExt;
+        let (state, _tmp) = state();
+        let mint = |name: &str, scopes: &[&str], grants: Option<KeyGrants>| -> (String, String) {
+            let scopes: Vec<String> = scopes.iter().map(|s| s.to_string()).collect();
+            let (row, secret) = state
+                .store
+                .create_api_key_scoped(
+                    &Actor::new("human:owner"),
+                    name,
+                    &scopes,
+                    None,
+                    grants.as_ref(),
+                )
+                .unwrap();
+            (row.id, secret)
+        };
+        let (ember_id, ember) = mint("plugin:clipper", &["read", "ingest", "notify"], None);
+        state
+            .store
+            .install_plugin(
+                &Actor::new("human:owner"),
+                "clipper",
+                "1.0.0",
+                &json!({"name": "clipper"}),
+                &["read".into(), "ingest".into(), "notify".into()],
+                &ember_id,
+                "local-only",
+            )
+            .unwrap();
+        use hearthloom_core::store::Access;
+        let every_grant = KeyGrants {
+            tasks: Access::Write,
+            notes: Access::Write,
+            memory: Access::Write,
+            ask: true,
+            capture: true,
+            ..Default::default()
+        };
+        let refused: Vec<(&str, String)> = vec![
+            ("an ember's key", ember),
+            ("a scoped key", mint("agent", &[], Some(every_grant)).1),
+            ("a friend's key", mint("friend:ann", &["friend"], None).1),
+            (
+                "an ordinary key",
+                mint("helper", &["read", "write", "ingest", "peer", "mcp"], None).1,
+            ),
+            ("a notify key", mint("pager", &["notify"], None).1),
+        ];
+        let (_, admin) = mint("cli", &["admin"], None);
+        let app = router(state.clone());
+        let call = |method: &str, uri: &str, secret: &str| {
+            let request = axum::http::Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", format!("Bearer {secret}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({"source": "git", "address": REPO}).to_string(),
+                ))
+                .unwrap();
+            let app = app.clone();
+            async move { app.oneshot(request).await.unwrap().status() }
+        };
+        let routes = [
+            ("GET", "/v1/owned-sources".to_string()),
+            (
+                "GET",
+                format!("/v1/owned-sources/check?source=git&address={REPO}"),
+            ),
+            ("POST", "/v1/owned-sources".to_string()),
+            (
+                "DELETE",
+                "/v1/owned-sources/os_0000000000000000".to_string(),
+            ),
+        ];
+        for (who, secret) in &refused {
+            for (method, uri) in &routes {
+                assert_eq!(
+                    call(method, uri, secret).await,
+                    StatusCode::FORBIDDEN,
+                    "{who}: {method} {uri}"
+                );
+            }
+        }
+        assert!(state.store.owned_sources().unwrap().is_empty());
+        // the owner's key gets through to the handlers
+        assert_eq!(call("GET", &routes[0].1, &admin).await, StatusCode::OK);
+        assert_eq!(call("GET", &routes[1].1, &admin).await, StatusCode::OK);
+        assert_eq!(
+            call("POST", &routes[2].1, &admin).await,
+            StatusCode::FORBIDDEN,
+            "vault locked"
+        );
+        assert_eq!(
+            call("DELETE", &routes[3].1, &admin).await,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    /// Ask's taint check follows the list: an owned repository's commit by
+    /// one of the owner's addresses stops tainting, and taints again once
+    /// the entry is removed.
+    #[tokio::test]
+    async fn test_asks_taint_check_follows_the_list() {
+        let (state, _tmp) = state();
+        let draft = hearthloom_core::EpisodeDraft {
+            source: "git".into(),
+            source_ref: format!("{REPO}#{SHA}"),
+            kind: "commit".into(),
+            title: "a change".into(),
+            body: format!(
+                "commit {SHA}\nrepo: {REPO}\nauthor: Owner Name <me@own.example>\n\
+                 committed: 2026-11-01T00:00:00Z\nparents:\n\na change"
+            ),
+            event_time: hearthloom_core::EventTime::parse_rfc3339(
+                "2026-11-01T00:00:00Z",
+                hearthloom_core::TimeUncertainty::Exact,
+            )
+            .unwrap(),
+            trust: "imported".into(),
+            scope: Some("work".into()),
+            entities: vec![],
+            edges: vec![],
+        };
+        state
+            .store
+            .apply_batch(
+                &state.home,
+                &hearthloom_core::ingest::IngestBatch {
+                    actor: "adapter:git".into(),
+                    session_id: None,
+                    episodes: vec![draft],
+                },
+            )
+            .unwrap();
+        state
+            .store
+            .set_consolidation_state(
+                "network.profile",
+                &json!({"name": "Owner Name", "emails": ["me@own.example"]}).to_string(),
+            )
+            .unwrap();
+        let id = hearthloom_core::ids::episode_id("git", &format!("{REPO}#{SHA}"));
+        let text = format!("found {id}");
+        assert!(crate::rlm::untrusted_episodes(&state, &text).is_some());
+
+        state.store.vault_unlock(5);
+        let added = owned_source_add(
+            State(state.clone()),
+            axum::Extension(AuthInfo(None)),
+            body("git", "git@git.example.com:owner/project"),
+        )
+        .await
+        .map_err(|e| e.1)
+        .unwrap();
+        assert!(crate::rlm::untrusted_episodes(&state, &text).is_none());
+        let shown = episode(
+            State(state.clone()),
+            Path(id.clone()),
+            axum::Extension(AuthInfo(None)),
+        )
+        .await
+        .map_err(|e| e.1)
+        .unwrap();
+        assert_eq!(shown.0["ownable"]["judgement"]["counts"], json!(true));
+
+        let entry_id = added.0["entry"]["id"].as_str().unwrap().to_string();
+        assert!(owned_source_remove(
+            State(state.clone()),
+            axum::Extension(AuthInfo(None)),
+            Path(entry_id),
+        )
+        .await
+        .is_ok());
+        assert!(crate::rlm::untrusted_episodes(&state, &text).is_some());
+    }
+
+    /// An ember's `ingest` key reaches the virtual-source routes, but the
+    /// server names the writer: a promotion into a source named like an
+    /// importer, under an address the owner marked, is the ember's text
+    /// and stays outside text.
+    #[tokio::test]
+    async fn test_an_embers_promotion_never_passes_for_an_importer() {
+        let (state, tmp) = state();
+        let mount = tmp.path().join("mount");
+        let post = mount.join("https:/owner.substack.com/p");
+        std::fs::create_dir_all(&post).unwrap();
+        std::fs::write(post.join("x"), "words the ember chose").unwrap();
+        state
+            .store
+            .install_plugin(
+                &Actor::new("human:owner"),
+                "clipper",
+                "1.0.0",
+                &json!({"name": "clipper"}),
+                &["ingest".into()],
+                "ak_ember",
+                "local-only",
+            )
+            .unwrap();
+        let ember = AuthInfo(Some(ApiKeyClaims {
+            id: "ak_ember".into(),
+            name: "plugin:clipper".into(),
+            scopes: vec!["ingest".into()],
+            grants: None,
+        }));
+        let _ = register_virtual(
+            State(state.clone()),
+            axum::Extension(ember.clone()),
+            Json(RegisterVirtualBody {
+                actor: "adapter:substack".into(),
+                session_id: None,
+                name: "substack".into(),
+                adapter: Some("hearthfs".into()),
+                config: json!({"mount": mount.to_string_lossy(), "magic": false}),
+                capabilities: vec![],
+            }),
+        )
+        .await
+        .map_err(|e| e.1)
+        .unwrap();
+        state
+            .store
+            .owned_source_add(
+                &Actor::new("human:owner"),
+                "substack",
+                "owner.substack.com",
+                "session",
+            )
+            .unwrap();
+        let url = "https://owner.substack.com/p/x";
+        let _ = promote_virtual(
+            State(state.clone()),
+            axum::Extension(ember),
+            Path("substack".into()),
+            Json(PromoteVirtualBody {
+                actor: "adapter:substack".into(),
+                session_id: None,
+                path: url.into(),
+                kind: None,
+                scope: None,
+                budget: None,
+            }),
+        )
+        .await
+        .map_err(|e| e.1)
+        .unwrap();
+        let id = hearthloom_core::ids::episode_id("substack", url);
+        assert_eq!(
+            state
+                .store
+                .episode_origin(&id)
+                .unwrap()
+                .unwrap()
+                .writer
+                .as_deref(),
+            Some("plugin:clipper")
+        );
+        assert_eq!(
+            state
+                .store
+                .first_untrusted_episode(std::slice::from_ref(&id))
+                .unwrap(),
+            Some(id)
+        );
+    }
+
+    /// While a repository is on the list, an address added to the owner's
+    /// own (here on the profile card) needs the owner and the vault open,
+    /// like marking a source; the change shows in the list's history.
+    #[tokio::test]
+    async fn test_adding_an_owner_address_needs_the_vault_while_a_repository_is_listed() {
+        let (state, _tmp) = state();
+        let card = |emails: &[&str]| {
+            Json(MyCardBody {
+                actor: "human:owner".into(),
+                name: "Owner".into(),
+                emails: emails.iter().map(|e| e.to_string()).collect(),
+                emoji: String::new(),
+                color: String::new(),
+                bio: String::new(),
+                avatar: String::new(),
+            })
+        };
+        let set = |auth: AuthInfo, emails: &'static [&'static str]| {
+            let state = state.clone();
+            async move {
+                match mycard_set(State(state), axum::Extension(auth), card(emails)).await {
+                    Ok(_) => StatusCode::OK,
+                    Err(ApiError(code, _)) => code,
+                }
+            }
+        };
+        // nothing listed: the card is the card
+        assert_eq!(
+            set(AuthInfo(None), &["me@own.example"]).await,
+            StatusCode::OK
+        );
+        state
+            .store
+            .owned_source_add(&Actor::new("human:owner"), "git", REPO, "session")
+            .unwrap();
+
+        // vault locked: no new address; keeping or removing one is fine
+        assert_eq!(
+            set(AuthInfo(None), &["me@own.example", "ann@else.example"]).await,
+            StatusCode::FORBIDDEN
+        );
+        assert!(!state
+            .store
+            .owner_emails()
+            .unwrap()
+            .contains("ann@else.example"));
+        assert_eq!(
+            set(AuthInfo(None), &["me@own.example"]).await,
+            StatusCode::OK
+        );
+        // never another key's change
+        state.store.vault_unlock(5);
+        assert_eq!(
+            set(key(&["read", "write"], None), &["ann@else.example"]).await,
+            StatusCode::FORBIDDEN
+        );
+        // the owner, vault open
+        assert_eq!(
+            set(
+                key(&["admin"], None),
+                &["me@own.example", "ann@else.example"]
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert!(state
+            .store
+            .owner_emails()
+            .unwrap()
+            .contains("ann@else.example"));
+        let history = state.store.owned_source_history(10).unwrap();
+        let change = history.iter().find(|h| h.op == "addresses").unwrap();
+        assert_eq!(change.added, ["ann@else.example"]);
+        assert_eq!(change.place.as_deref(), Some("profile card"));
+    }
+
+    /// Connecting a mailbox makes its address — and the aliases kept for
+    /// it, which a reconnect brings back — the owner's. While a repository
+    /// is listed and the vault is locked, that is refused before anything
+    /// happens (no sign-in is tried, nothing is saved).
+    #[tokio::test]
+    async fn test_connecting_a_mailbox_needs_the_vault_while_a_repository_is_listed() {
+        let (state, _tmp) = state();
+        let connect = |user: &str| {
+            let state = state.clone();
+            let body = GmailSaveBody {
+                actor: "human:owner".into(),
+                address: None,
+                user: Some(user.into()),
+                password: Some("abcd efgh ijkl mnop".into()),
+                disconnect: false,
+                watch: None,
+                every_minutes: None,
+                aliases: None,
+                embers: None,
+            };
+            async move {
+                match gmail_save(State(state), axum::Extension(AuthInfo(None)), Json(body)).await {
+                    Ok(_) => StatusCode::OK,
+                    Err(ApiError(code, _)) => code,
+                }
+            }
+        };
+        state
+            .store
+            .set_consolidation_state(
+                "network.profile",
+                &json!({"name": "Owner", "emails": ["me@own.example"]}).to_string(),
+            )
+            .unwrap();
+        state
+            .store
+            .owned_source_add(&Actor::new("human:owner"), "git", REPO, "session")
+            .unwrap();
+
+        // a new address
+        assert_eq!(
+            connect("new-mailbox@own.example").await,
+            StatusCode::FORBIDDEN
+        );
+        // an address already the owner's, whose kept aliases would return
+        let (_, slot, _) = crate::mailboxes::slot_for(&[], "me@own.example");
+        state
+            .store
+            .set_consolidation_state(
+                &format!("{}.{slot}", crate::mailboxes::KEY_ALIASES),
+                "kept-alias@own.example",
+            )
+            .unwrap();
+        assert_eq!(connect("me@own.example").await, StatusCode::FORBIDDEN);
+        assert!(crate::mailboxes::find("new-mailbox@own.example").is_none());
+        assert!(crate::mailboxes::find("me@own.example").is_none());
+        let known = state.store.owner_emails().unwrap();
+        assert!(!known.contains("new-mailbox@own.example"));
+        assert!(!known.contains("kept-alias@own.example"));
+    }
+
+    /// The sign-in takes a while, and the owner's addresses can change
+    /// during it. An address on the card passes the first check; taken off
+    /// the card while Gmail answers, the connect is checked again before
+    /// anything is saved, so the mailbox doesn't bring it back while the
+    /// vault is locked.
+    #[tokio::test]
+    async fn test_an_address_taken_off_during_the_sign_in_is_checked_again() {
+        let (state, _tmp) = state();
+        let address = "card-only@own.example";
+        state
+            .store
+            .set_consolidation_state(
+                "network.profile",
+                &json!({"name": "Owner", "emails": [address]}).to_string(),
+            )
+            .unwrap();
+        state
+            .store
+            .owned_source_add(&Actor::new("human:owner"), "git", REPO, "session")
+            .unwrap();
+        let body = GmailSaveBody {
+            actor: "human:owner".into(),
+            address: None,
+            user: Some(address.into()),
+            password: Some("abcd efgh ijkl mnop".into()),
+            disconnect: false,
+            watch: None,
+            every_minutes: None,
+            aliases: None,
+            embers: None,
+        };
+        let during = state.clone();
+        let signed_in = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reached = signed_in.clone();
+        let result = gmail_save_with(
+            state.clone(),
+            AuthInfo(None),
+            body,
+            move |_, _| {
+                // the owner takes the address off the card meanwhile (allowed
+                // with the vault locked: it narrows the list)
+                let taken_off = tokio::runtime::Handle::current().block_on(mycard_set(
+                    State(during),
+                    axum::Extension(AuthInfo(None)),
+                    Json(MyCardBody {
+                        actor: "human:owner".into(),
+                        name: "Owner".into(),
+                        emails: vec![],
+                        emoji: String::new(),
+                        color: String::new(),
+                        bio: String::new(),
+                        avatar: String::new(),
+                    }),
+                ));
+                assert!(taken_off.is_ok());
+                reached.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+            |_, _| panic!("the connect was saved"),
+        )
+        .await;
+        assert!(signed_in.load(std::sync::atomic::Ordering::SeqCst));
+        match result {
+            Err(ApiError(code, _)) => assert_eq!(code, StatusCode::FORBIDDEN),
+            Ok(_) => panic!("the connect was saved"),
+        }
+        assert!(crate::mailboxes::find(address).is_none());
+        assert!(!state.store.owner_emails().unwrap().contains(address));
+    }
+
+    /// An address taken off the card after a connect's last check waits
+    /// for that connect to save: the connect is the earlier change and the
+    /// card's the later one, so nothing the owner took off comes back after
+    /// they took it off.
+    #[tokio::test]
+    async fn test_an_address_taken_off_after_the_last_check_waits_for_the_save() {
+        use std::sync::{Arc, Mutex};
+        let (state, _tmp) = state();
+        let address = "card-only-turn@own.example";
+        let card = |emails: Vec<String>| {
+            Json(MyCardBody {
+                actor: "human:owner".into(),
+                name: "Owner".into(),
+                emails,
+                emoji: String::new(),
+                color: String::new(),
+                bio: String::new(),
+                avatar: String::new(),
+            })
+        };
+        state
+            .store
+            .set_consolidation_state(
+                "network.profile",
+                &json!({"name": "Owner", "emails": [address]}).to_string(),
+            )
+            .unwrap();
+        state
+            .store
+            .owned_source_add(&Actor::new("human:owner"), "git", REPO, "session")
+            .unwrap();
+        let body = GmailSaveBody {
+            actor: "human:owner".into(),
+            address: None,
+            user: Some(address.into()),
+            password: Some("abcd efgh ijkl mnop".into()),
+            disconnect: false,
+            watch: None,
+            every_minutes: None,
+            aliases: None,
+            embers: None,
+        };
+        let during = state.clone();
+        let taken_off_before_save = Arc::new(Mutex::new(None::<bool>));
+        let seen = taken_off_before_save.clone();
+        let removal = Arc::new(Mutex::new(None));
+        let started = removal.clone();
+        let result = gmail_save_with(
+            state.clone(),
+            AuthInfo(None),
+            body,
+            |_, _| Ok(()),
+            move |_, _| {
+                // the connect has made its last check; the owner takes the
+                // address off the card now, from another request
+                let (done, finished) = std::sync::mpsc::channel();
+                let off = card(vec![]);
+                let handle = std::thread::spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .build()
+                        .unwrap();
+                    let taken_off = runtime
+                        .block_on(mycard_set(
+                            State(during),
+                            axum::Extension(AuthInfo(None)),
+                            off,
+                        ))
+                        .is_ok();
+                    let _ = done.send(());
+                    taken_off
+                });
+                // time enough for it to finish, were it not waiting
+                let early = finished
+                    .recv_timeout(std::time::Duration::from_millis(300))
+                    .is_ok();
+                *seen.lock().unwrap() = Some(early);
+                *started.lock().unwrap() = Some(handle);
+                Ok(())
+            },
+        )
+        .await;
+        assert!(result.is_ok(), "the connect was refused");
+        assert_eq!(*taken_off_before_save.lock().unwrap(), Some(false));
+        let handle = removal.lock().unwrap().take().unwrap();
+        assert!(handle.join().unwrap(), "the card change failed");
+        // the history has the connect first, then the card change
+        let places: Vec<Option<String>> = state
+            .store
+            .owned_source_history(10)
+            .unwrap()
+            .into_iter()
+            .filter(|h| h.op == "addresses")
+            .map(|h| h.place)
+            .collect();
+        assert_eq!(
+            places,
+            [
+                Some("profile card".to_string()),
+                Some(format!("mailbox {address}"))
+            ]
+        );
+        assert!(matches!(card_emails(&state.store), Ok(emails) if !emails.contains(address)));
+    }
+
+    #[test]
+    fn test_a_newer_profile_card_is_taken_and_an_older_one_is_not() {
+        let (state, _tmp) = state();
+        let card = |emails: &[&str], at: &str| json!({"value": json!({"emails": emails}).to_string(), "updated_at": at});
+        assert!(adopt_profile_card(
+            &state.store,
+            &card(&["a@x.example"], "2026-11-02T00:00:00Z")
+        )
+        .unwrap());
+        assert!(!adopt_profile_card(
+            &state.store,
+            &card(&["b@x.example"], "2026-11-01T00:00:00Z")
+        )
+        .unwrap());
+        assert!(state.store.owner_emails().unwrap().contains("a@x.example"));
+        let envelope = profile_card_envelope(&state.store).unwrap();
+        assert_eq!(envelope["updated_at"], json!("2026-11-02T00:00:00Z"));
     }
 }
 
@@ -2500,6 +3257,19 @@ async fn episode(
         value["body"] = json!(body);
         // how it got here (v61) — the owner's view only: it names nodes and agents
         value["provenance"] = crate::provenance::describe(&state, &id).unwrap_or(Value::Null);
+        // a repository's commit or a publication's post: whether the
+        // owner's list makes it their own words, and the part it belongs to
+        if let Ok(Some(judgement)) = state.store.owned_judgement(&id) {
+            let names = hearthloom_core::store::ownable(&judgement.source).map(|s| s.names);
+            // what to send back to mark it: the repository's address (the
+            // ref before `#<commit>`) or the post's address
+            let source_ref = value["source_ref"].as_str().unwrap_or_default();
+            let address = match judgement.source.as_str() {
+                "git" => source_ref.rsplit_once('#').map_or("", |(a, _)| a),
+                _ => source_ref,
+            };
+            value["ownable"] = json!({"names": names, "address": address, "judgement": judgement});
+        }
         if let Some(state_) = superseded {
             match state_.strip_prefix(hearthloom_core::store::RETIRED_PREFIX) {
                 Some(rid) => value["retired_by"] = json!(rid),
@@ -2887,8 +3657,11 @@ struct RegisterVirtualBody {
 
 /// Register (or update) a virtual source: data kept at origin, queried at
 /// need, surfaced as RLM read handles, materialized only on promotion.
+/// An ember's `ingest` key reaches this route: the server names the
+/// writer (`ingest_actor`), as on `/v1/ingest`.
 async fn register_virtual(
     State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
     Json(body): Json<RegisterVirtualBody>,
 ) -> Result<Json<Value>, ApiError> {
     if body.actor.trim().is_empty() {
@@ -2898,7 +3671,7 @@ async fn register_virtual(
         return Err(bad_request("name is required"));
     }
     let actor = Actor {
-        actor: body.actor,
+        actor: ingest_actor(&state, &auth, &body.actor),
         session_id: body.session_id,
     };
     let adapter = body.adapter.unwrap_or_else(|| body.name.clone());
@@ -3148,9 +3921,14 @@ struct PromoteVirtualBody {
 }
 
 /// Promote a virtual result into the substrate — materialize it as an
-/// episode with provenance (or quarantine, for an untrusted source).
+/// episode with provenance (or quarantine, for an untrusted source). The
+/// server names the writer (`ingest_actor`): an ember's promotion lands
+/// under `plugin:<name>` whatever its body claims, so it can never pass
+/// for an importer (`adapter:<source>`) — which "this source is mine"
+/// believes (core store/owned.rs).
 async fn promote_virtual(
     State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
     Path(name): Path<String>,
     Json(body): Json<PromoteVirtualBody>,
 ) -> Result<Json<Value>, ApiError> {
@@ -3158,7 +3936,7 @@ async fn promote_virtual(
         return Err(bad_request("actor is required on every write"));
     }
     let actor = Actor {
-        actor: body.actor,
+        actor: ingest_actor(&state, &auth, &body.actor),
         session_id: body.session_id,
     };
     let outcome = crate::virtual_source::promote(
@@ -3686,6 +4464,47 @@ async fn gmail_save(
     axum::Extension(auth): axum::Extension<AuthInfo>,
     Json(body): Json<GmailSaveBody>,
 ) -> Result<Json<Value>, ApiError> {
+    gmail_save_with(
+        state,
+        auth,
+        body,
+        gmail_sign_in,
+        hearthloom_core::secrets::set_env_vars,
+    )
+    .await
+}
+
+/// The test a connect must pass: a real IMAP sign-in that opens All Mail.
+fn gmail_sign_in(user: String, password: String) -> anyhow::Result<()> {
+    use hearthloom_adapters::gmail_imap::MailFeed;
+    let mut feed = hearthloom_adapters::gmail_imap::ImapFeed::connect(&user, &password)?;
+    feed.select_all_mail()?;
+    feed.logout();
+    Ok(())
+}
+
+/// The addresses connecting `user` in `slot` makes the owner's: the
+/// address and the aliases kept for that slot (a reconnect brings them
+/// back).
+fn mailbox_connect_gives(
+    state: &AppState,
+    slot: &str,
+    user: &str,
+) -> std::collections::BTreeSet<String> {
+    crate::mailboxes::aliases_of_id(state, slot)
+        .into_iter()
+        .chain(std::iter::once(user.to_lowercase()))
+        .collect()
+}
+
+/// `save` stores a connect's credential (`set_env_vars` outside tests).
+async fn gmail_save_with(
+    state: AppState,
+    auth: AuthInfo,
+    body: GmailSaveBody,
+    sign_in: impl FnOnce(String, String) -> anyhow::Result<()> + Send + 'static,
+    save: impl FnOnce(&std::path::Path, &[(&str, &str)]) -> anyhow::Result<()> + Send,
+) -> Result<Json<Value>, ApiError> {
     require_owner(&auth, "change this node's mail connections")?;
     if body.actor.trim().is_empty() {
         return Err(bad_request("actor is required on every write"));
@@ -3696,7 +4515,22 @@ async fn gmail_save(
         || body.aliases.is_some()
         || body.embers.is_some();
     if settings && !connecting {
+        let _turn = owner_addresses_turn();
         let mb = mailbox_named(body.address.as_deref())?;
+        // aliases are owner addresses (core store/owned.rs): checked
+        // before anything here is saved
+        let aliases_before: std::collections::BTreeSet<String> =
+            crate::mailboxes::aliases(&state, &mb).into_iter().collect();
+        let aliases_after = match &body.aliases {
+            Some(list) => {
+                let clean = crate::mailboxes::clean_aliases(&mb.account(), list)
+                    .map_err(|e| bad_request(format!("{e:#}")))?;
+                let clean: std::collections::BTreeSet<String> = clean.into_iter().collect();
+                may_add_owner_addresses(&state, &clean)?;
+                Some(clean)
+            }
+            None => None,
+        };
         if let Some(on) = body.watch {
             state.store.set_consolidation_state(
                 &mb.key(crate::gmail_watch::KEY_WATCH),
@@ -3712,9 +4546,16 @@ async fn gmail_save(
                 &minutes.to_string(),
             )?;
         }
-        if let Some(list) = &body.aliases {
+        if let (Some(list), Some(after)) = (&body.aliases, &aliases_after) {
             crate::mailboxes::set_aliases(&state, &mb, list)
                 .map_err(|e| bad_request(format!("{e:#}")))?;
+            state.store.owned_addresses_changed(
+                &Actor::new("human:owner"),
+                &format!("aliases of {}", mb.address),
+                &aliases_before,
+                after,
+                &owner_via(&auth),
+            )?;
         }
         if let Some(on) = body.embers {
             crate::mailboxes::set_embers(&state, &mb, on)?;
@@ -3730,6 +4571,7 @@ async fn gmail_save(
         }
     }
     if body.disconnect {
+        let _turn = owner_addresses_turn();
         let mb = mailbox_named(body.address.as_deref())?;
         let (user_var, pass_var) = mb.env_names();
         hearthloom_core::secrets::set_env_vars(
@@ -3739,6 +4581,15 @@ async fn gmail_save(
         .map_err(|e| bad_request(format!("{e:#}")))?;
         crate::gmail_watch::recheck_mailbox(&mb.id, true);
         crate::agents::publish_self(&state);
+        // its addresses were the owner's (core store/owned.rs): the list's
+        // history shows they went
+        state.store.owned_addresses_changed(
+            &Actor::new("human:owner"),
+            &format!("mailbox {}", mb.address),
+            &crate::mailboxes::addresses_of(&state, &mb),
+            &Default::default(),
+            &owner_via(&auth),
+        )?;
         crate::monitor::log(
             &state,
             "info",
@@ -3776,37 +4627,48 @@ async fn gmail_save(
             "an app password is required — create one at myaccount.google.com/apppasswords",
         ));
     }
+    // A connected mailbox's address, and the aliases kept for it (a
+    // reconnect brings them back), are owner addresses (core
+    // store/owned.rs): checked like an alias or a card address before
+    // anything — the sign-in test included — happens, and again before
+    // the save.
+    let (_, slot, _) = crate::mailboxes::slot_for(&crate::mailboxes::all(), &user);
+    may_add_owner_addresses(&state, &mailbox_connect_gives(&state, &slot, &user))?;
     let (u, p) = (user.clone(), password.clone());
-    crate::scoped::spawn_blocking(move || -> anyhow::Result<()> {
-        let mut feed = hearthloom_adapters::gmail_imap::ImapFeed::connect(&u, &p)?;
-        use hearthloom_adapters::gmail_imap::MailFeed;
-        feed.select_all_mail()?;
-        feed.logout();
-        Ok(())
-    })
-    .await
-    .map_err(anyhow::Error::from)?
-    .map_err(|e| {
-        // Gmail's reason, never the password — so a failed connect can be
-        // diagnosed from the log
-        crate::monitor::log(
-            &state,
-            "warn",
-            "gmail_connect_failed",
-            &format!("Gmail sign-in for {user} failed: {e:#}"),
-            None,
-        );
-        tracing::warn!("gmail connect for {user} failed: {e:#}");
-        bad_request(format!(
-            "Gmail sign-in failed: {e:#}. Check the address, and that this is an app password \
+    crate::scoped::spawn_blocking(move || sign_in(u, p))
+        .await
+        .map_err(anyhow::Error::from)?
+        .map_err(|e| {
+            // Gmail's reason, never the password — so a failed connect can be
+            // diagnosed from the log
+            crate::monitor::log(
+                &state,
+                "warn",
+                "gmail_connect_failed",
+                &format!("Gmail sign-in for {user} failed: {e:#}"),
+                None,
+            );
+            tracing::warn!("gmail connect for {user} failed: {e:#}");
+            bad_request(format!(
+                "Gmail sign-in failed: {e:#}. Check the address, and that this is an app password \
          (myaccount.google.com/apppasswords), not your account password."
-        ))
-    })?;
+            ))
+        })?;
+    // the owner's addresses may have changed while Gmail answered (one
+    // taken off the card, an alias kept): checked again on what is here
+    // now, in this change's turn, which lasts until it is saved, published
+    // and recorded (nothing awaited from here on)
+    let _turn = owner_addresses_turn();
     // an address already here keeps its slot; the first mailbox keeps the
     // original names (mailboxes.rs)
     let (first, id, (user_var, pass_var)) =
         crate::mailboxes::slot_for(&crate::mailboxes::all(), &user);
-    hearthloom_core::secrets::set_env_vars(
+    let gives = mailbox_connect_gives(&state, &id, &user);
+    may_add_owner_addresses(&state, &gives)?;
+    let gave = crate::mailboxes::find(&id)
+        .map(|mb| crate::mailboxes::addresses_of(&state, &mb))
+        .unwrap_or_default();
+    save(
         state.home.root(),
         &[
             (user_var.as_str(), user.as_str()),
@@ -3816,6 +4678,13 @@ async fn gmail_save(
     .map_err(|e| bad_request(format!("{e:#}")))?;
     crate::gmail_watch::recheck_mailbox(&id, true);
     crate::agents::publish_self(&state);
+    state.store.owned_addresses_changed(
+        &Actor::new("human:owner"),
+        &format!("mailbox {user}"),
+        &gave,
+        &gives,
+        &owner_via(&auth),
+    )?;
     crate::monitor::log(
         &state,
         "info",
@@ -5976,6 +6845,147 @@ async fn mail_rule_remove(
     Ok(Json(json!({"removed": id})))
 }
 
+/* ————— "this source is mine" (v68, core store/owned.rs) ————— */
+
+/// Who changed the owner's list, as the server knows it — never as the
+/// request says.
+fn owner_via(auth: &AuthInfo) -> String {
+    auth.0
+        .as_ref()
+        .map(|c| format!("key:{}", c.name))
+        .unwrap_or_else(|| "session".into())
+}
+
+/// The owner's list, the sources that can join it (and the ones that
+/// can't, with why), the owner's addresses that decide whose commits
+/// count, and the latest changes.
+async fn owned_sources_get(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "see which sources you marked as yours")?;
+    let sources: Vec<Value> = hearthloom_core::store::OWNABLE_SOURCES
+        .iter()
+        .map(|s| {
+            json!({"source": s.source, "names": s.names, "given_as": s.given_as,
+                   "counts": s.counts})
+        })
+        .collect();
+    let not_ownable: Vec<Value> = hearthloom_core::store::NOT_OWNABLE
+        .iter()
+        .map(|(source, why)| json!({"source": source.trim_end_matches('-'), "why": why}))
+        .collect();
+    // how many memories each entry names reads every commit's and post's
+    // ref: off the runtime's threads
+    let store = state.store.clone();
+    let (entries, identities, history, stored) = crate::scoped::spawn_blocking(move || {
+        anyhow::Ok((
+            store.owned_sources()?,
+            store.owner_emails()?,
+            store.owned_source_history(30)?,
+            store.owned_source_stored()?,
+        ))
+    })
+    .await
+    .map_err(anyhow::Error::from)??;
+    Ok(Json(json!({
+        "entries": entries,
+        "identities": identities,
+        "sources": sources,
+        "not_ownable": not_ownable,
+        "history": history,
+        // entry id → memories stored under its key (absent: none)
+        "stored": stored,
+    })))
+}
+
+#[derive(Deserialize)]
+struct OwnedSourceQuery {
+    source: String,
+    address: String,
+}
+
+/// The key an address reads as, and the entry naming it if listed — what
+/// the dashboard's "This is mine" control asks before it offers itself.
+async fn owned_source_check(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Query(q): Query<OwnedSourceQuery>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "see which sources you marked as yours")?;
+    let (key, entry) = state
+        .store
+        .owned_source_lookup(q.source.trim(), &q.address)
+        .map_err(|e| bad_request(format!("{e:#}")))?;
+    Ok(Json(
+        json!({"source": q.source.trim(), "key": key, "entry": entry}),
+    ))
+}
+
+/// Mark part of a source as the owner's. It relaxes the taint rule for
+/// that text, so only the owner may, and only with the vault open.
+async fn owned_source_add(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(body): Json<OwnedSourceQuery>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "mark a source as yours")?;
+    if state.store.vault_status().0 {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "unlock the vault first: marking a source as yours lets Ask message friends \
+             and agents act under your normal rules after reading it"
+                .into(),
+        ));
+    }
+    let (entry, added) = state
+        .store
+        .owned_source_add(
+            &Actor::new("human:owner"),
+            body.source.trim(),
+            &body.address,
+            &owner_via(&auth),
+        )
+        .map_err(|e| bad_request(format!("{e:#}")))?;
+    if added {
+        crate::bus::touch(&state, "operational.changed");
+    }
+    let store = state.store.clone();
+    let stored = crate::scoped::spawn_blocking(move || store.owned_source_stored())
+        .await
+        .map_err(anyhow::Error::from)??;
+    Ok(Json(json!({
+        "entry": entry,
+        "added": added,
+        // memories stored under this entry's key: 0 means it changes
+        // nothing yet (an address its posts aren't filed under, or nothing
+        // imported)
+        "stored": stored.get(&entry.id).copied().unwrap_or(0),
+    })))
+}
+
+/// Take an entry off the list: its text is outside text again. Only the
+/// owner may change the list; taking something off tightens the gate, so
+/// the vault needn't be open.
+async fn owned_source_remove(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "change which sources are yours")?;
+    let Some(entry) = state
+        .store
+        .owned_source_remove(&Actor::new("human:owner"), &id)?
+    else {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("no entry {id:?} on your list"),
+        ));
+    };
+    crate::bus::touch(&state, "operational.changed");
+    Ok(Json(json!({"removed": entry})))
+}
+
 async fn mail_triage_get(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthInfo>,
@@ -7815,7 +8825,43 @@ async fn sync_operational_get(
     ) {
         obj.insert("visit_rule".into(), rule);
     }
+    // And the profile card: its addresses are the owner's own, which the
+    // "this source is mine" check reads on every node.
+    if let (Some(obj), Some(card)) = (out.as_object_mut(), profile_card_envelope(&state.store)) {
+        obj.insert("profile".into(), card);
+    }
     Ok(Json(out))
+}
+
+/// The owner's profile card as the mirror carries it (LWW by its stamp).
+pub(crate) fn profile_card_envelope(store: &hearthloom_core::store::Store) -> Option<Value> {
+    let card = store.consolidation_state("network.profile").ok()??;
+    let stamp = store
+        .consolidation_state("network.profile.updated_at")
+        .ok()??;
+    Some(json!({"value": card, "updated_at": stamp}))
+}
+
+/// Take a peer's profile card when its stamp is newer than ours.
+pub(crate) fn adopt_profile_card(
+    store: &hearthloom_core::store::Store,
+    envelope: &Value,
+) -> anyhow::Result<bool> {
+    let (Some(value), Some(stamp)) = (
+        envelope.get("value").and_then(|v| v.as_str()),
+        envelope.get("updated_at").and_then(|v| v.as_str()),
+    ) else {
+        return Ok(false);
+    };
+    let local_stamp = store
+        .consolidation_state("network.profile.updated_at")?
+        .unwrap_or_default();
+    if stamp <= local_stamp.as_str() {
+        return Ok(false);
+    }
+    store.set_consolidation_state("network.profile", value)?;
+    store.set_consolidation_state("network.profile.updated_at", stamp)?;
+    Ok(true)
 }
 
 /// The authoritative node mirroring operational state here (peer scope).
@@ -7830,23 +8876,7 @@ async fn sync_operational(
     // v46: the profile card rides the mirror (LWW by its own stamp) so
     // "who I am" edited on either node follows the record to both.
     if let Some(envelope) = operational.get("profile") {
-        if let (Some(value), Some(stamp)) = (
-            envelope.get("value").and_then(|v| v.as_str()),
-            envelope.get("updated_at").and_then(|v| v.as_str()),
-        ) {
-            let local_stamp = state
-                .store
-                .consolidation_state("network.profile.updated_at")?
-                .unwrap_or_default();
-            if stamp > local_stamp.as_str() {
-                state
-                    .store
-                    .set_consolidation_state("network.profile", value)?;
-                state
-                    .store
-                    .set_consolidation_state("network.profile.updated_at", stamp)?;
-            }
-        }
+        adopt_profile_card(&state.store, envelope)?;
     }
     // The monthly spend budget follows the same way (budget.rs).
     if let Some(envelope) = operational.get("llm_budget") {
@@ -9032,11 +10062,23 @@ struct MyCardBody {
 
 async fn mycard_set(
     State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
     Json(body): Json<MyCardBody>,
 ) -> Result<Json<Value>, ApiError> {
+    require_owner(&auth, "change your profile card")?;
     if body.actor.trim().is_empty() {
         return Err(bad_request("actor is required on every write"));
     }
+    let emails: Vec<String> = body
+        .emails
+        .iter()
+        .map(|e| e.trim().to_lowercase())
+        .filter(|e| e.contains('@'))
+        .collect();
+    let _turn = owner_addresses_turn();
+    let before = card_emails(&state.store)?;
+    let after: std::collections::BTreeSet<String> = emails.iter().cloned().collect();
+    may_add_owner_addresses(&state, &after)?;
     let avatar = body.avatar.trim();
     if avatar.len() > 1_400_000 {
         return Err(bad_request("that avatar is too big — keep it under 1MB"));
@@ -9048,8 +10090,7 @@ async fn mycard_set(
     }
     let card = json!({
         "name": body.name.trim(),
-        "emails": body.emails.iter().map(|e| e.trim().to_lowercase())
-            .filter(|e| e.contains('@')).collect::<Vec<_>>(),
+        "emails": emails,
         "emoji": body.emoji.trim(), "color": body.color.trim(),
         "bio": body.bio.trim(),
         "avatar": avatar,
@@ -9062,7 +10103,73 @@ async fn mycard_set(
         "network.profile.updated_at",
         &hearthloom_core::time::now_utc(),
     )?;
+    // the card's addresses are owner addresses: the list's history shows
+    // when they changed
+    state.store.owned_addresses_changed(
+        &Actor::new("human:owner"),
+        "profile card",
+        &before,
+        &after,
+        &owner_via(&auth),
+    )?;
     Ok(Json(card))
+}
+
+/// The addresses on the owner's profile card now.
+fn card_emails(
+    store: &hearthloom_core::store::Store,
+) -> Result<std::collections::BTreeSet<String>, ApiError> {
+    let card: Value = store
+        .consolidation_state("network.profile")?
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    Ok(card["emails"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.as_str().map(str::to_lowercase))
+        .collect())
+}
+
+/// Changes to the owner's addresses on this node — the profile card, a
+/// mailbox's aliases, connecting or disconnecting a mailbox — take turns:
+/// each holds this from its last `may_add_owner_addresses` check until it
+/// has saved, published and recorded the change, so no other change lands
+/// between a check and the save it allows (an address taken off in between
+/// would come back without the vault). Hold it on the request's own
+/// thread, never across an await.
+fn owner_addresses_turn() -> std::sync::MutexGuard<'static, ()> {
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    TURN.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// An address added to the owner's own (on the profile card, as a
+/// mailbox's alias, or by connecting a mailbox) decides whose commits in a
+/// repository marked as theirs count as their words (core
+/// store/owned.rs). While a repository is on that list, adding one needs
+/// the vault open, as marking one does; removing one only narrows it.
+/// The call a save relies on is made inside `owner_addresses_turn`.
+fn may_add_owner_addresses(
+    state: &AppState,
+    given: &std::collections::BTreeSet<String>,
+) -> Result<(), ApiError> {
+    let mut known = state.store.owner_emails()?;
+    known.extend(crate::mailboxes::owner_addresses(state));
+    let new: Vec<&str> = given.difference(&known).map(String::as_str).collect();
+    if new.is_empty()
+        || !state.store.vault_status().0
+        || !state.store.owned_list_reads_addresses()?
+    {
+        return Ok(());
+    }
+    Err(ApiError(
+        StatusCode::FORBIDDEN,
+        format!(
+            "unlock the vault first: {} would decide whose commits in the repositories you \
+             marked as yours count as your own words",
+            new.join(", ")
+        ),
+    ))
 }
 
 async fn grants_default_get(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {

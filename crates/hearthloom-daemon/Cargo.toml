@@ -43,3 +43,6 @@ tracing-subscriber = { workspace = true }
 async-trait = { workspace = true }
 tempfile = { workspace = true }
 reqwest = { workspace = true }
+# requests through the whole router and its middleware, in process (axum
+# already depends on it)
+tower = { version = "0.5", default-features = false, features = ["util"] }

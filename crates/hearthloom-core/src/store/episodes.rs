@@ -329,7 +329,8 @@ impl Store {
     /// stored with — `provenance::not_owners_words_sql`), if any. A
     /// provenance check over ids the caller has already been shown, so it
     /// ignores the vault and area filters: it reveals no content, only that
-    /// one of them came from outside.
+    /// one of them came from outside. An episode the owner's list covers
+    /// ("this source is mine", `owned::OwnedWords`) is the owner's words.
     pub fn first_untrusted_episode(&self, ids: &[String]) -> Result<Option<String>> {
         if ids.is_empty() {
             return Ok(None);
@@ -337,17 +338,35 @@ impl Store {
         let ids: Vec<&String> = ids.iter().take(500).collect();
         let marks = vec!["?"; ids.len()].join(",");
         let conn = self.lock();
-        conn.query_row(
-            &format!(
-                "SELECT id FROM episodes /* all-episodes: a retired untrusted memory still taints */
-                 WHERE id IN ({marks}) AND {} LIMIT 1",
-                super::provenance::not_owners_words_sql("")
-            ),
-            rusqlite::params_from_iter(ids),
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(Into::into)
+        let owned = super::owned::OwnedWords::load(&conn)?;
+        if owned.is_empty() {
+            return conn
+                .query_row(
+                    &format!(
+                        "SELECT id FROM episodes /* all-episodes: a retired untrusted memory still taints */
+                         WHERE id IN ({marks}) AND {} LIMIT 1",
+                        super::provenance::not_owners_words_sql("")
+                    ),
+                    rusqlite::params_from_iter(ids),
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(Into::into);
+        }
+        let mut stmt = conn.prepare(&format!(
+            "SELECT e.id, {} FROM episodes e /* all-episodes: a retired untrusted memory still taints */
+             {} WHERE e.id IN ({marks}) AND {}",
+            super::owned::candidate_cols(),
+            super::owned::candidate_joins(),
+            super::provenance::not_owners_words_sql("e.")
+        ))?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(ids))?;
+        while let Some(row) = rows.next()? {
+            if !owned.covers(&super::owned::Candidate::from_row(row, 1)?) {
+                return Ok(Some(row.get(0)?));
+            }
+        }
+        Ok(None)
     }
 
     /// Episodes awaiting idle-time scope classification: coarse

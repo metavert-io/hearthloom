@@ -1836,13 +1836,24 @@ impl Store {
         if links > MAX_LINKS {
             return Ok(Some(ids[0].clone()));
         }
-        // A link to an episode the user didn't write, or one that isn't here.
+        // A link to an episode the user didn't write, or one that isn't here
+        // — apart from the parts of sources the owner says are theirs
+        // (`owned::OwnedWords`), which are judged one episode at a time.
+        let owned = super::owned::OwnedWords::load(&conn)?;
+        let judged_apart = if owned.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " AND (e.source IS NULL OR e.source NOT IN ({}))",
+                owned.sources_sql()
+            )
+        };
         let foreign: Option<String> = conn
             .query_row(
                 &format!(
                     "SELECT ee.entity_id FROM episode_entities ee /* all-episodes: provenance of a name, retired evidence included */
                      LEFT JOIN episodes e ON e.id = ee.episode_id
-                     WHERE ee.entity_id IN ({marks}) AND {} LIMIT 1",
+                     WHERE ee.entity_id IN ({marks}) AND {}{judged_apart} LIMIT 1",
                     super::provenance::not_owners_words_sql("e.")
                 ),
                 rusqlite::params_from_iter(&group),
@@ -1851,6 +1862,24 @@ impl Store {
             .optional()?;
         if let Some(member) = foreign {
             return Ok(Some(shown_as[&member].clone()));
+        }
+        if !owned.is_empty() {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT ee.entity_id, {} FROM episode_entities ee /* all-episodes: provenance of a name, retired evidence included */
+                 JOIN episodes e ON e.id = ee.episode_id {}
+                 WHERE ee.entity_id IN ({marks}) AND {} AND e.source IN ({}) LIMIT {MAX_LINKS}",
+                super::owned::candidate_cols(),
+                super::owned::candidate_joins(),
+                super::provenance::not_owners_words_sql("e."),
+                owned.sources_sql()
+            ))?;
+            let mut rows = stmt.query(rusqlite::params_from_iter(&group))?;
+            while let Some(row) = rows.next()? {
+                if !owned.covers(&super::owned::Candidate::from_row(row, 1)?) {
+                    let member: String = row.get(0)?;
+                    return Ok(Some(shown_as[&member].clone()));
+                }
+            }
         }
         // No evidence at all: nothing in the record vouches for the name.
         let mut stmt = conn.prepare(&format!(
