@@ -340,7 +340,8 @@ impl Store {
 
     /// Apply a peer's observation page — INSERT OR IGNORE by id. The
     /// receiver re-stamps ingest_time so its own export watermark stays
-    /// monotonic.
+    /// monotonic. A photo observation under a key a photo point here took
+    /// the place of is not stored again.
     pub fn observations_apply(&self, batch: &Value) -> Result<usize> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
@@ -371,6 +372,11 @@ impl Store {
             else {
                 continue;
             };
+            // a photo stored under a key a point here took the place of
+            // (store/photo.rs) is that point's observation already
+            if source == "photos" && super::photo::replaced(&tx, source_ref)? {
+                continue;
+            }
             applied += tx.execute(
                 "INSERT OR IGNORE INTO location_observation
                      (id, source, source_ref, lat, lon, accuracy_m, t_start,

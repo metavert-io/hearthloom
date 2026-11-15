@@ -62,6 +62,9 @@ pub const TABLE_CLASSES: &[(&str, TableClass)] = &[
     // minted-day ledger the supersession pass reasons from.
     ("photo_point", TableClass::Exported),
     ("photo_day", TableClass::Exported),
+    // v67: the keys photo points took the place of — what keeps an
+    // earlier scan's key from being stored again.
+    ("photo_replaced", TableClass::Exported),
     // v48: raw-ingest audit trail — the device-stream verification
     // surface; cheap, append-only, part of the record's history.
     ("ingest_log", TableClass::Exported),

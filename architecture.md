@@ -159,7 +159,27 @@ the record's own revisioned sources (photos, visits, contacts, trips) do
 this for any writer; an ember's `#r<n>` (0.5.82) supersedes only what that
 same ember wrote, judged by each episode's recorded writer (its origin),
 so it too converges on every node and can never hide anyone else's
-record.
+record. The growing sources (Chrome and iMessage days, Claude Code
+sessions — `GROWING_SOURCES`, core `store/growing.rs`) name every copy,
+the first read included, by how many items it holds (`<base>#r<n>`,
+decided by the local import in daemon `local_import.rs` against the
+fullest stored copy; each text carries its true count, so a size-capped
+text still counts) — so two machines' first reads of one day are
+different copies and both nodes end up with the fuller one. On receipt
+the copy holding the most stays live — an unversioned base (an earlier
+version's) counted from its text, so a smaller copy read on another
+machine never hides a fuller one — whatever the order copies arrive in.
+The copies of a day or session (and a Chrome day with the named day it
+replaced) are one record: a new copy takes the record's label and its
+retirement, a private label given to any copy, by any path, spreads to
+the others with the same stamp — a copy private already takes the newer
+stamp too, so the latest decision is what every copy is measured by (and
+the scope leg takes it to every node whatever copies each holds) — and a
+retirement takes every copy, and what any of them seeded, whichever
+arrives first. A Chrome day keyed by its profile replaces a day earlier
+versions stored under the profile's shown name only when it holds all of
+it — at least its visit count and every visit line — so same-named
+profiles never displace each other.
 
 **Retirement** (schema v59) is supersession by nothing: the person takes
 a memory, or a whole source, out of the record (a phishing mail, a bad
@@ -234,8 +254,9 @@ the record.
 - Ledgers: `mutations` (every write), `ask_log` (every Ask with its
   trace), `llm_usage` (one row per LLM call), `ingest_log`, `syslog`,
   `health_points`, `notifications`.
-- Device feeds: `health_sample`, `photo_point` and `photo_day`,
-  `location_observation` and `visit_day`, `device_state`,
+- Device feeds: `health_sample`, `photo_point`, `photo_day` and
+  `photo_replaced` (the keys earlier scans gave photos, never stored
+  again), `location_observation` and `visit_day`, `device_state`,
   `movement_observation` and `trip_day`. Raw samples land here and a
   finalize pass turns each closed day into episodes.
 - The movement layer (v60): `movement_observation` holds spans of

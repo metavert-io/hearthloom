@@ -21,6 +21,7 @@ mod export_all;
 mod galaxy;
 mod graph;
 mod groups;
+mod growing;
 mod health;
 mod ingest_apply;
 mod ingest_log;
@@ -81,6 +82,9 @@ pub use graph::{
     ClaimOutcome, DossierEdge, EntityDossier, EntityRow, MergeRecord, ReviewItem, TraverseHop,
 };
 pub use groups::{FriendAccess, GroupRow, GROUP_PREFIX};
+pub use growing::{
+    chrome_day_holds, chrome_named_ref, growing_copy, growing_items, GrowingCopy, GROWING_SOURCES,
+};
 pub use health::{HealthSampleRow, StoredHealthSample};
 pub use ingest_apply::{same_record, OWNER_ONLY_SOURCES};
 pub use intents::{IntentMatch, IntentRow};
@@ -314,7 +318,7 @@ impl Drop for ReadScopeGuard {
     }
 }
 
-const SCHEMA_VERSION: i64 = 66;
+const SCHEMA_VERSION: i64 = 67;
 
 const SCHEMA_V1: &str = "
     -- L2: append-only ground truth. Raw content lives on disk at
@@ -2278,6 +2282,24 @@ impl Store {
             conn.execute_batch(
                 "ALTER TABLE mail_drafts ADD COLUMN account TEXT NOT NULL DEFAULT '';
                  ALTER TABLE mail_matches ADD COLUMN account TEXT NOT NULL DEFAULT '';",
+            )?;
+        }
+        if version < 67 {
+            // v67: the keys a photo point took the place of
+            // (store/photo.rs). Earlier Mac scans keyed photos by the
+            // library's own file name; the phone keys them by the original
+            // name. A scan records each photo's earlier key here (whether
+            // or not a point is stored under it) and moves a point stored
+            // under it to the new key; the point's export carries every key
+            // it replaced, so each peer drops its copies — and none stores
+            // them again. One photo can have several earlier keys (two
+            // Macs' libraries name it differently).
+            conn.execute_batch(
+                "CREATE TABLE photo_replaced (
+                     key TEXT PRIMARY KEY,
+                     by_key TEXT NOT NULL
+                 );
+                 CREATE INDEX idx_photo_replaced_by ON photo_replaced(by_key);",
             )?;
         }
         if version < SCHEMA_VERSION {

@@ -113,7 +113,9 @@ fn process_file(store: &Store, home: &hearthloom_core::Home, path: &Path) -> Res
         .map(|n| n.to_string_lossy().to_lowercase())
         .unwrap_or_default();
     // TCC-protected databases can be Finder-dragged into the inbox
-    // (Finder always has access) when the daemon itself doesn't.
+    // (Finder always has access) when the daemon itself doesn't. Every day
+    // of it is read — today's too; a later, fuller copy of a day lands as a
+    // revision of it.
     if name == "chat.db" {
         return ingest_drafts(
             store,
@@ -301,8 +303,10 @@ fn ingest_drafts(
         .filter(|d| d.scope.as_deref() == Some("private"))
         .cloned()
         .collect();
+    // a day stored before lands again only when fuller
+    let drafts = crate::local_import::prepare(store, home, drafts)?;
     let mut new = 0usize;
-    let mut existing = 0usize;
+    let mut existing = count - drafts.len();
     for chunk in drafts.chunks(500) {
         let report = store.apply_batch(
             home,
@@ -511,5 +515,69 @@ mod tests {
         file.set_len(MBOX_AUTO_MAX_BYTES + 1).unwrap();
         let err = ingest_mbox(&store, &home, &path).unwrap_err().to_string();
         assert!(err.contains("filtered pipeline"), "got: {err}");
+    }
+
+    /// A Messages database dropped into the inbox is a copy that won't
+    /// change again: its recent days land with the rest, and a later,
+    /// fuller drop adds what that day gained.
+    #[test]
+    fn test_a_dropped_messages_database_lands_its_recent_days() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::Home::at(tmp.path().join("home"));
+        home.init().unwrap();
+        let store = Store::open(&home.db_path()).unwrap();
+        let drop_dir = tmp.path().join("drop");
+        std::fs::create_dir_all(&drop_dir).unwrap();
+        let db = drop_dir.join("chat.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (ROWID INTEGER PRIMARY KEY, date INTEGER, text TEXT,
+                 is_from_me INTEGER, handle_id INTEGER);
+             CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
+             CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, display_name TEXT);
+             CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+             INSERT INTO handle VALUES (1, '+15551234567');
+             INSERT INTO chat VALUES (1, '+15551234567', '');",
+        )
+        .unwrap();
+        let apple_ns = |unix: i64| (unix - 978_307_200) * 1_000_000_000;
+        let now = chrono::Utc::now().timestamp();
+        let add = |id: i64, at: i64, text: &str| {
+            conn.execute(
+                "INSERT INTO message VALUES (?1, ?2, ?3, 0, 1)",
+                rusqlite::params![id, apple_ns(at), text],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO chat_message_join VALUES (1, ?1)", [id])
+                .unwrap();
+        };
+        add(1, now - 86_400, "yesterday's");
+        add(2, now - 60, "just now");
+
+        process_file(&store, &home, &db).unwrap();
+        let bodies = || -> String {
+            let (_, rows) = store
+                .read_query(
+                    "SELECT content_ref FROM episodes
+                     WHERE source = 'imessage' AND superseded_by IS NULL",
+                    10,
+                )
+                .unwrap();
+            rows.iter()
+                .map(|r| std::fs::read_to_string(home.root().join(r[0].as_str().unwrap())).unwrap())
+                .collect()
+        };
+        assert!(bodies().contains("yesterday's"));
+        assert!(bodies().contains("just now"));
+
+        add(3, now - 30, "and later");
+        process_file(&store, &home, &db).unwrap();
+        let after = bodies();
+        assert!(after.contains("and later"));
+        assert_eq!(
+            after.matches("just now").count(),
+            1,
+            "one live copy of the day"
+        );
     }
 }

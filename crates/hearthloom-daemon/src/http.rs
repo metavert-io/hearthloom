@@ -1116,6 +1116,69 @@ mod ingest_origin_tests {
         assert_eq!(origin("b").node.as_deref(), Some("nd_elsewhere"));
         assert_eq!(origin("b").route.len(), 2);
     }
+
+    /// A batch reading a stored conversation as private moves the stored
+    /// copy into the vault only when it is the owner's own import — never a
+    /// peer's batch or another key's.
+    #[tokio::test]
+    async fn test_only_the_owners_import_vaults_a_stored_copy() {
+        let (state, _tmp) = state();
+        let draft = |scope: Option<&str>| hearthloom_core::EpisodeDraft {
+            source: "chatlog-chatgpt".into(),
+            source_ref: "c9".into(),
+            kind: "conversation".into(),
+            title: "Clinic visit".into(),
+            body: "you: about the results".into(),
+            event_time: hearthloom_core::EventTime::unknown(),
+            trust: "self".into(),
+            scope: scope.map(String::from),
+            entities: vec![],
+            edges: vec![],
+        };
+        let send = |auth: AuthInfo| {
+            let body: IngestBody = serde_json::from_value(json!({
+                "actor": "adapter:chatlog",
+                "episodes": [draft(Some("private"))],
+            }))
+            .unwrap();
+            ingest(
+                State(state.clone()),
+                HeaderMap::new(),
+                axum::Extension(auth),
+                Json(body),
+            )
+        };
+        let scope = || {
+            state.store.vault_unlock(15);
+            let (_, rows) = state
+                .store
+                .read_query(
+                    "SELECT scope FROM episodes /* all-episodes: a label check */
+                     WHERE source = 'chatlog-chatgpt' AND source_ref = 'c9'",
+                    1,
+                )
+                .unwrap();
+            state.store.vault_lock();
+            rows[0][0].as_str().unwrap().to_string()
+        };
+        state
+            .store
+            .apply_batch(
+                &state.home,
+                &hearthloom_core::IngestBatch {
+                    actor: "adapter:chatlog".into(),
+                    session_id: None,
+                    episodes: vec![draft(None)],
+                },
+            )
+            .unwrap();
+        for scopes in [&["peer"][..], &["ingest"], &["write", "ingest"]] {
+            let _ = send(key(scopes)).await.map_err(|e| e.1).unwrap();
+            assert_eq!(scope(), "personal", "{scopes:?}");
+        }
+        let _ = send(key(&["admin"])).await.map_err(|e| e.1).unwrap();
+        assert_eq!(scope(), "private");
+    }
 }
 
 #[cfg(test)]
@@ -2571,10 +2634,66 @@ async fn ingest(
     if auth.0.is_none() {
         origins.clear(); // a keyless caller is a local tool, never a node
     }
-    let report = state
-        .store
-        .apply_batch_from(&state.home, &batch, &origins)?;
-    Ok(Json(serde_json::to_value(report).unwrap()))
+    // A local import (the CLI reading this machine's files) lands a day or
+    // session stored before only when fuller; a peer's batch replicates
+    // what the node that read the files decided.
+    let peer = auth
+        .0
+        .as_ref()
+        .is_some_and(|claims| claims.scopes.iter().any(|s| s == "peer"));
+    // The owner's own import (the CLI's chat-log route) relabels a copy
+    // stored before that it now reads as private; a peer's labels travel on
+    // the scope leg, and no other key moves a stored record's label.
+    let owners_import = !peer
+        && match &auth.0 {
+            None => true,
+            Some(c) => {
+                is_owner_key(&c.scopes, c.grants.is_some())
+                    && crate::plugins::plugin_for_claims(&state, c).is_none()
+            }
+        };
+    // store work off the runtime's threads: a large import holds the store
+    // many times over
+    let report = crate::scoped::spawn_blocking(move || -> anyhow::Result<Value> {
+        let private: Vec<hearthloom_core::EpisodeDraft> = if owners_import {
+            batch
+                .episodes
+                .iter()
+                .filter(|d| d.scope.as_deref() == Some("private"))
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut dropped = 0usize;
+        if !peer
+            && batch
+                .episodes
+                .iter()
+                .any(|d| hearthloom_core::store::GROWING_SOURCES.contains(&d.source.as_str()))
+        {
+            let drafts = std::mem::take(&mut batch.episodes);
+            let count = drafts.len();
+            batch.episodes = crate::local_import::prepare(&state.store, &state.home, drafts)?;
+            dropped = count - batch.episodes.len();
+        }
+        let mut report = state
+            .store
+            .apply_batch_from(&state.home, &batch, &origins)?;
+        report.episodes_existing += dropped;
+        state.store.label_private_on_reimport(
+            &Actor {
+                actor: batch.actor.clone(),
+                session_id: batch.session_id.clone(),
+            },
+            &private,
+            &[],
+        )?;
+        Ok(serde_json::to_value(report)?)
+    })
+    .await
+    .map_err(anyhow::Error::from)??;
+    Ok(Json(report))
 }
 
 #[derive(Deserialize)]
@@ -9581,8 +9700,9 @@ async fn ingest_local(
     }
     let adapter = body.adapter.clone();
     let st = state.clone();
-    let result = crate::scoped::spawn_blocking(
-        move || -> anyhow::Result<Vec<hearthloom_core::EpisodeDraft>> {
+    let actor = format!("adapter:{adapter}");
+    let landed = crate::scoped::spawn_blocking(move || -> anyhow::Result<(usize, usize, usize)> {
+        let read = (|| -> anyhow::Result<Vec<hearthloom_core::EpisodeDraft>> {
             let scope = body.scope.as_deref();
             match body.adapter.as_str() {
                 "imessage" => {
@@ -9599,10 +9719,12 @@ async fn ingest_local(
                         None => hearthloom_adapters::photos::default_library()?,
                     };
                     // v47: the manual scan feeds the photo-point union too
-                    if let Ok(points) = hearthloom_adapters::photos::scan_points(&path) {
-                        let _ = crate::live_photos::store_scan_points(&st, "mac", &points);
-                    }
-                    hearthloom_adapters::photos::ingest(&path, scope)
+                    // (one scan for both)
+                    let points = hearthloom_adapters::photos::scan_points(&path)?;
+                    let _ = crate::live_photos::store_scan_points(&st, "mac", &points);
+                    hearthloom_adapters::photos::day_drafts(points, scope).ok_or_else(|| {
+                        anyhow::anyhow!("no dated photos found in {}", path.display())
+                    })
                 }
                 "chrome" => {
                     let path = match &body.path {
@@ -9636,27 +9758,41 @@ async fn ingest_local(
                 }
                 other => Err(anyhow::anyhow!("unknown local adapter: {other}")),
             }
-        },
-    )
+        })();
+        let drafts = read?;
+        let count = drafts.len();
+        // an import asked to be private makes the copies stored before so
+        let private: Vec<hearthloom_core::EpisodeDraft> = drafts
+            .iter()
+            .filter(|d| d.scope.as_deref() == Some("private"))
+            .cloned()
+            .collect();
+        // a day or session stored before lands again only when fuller
+        let drafts = crate::local_import::prepare(&st.store, &st.home, drafts)?;
+        let mut new = 0usize;
+        let mut existing = count - drafts.len();
+        for (i, chunk) in drafts.chunks(500).enumerate() {
+            if i > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+            let report = st.store.apply_batch(
+                &st.home,
+                &hearthloom_core::IngestBatch {
+                    actor: actor.clone(),
+                    session_id: None,
+                    episodes: chunk.to_vec(),
+                },
+            )?;
+            new += report.episodes_new;
+            existing += report.episodes_existing;
+        }
+        st.store
+            .label_private_on_reimport(&Actor::new(actor.clone()), &private, &[])?;
+        Ok((count, new, existing))
+    })
     .await
-    .map_err(anyhow::Error::from)?;
-
-    let drafts = result?;
-    let count = drafts.len();
-    let mut new = 0usize;
-    let mut existing = 0usize;
-    for chunk in drafts.chunks(500) {
-        let report = state.store.apply_batch(
-            &state.home,
-            &hearthloom_core::IngestBatch {
-                actor: format!("adapter:{adapter}"),
-                session_id: None,
-                episodes: chunk.to_vec(),
-            },
-        )?;
-        new += report.episodes_new;
-        existing += report.episodes_existing;
-    }
+    .map_err(anyhow::Error::from)??;
+    let (count, new, existing) = landed;
     Ok(Json(json!({
         "adapter": adapter,
         "parsed": count,

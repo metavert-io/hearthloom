@@ -184,16 +184,20 @@ impl Store {
                 .replace('_', "\\_")
         );
         let phrase = format!("\"{}\"", pattern.replace('"', ""));
-        let relabeled = match kind {
-            "domain" | "term" => conn.execute(
-                "UPDATE episodes SET scope = 'private', scope_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
-                 WHERE scope != 'private'
-                   AND (source_ref LIKE ?1 ESCAPE '\\'
-                        OR title LIKE ?1 ESCAPE '\\'
-                        OR id IN (SELECT episode_id FROM episode_fts
-                                  WHERE episode_fts MATCH ?2))",
-                rusqlite::params![like, phrase],
-            )?,
+        let changed: Vec<String> = match kind {
+            "domain" | "term" => {
+                let mut stmt = conn.prepare(
+                    "UPDATE episodes SET scope = 'private', scope_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+                     WHERE scope != 'private'
+                       AND (source_ref LIKE ?1 ESCAPE '\\'
+                            OR title LIKE ?1 ESCAPE '\\'
+                            OR id IN (SELECT episode_id FROM episode_fts
+                                      WHERE episode_fts MATCH ?2))
+                     RETURNING id",
+                )?;
+                let rows = stmt.query_map(rusqlite::params![like, phrase], |r| r.get(0))?;
+                rows.collect::<std::result::Result<_, _>>()?
+            }
             // entity/place: the linked entity goes private, and so does
             // every episode citing any member of its merge group.
             _ => {
@@ -202,18 +206,22 @@ impl Store {
                      WHERE name = ?1 COLLATE NOCASE AND scope != 'private'",
                     [pattern],
                 )?;
-                conn.execute(
+                let mut stmt = conn.prepare(
                     "UPDATE episodes SET scope = 'private', scope_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
                      WHERE scope != 'private'
                        AND id IN (SELECT ee.episode_id FROM episode_entities ee
                                   JOIN entities e ON e.id = ee.entity_id
                                   WHERE e.name = ?1 COLLATE NOCASE
                                      OR e.merged_into IN (SELECT id FROM entities
-                                                          WHERE name = ?1 COLLATE NOCASE))",
-                    [pattern],
-                )?
+                                                          WHERE name = ?1 COLLATE NOCASE))
+                     RETURNING id",
+                )?;
+                let rows = stmt.query_map([pattern], |r| r.get(0))?;
+                rows.collect::<std::result::Result<_, _>>()?
             }
         };
+        // a day or session a rule matched is private in every copy of it
+        let relabeled = changed.len() + super::growing::spread_private(&conn, actor, &changed)?;
         record_mutation(
             &conn,
             actor,

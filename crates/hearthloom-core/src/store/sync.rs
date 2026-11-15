@@ -387,7 +387,10 @@ impl Store {
     }
 
     /// Apply a peer's scope changes: last writer wins per episode; a
-    /// change is applied only when strictly newer than our own stamp.
+    /// change is applied only when strictly newer than our own stamp. A
+    /// newer stamp is taken even when the label is the same: it is the
+    /// time of the latest decision, which a private label spreads with
+    /// (and the nodes this one passes changes on to need).
     pub fn apply_scope_changes(
         &self,
         actor: &Actor,
@@ -395,10 +398,12 @@ impl Store {
     ) -> Result<usize> {
         let conn = self.lock();
         let mut applied = 0usize;
+        let mut private = Vec::new();
         for (id, scope, ts) in changes {
+            // `scope` stays in the SET list: the relay stamp follows it
             let changed = conn.execute(
                 "UPDATE episodes SET scope = ?2, scope_changed_at = ?3
-                 WHERE id = ?1 AND COALESCE(scope_changed_at, '') < ?3 AND scope != ?2",
+                 WHERE id = ?1 AND COALESCE(scope_changed_at, '') < ?3",
                 rusqlite::params![id, scope, ts],
             )?;
             if changed > 0 {
@@ -411,7 +416,13 @@ impl Store {
                     &serde_json::json!({"episode": id, "scope": scope, "ts": ts}),
                 )?;
             }
+            if scope == "private" {
+                private.push(id.clone());
+            }
         }
+        // a day or session private on the sender is private in every copy
+        // here, including copies the sender doesn't hold
+        applied += super::growing::spread_private(&conn, actor, &private)?;
         Ok(applied)
     }
 

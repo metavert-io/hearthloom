@@ -29,6 +29,7 @@ mod live_health;
 mod live_ingest;
 mod live_photos;
 pub mod llm;
+mod local_import;
 mod lookups;
 mod mail_drafts;
 mod mail_embers;
