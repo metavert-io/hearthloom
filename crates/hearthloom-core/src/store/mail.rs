@@ -13,8 +13,12 @@
 //! States: `new` (waiting for triage) → `needs_reply` | `scheduling` |
 //! `opportunity` (open: on the Desk) | `fyi` | `ignore`; the owner's reply
 //! makes it `replied`, the owner marks `done`; a new message from someone
-//! else reopens it. A thread whose mail a privacy rule covers is `private`
-//! — hidden while the vault is locked, never sent to a model.
+//! else reopens it. A thread whose mail a privacy rule covers, or whose
+//! mail has a private memory, is `private` — hidden while the vault is
+//! locked, never sent to a model. A message found private when it is seen
+//! again (its memory arrived private after it joined), or when triage looks
+//! its thread's memories up before sorting it, makes its thread private
+//! then.
 //!
 //! Owner rules are owner-authored only (mail itself can never write one):
 //! deterministic matchers decide first (sender, domain, subject, list);
@@ -71,12 +75,18 @@ pub struct MailSeen {
     pub list_id: Option<String>,
     /// the start of its text (≤300 chars)
     pub snippet: String,
-    /// a privacy rule covers it
+    /// a privacy rule covers it, or its memory is labelled private
     pub private: bool,
     /// Gmail's labels for it (what an ember's watch can name)
     pub labels: Vec<String>,
     /// its readable text, for embers' watches (not stored on the thread)
     pub text: String,
+    /// The keys its memory is stored under: the mail import's key for its
+    /// Message-ID header (which can differ from `message_id`, a MIME
+    /// parser's reading of it), and `message_id`. Empty when its memory is
+    /// keyed by a hash of its text. Its privacy is read again by these
+    /// once the pull has made the memory (not stored on the thread).
+    pub memory_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -183,6 +193,26 @@ pub(crate) fn account_filter(
     }
 }
 
+/// Make a thread private, journaled; false when it already was. Nothing
+/// makes a thread un-private.
+fn make_private(
+    conn: &rusqlite::Connection,
+    actor: &Actor,
+    thread: &str,
+    now: &str,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE mail_threads SET scope = 'private', updated_at = ?2
+         WHERE id = ?1 AND scope != 'private'",
+        rusqlite::params![thread, now],
+    )?;
+    if changed == 0 {
+        return Ok(false);
+    }
+    super::journal_row(conn, actor, "mail_thread", "mail_threads", thread, "update")?;
+    Ok(true)
+}
+
 pub fn thread_id_for(root: &str) -> String {
     format!(
         "mt_{}",
@@ -221,7 +251,10 @@ impl Store {
 
     /// Record one message: its thread and the thread's state. Returns the
     /// thread id when this message created or changed a thread. Seeing the
-    /// same message again changes nothing.
+    /// same message again changes nothing — unless it is private now (its
+    /// memory arrived private since, or a rule covers it): then the thread
+    /// it joined becomes private too. Nothing here makes a thread
+    /// un-private.
     pub fn mail_observe(&self, actor: &Actor, seen: &MailSeen) -> Result<Option<String>> {
         if seen.message_id.trim().is_empty() {
             return Ok(None);
@@ -236,8 +269,11 @@ impl Store {
                 |r| r.get(0),
             )
             .optional()?;
-        if known.is_some() {
-            return Ok(None);
+        if let Some(thread) = known {
+            if !seen.private || !make_private(&conn, actor, &thread, &now)? {
+                return Ok(None);
+            }
+            return Ok(Some(thread));
         }
         // the thread a reply belongs to: a message it answers that we have
         let mut thread: Option<String> = None;
@@ -450,6 +486,27 @@ impl Store {
             super::journal_row(&conn, actor, "mail_thread", "mail_threads", id, "update")?;
         }
         Ok(changed > 0)
+    }
+
+    /// Make a thread private: one of its messages was found private after
+    /// it joined. True when this changed it.
+    pub fn mail_thread_make_private(&self, actor: &Actor, id: &str) -> Result<bool> {
+        let now = now_utc();
+        let conn = self.lock();
+        make_private(&conn, actor, id, &now)
+    }
+
+    /// The thread a message already joined on this node (its own index),
+    /// if any.
+    pub fn mail_thread_of_message(&self, message_id: &str) -> Result<Option<String>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT thread_id FROM mail_thread_messages WHERE message_id = ?1",
+            [message_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     /// The messages this node has seen in a thread (its own index).
@@ -804,5 +861,53 @@ mod tests {
         );
         s.vault_unlock(5);
         assert_eq!(s.mail_thread(&p).unwrap().unwrap().scope, "private");
+    }
+
+    /// A message seen again once it is private (its memory arrived private
+    /// after it joined) makes the thread it joined private, journaled for
+    /// the other nodes; triage no longer takes the thread, and seeing the
+    /// message again not private leaves it private.
+    #[test]
+    fn test_a_message_found_private_later_makes_its_thread_private() {
+        let (s, _t) = store();
+        let a = Actor::new("adapter:test");
+        let t = s
+            .mail_observe(&a, &msg("m1@x", "Ann", true))
+            .unwrap()
+            .unwrap();
+        assert_eq!(s.mail_threads_to_triage(10).unwrap().len(), 1);
+
+        let mut now_private = msg("m1@x", "Ann", true);
+        now_private.private = true;
+        assert_eq!(
+            s.mail_observe(&a, &now_private).unwrap().as_deref(),
+            Some(t.as_str())
+        );
+        assert!(s.mail_threads_to_triage(10).unwrap().is_empty());
+        assert!(s
+            .mail_threads_to_triage_for(10, &[], Some(&[]))
+            .unwrap()
+            .is_empty());
+        let journaled: String = s
+            .lock()
+            .query_row(
+                "SELECT post_image FROM op_journal
+                 WHERE entity_kind = 'mail_thread' AND entity_id = ?1
+                 ORDER BY seq DESC LIMIT 1",
+                [&t],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(journaled.contains("\"private\""), "{journaled}");
+
+        // already private: nothing changes, and nothing makes it un-private
+        assert!(s.mail_observe(&a, &now_private).unwrap().is_none());
+        assert!(s
+            .mail_observe(&a, &msg("m1@x", "Ann", true))
+            .unwrap()
+            .is_none());
+        s.vault_unlock(5);
+        let th = s.mail_thread(&t).unwrap().unwrap();
+        assert_eq!((th.scope.as_str(), th.message_count), ("private", 1));
     }
 }

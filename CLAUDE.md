@@ -629,12 +629,74 @@ re-issued every minute (so settings, a disconnect or a fence are noticed
 within one), runs `gmail_pull::pull_once(state, mailbox)` on any change
 and at the catch-up interval (`gmail.watch` on|off, `gmail.watch.every_minutes`
 1–60, node-local; `.<id>` suffixed for an added mailbox). `pull_once` is
-THE one pull path of a mailbox and every pull is serialized (`PULL`
-mutex) — never add a second puller of a mailbox with its own cursor. A
-refused sign-in STOPS that mailbox — its watch, pull, search session and
-drafts all check `mailboxes::refused` — until it's saved again
-(`recheck_mailbox(id, true)`): retrying a bad Gmail password risks Google
-locking the account. It pauses while the node is fenced and publishes
+THE one pull path of a mailbox and each mailbox's pulls are serialized by
+its own lock (`gmail_pull::pull_lock`; `pull_all` skips a mailbox whose
+watch is mid-pull) — never add a second puller of a mailbox with its own
+cursor, and never a node-wide lock (one stalled mailbox would hold every
+other one and the consolidation cycle). Every Gmail connection opens
+through `gmail_imap::open_gmail`: the address lookup (`RESOLVE_TIMEOUT`,
+on a thread of its own — the system resolver has no deadline; past
+`MAX_STALLED_LOOKUPS` stuck ones a connect fails at once), connect, TLS
+handshake and every read and write have a deadline (`CONNECT_TIMEOUT`,
+`IO_TIMEOUT`; the `Bounded` stream keeps one after IDLE clears it) —
+never `imap::ClientBuilder`, which sets none. A refused sign-in STOPS that mailbox — its watch, pull,
+search session and drafts all check `mailboxes::refused` — until it's
+saved again (`recheck_mailbox(id, true)`): retrying a bad Gmail password
+risks Google locking the account. "Refused" is a TYPE
+(`gmail_imap::SignInRefused`, made only from a `NO` reply to LOGIN that
+refuses the credentials), never words in an error message: a dropped
+connection or `[UNAVAILABLE]` at sign-in is an ordinary retry. A pull
+also re-reads the labels of mail it already holds (`gmail_pull::relabel`,
+≤ every 10 min: the newest ≤500 of the last 30 days, plus the archive's
+next 500 records by index row, `gmail_relabel_row`, wrapping — so every
+pulled message is read again in time). A record's UID counts only while
+Gmail still has that Message-ID under it (`gmail_imap::current_labels`):
+after a UIDVALIDITY change the old numbers name other messages, so a
+message its UID doesn't find is looked up by Message-ID. Mail that now
+passes the Core strata becomes a memory (drafted from its archived copy);
+the labels then land in the index (`mbox_index::set_labels`, kept in its
+`label_updates` table, which a rebuild carries and indexes under — the
+archive keeps the labels as received) in the SAME transaction as the list
+of messages still to observe (`gmail_observe_pending` meta); then mail
+that GAINED a label goes through `mail_triage::seen`/`observe` like new
+mail, so a thread forms and the embers' watches see it, and leaves the
+list only once recorded — a pull stopped in between, or an observation
+that failed (arrival's too), is finished by the next re-read. Never
+record labels without that list: a recorded label is never looked at
+again. `mbox_index::meta_get` and `labels_of` return None only for a
+missing key or message — an index they can't read (busy, locked) is an
+error, and an error keeps the list and the message on it; never read it
+as an empty list or a message gone. Index ids are the import's key (`mbox::message_id_ref`, folded
+headers included — `mbox_index::scan_headers`); a live archive indexed
+before that (no `ids` meta, `ids_current`) is rebuilt once by its pull.
+A rebuild holds the index's writer lock (`mbox_index::writer`) for its
+whole run, and so do `set_labels`, `meta_set` and `append_index` — a
+write that raced a rebuild was lost when the rebuilt file took its place.
+A rebuild that can't read the old index's meta rows and label updates
+(busy, locked, out of reach) fails and leaves it in place
+(`mbox_index::carry_over`, one read transaction): the meta rows hold the
+list. Only a file that is no database at all, or damaged, is rebuilt
+over, without what can't be read: damaged meta rows take the label
+updates with them (the labels are read from Gmail again), damaged label
+updates go alone (the meta rows read — cursor, list — are kept). Never
+make the carry best-effort again.
+A message's privacy is read again in `observe` (`private_now`): the pull
+makes its memory after reading it, and the memory can arrive private
+(the sender's identity is). A message observed again keeps the thread it
+joined — that thread's privacy and class decide what the watches see
+(`observe`, `Store::mail_thread_of_message`); found private now, it
+makes that thread private (`Store::mail_observe`, journaled; nothing
+there makes a thread un-private), so triage never takes it. A pull that
+stopped (or failed a read) between making a private memory and seeing
+its message again leaves the thread as it was, so triage also looks up
+the memories of each thread's messages right before a model reads it
+(`mail_triage::for_model`; an error fails the round): a thread with a
+private one is made private (`Store::mail_thread_make_private`) and left
+out — and whatever reads a
+thread's message later (class-waiting watches, drafts) takes its labels
+from the index (`mailboxes::labels_now`), never the archived header. A
+memory keeps the labels it was made under (episodes are append-only; mail
+refs can't be revisioned). It pauses while the node is fenced and publishes
 `roles.mail` (any mailbox watched) and `roles.mailboxes` in the node list.
 **Gmail live federation (Tier 3)
 SHIPPED 2026-08-10** (design log entry same date): the `gmail_pull`
@@ -924,16 +986,44 @@ the design log 2026-07-14.
   and never pass through ingest, so the raw `search`/`fetch` skip the
   privacy rules and the vault. The `_for_viewer` pair holds back, while the
   caller's vault is locked, an item a privacy rule matches (mail: the whole
-  message) or whose memory (`mbox` or the source's own name, keyed by the
-  path/Message-ID) is private — silently, and a held-back fetch reads as
-  not there. Archive search is owner-only (`search_virtual`) and on the
+  message) or whose memory is private — the path under the source's own
+  name; a message's Message-ID under EVERY source the record holds
+  (`Store::private_refs_anywhere`), never only the registered ones: a
+  promotion keeps the name of a source that may since be unregistered, or
+  never registered on this node (it synced) — silently, and a held-back
+  fetch reads as not there. Triage (`mail_memory_private`) and ember
+  delivery (`private_mail_ids`) make the same lookups, and all three match
+  a message by IDENTITY, never by header spelling: a reader's key carries
+  the import's key AND a MIME parser's reading of the Message-ID
+  (`mail_key`), and `mail_memory_private` goes through `private_mail_ids`
+  (`id_in_key`: a comment beside the id on either copy still matches). Archive search is owner-only (`search_virtual`) and on the
   ember deny list. `test_archive_readers_go_through_the_vault_check` scans
-  rlm/http/mcp/network_out for raw calls.
+  rlm/http/mcp/network_out for raw calls. The rules read a message WHOLE
+  and DECODED (`virtual_source::Privacy`, `mbox_text::privacy_text`: every
+  address header incl. Cc/Bcc, labels, every text/HTML part, uncut, each
+  part also with its whitespace runs read as one space so a term matches
+  across a line break) —
+  never the text a reader shows, which is cut and, for an archive, still
+  MIME-encoded; a Gmail message read only in part (a search's 64 KB, a
+  vfetch's 2 MB) is read whole by its uid first, and one that can't be
+  read whole counts as private while any rule exists. A mail promotion is
+  stored under the message's own Message-ID (`promotion_ref`), whichever
+  path promoted it; a private promotion an older build kept under an
+  `at:` path is known by the Message-ID its STORED TEXT names
+  (`legacy_promotions`: every such row, any source, no archive or mailbox
+  needed; text read once per content hash) — one whose message names none
+  counts as a private message without a Message-ID. One kept under a Gmail
+  `uid:` path CAN'T be identified (the old fetch took a uid for any
+  message and the promotion stored only the rendered text, no
+  Message-ID), so while one is private EVERY message counts as private —
+  archive reads and Gmail held back while locked, no triage, no ember
+  delivery; likewise a legacy row whose text can't be read. Never narrow
+  this by guessing which message it was.
 - **ARCHIVED MAIL TEXT LIVES BESIDE THE HEADER INDEX (0.5.87,
   `mbox_text.rs`).** `texts_fts(id, body, links)` in the same sidecar,
   filled by a background pass behind the `text_rowid` meta watermark over
   `messages.rowid` — never inside `build`/`append_index` (a Takeout
-  rebuild must stay header-fast), and `carry_meta` must keep leaving
+  rebuild must stay header-fast), and `carry_over` must keep leaving
   `text_rowid` behind (a rebuilt file has no texts). Archives over
   `AUTO_LIMIT` messages need the owner's `mail.text.<source>` = on; none
   starts without 3× the projected size free. Text comes from
@@ -1141,7 +1231,15 @@ the design log 2026-07-14.
   `--json-schema`, or `llm::call`), thread text sits inside defused
   `<thread>` fences, and a label whose quoted span isn't in the thread is
   only `fyi` (`checked`). Private threads (a privacy rule, or a private
-  memory of the message) never reach a model (`mail_threads_to_triage`).
+  memory of the message) never reach a model (`mail_threads_to_triage`),
+  and each batch's memories are looked up again just before
+  (`mail_triage::for_model`, which makes such a thread private).
+  `mail_triage::seen` makes the checks a message read in place meets: the
+  memory looked up by the import's key (`virtual_source::mail_key` — a
+  parser's reading of a Message-ID with a comment beside it differs from
+  it) in every mail source (`mail_memory_private`), and the rules over the
+  whole decoded message (`mbox_text::privacy_text`); errors count as
+  private.
   Rules are owner-only (`require_owner`; mail never writes one). Threads
   form only from decision-worthy mail (Primary not from the owner, rule
   matches, replies to an existing thread); thread ids hash the root
@@ -1159,7 +1257,9 @@ the design log 2026-07-14.
   (`headers` | `snippet` default 300 chars | `full`) is applied at
   DELIVERY (`deliver` → `shown`), never at match time, so the owner's
   change reaches what's queued; delivery re-checks privacy (a rule or a
-  private memory added since holds a match back, failing closed). Private
+  private memory added since holds a match back, failing closed; a match
+  keeps only the parsed Message-ID, so the memory is found under any key
+  the import can have given it — `virtual_source::private_mail_ids`). Private
   or from-the-owner mail never queues, and neither does mail of a mailbox
   the owner hasn't let embers see (`mailboxes::embers_see`,
   `mail.embers.<id>`: on for the first mailbox, OFF for an added one —

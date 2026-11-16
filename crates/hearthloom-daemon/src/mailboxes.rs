@@ -544,6 +544,25 @@ pub(crate) fn read_local(
     read_local_in(state, &all(), prefer, message_id, cap)
 }
 
+/// A message's Gmail labels as this node last read them: the archive's
+/// index (which the pull's label re-read keeps current — gmail_pull.rs
+/// `relabel`), else the label header it was archived with.
+pub(crate) fn labels_now(
+    state: &AppState,
+    mb: &Mailbox,
+    message_id: &str,
+    raw: &str,
+) -> Vec<String> {
+    match crate::mbox_index::labels_of(&mb.live_mbox_path(state), message_id) {
+        Ok(Some(labels)) => labels
+            .split(',')
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+        _ => hearthloom_adapters::mbox::gmail_labels(raw),
+    }
+}
+
 /// `read_local` over the given mailboxes.
 pub(crate) fn read_local_in(
     state: &AppState,

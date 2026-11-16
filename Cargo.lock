@@ -1409,6 +1409,7 @@ dependencies = [
  "imap",
  "imap-proto",
  "mail-parser",
+ "native-tls",
  "reqwest 0.12.28",
  "rusqlite",
  "serde_json",

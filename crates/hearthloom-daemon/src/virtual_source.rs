@@ -36,14 +36,40 @@ const SNIPPET_CHARS: usize = 140;
 pub struct VirtualHit {
     pub path: String,
     pub snippet: String,
-    /// The item's text when the search already has it (Gmail search), for
-    /// the privacy check — never sent anywhere.
+    /// What the privacy rules read for the item, when the search already
+    /// has it (Gmail search) — never sent anywhere.
     #[serde(skip)]
-    pub text: Option<String>,
+    pub privacy: Option<Privacy>,
     /// What the item's memory is keyed by, when the search already knows
     /// (Gmail search) — for the privacy check, never sent anywhere.
     #[serde(skip)]
     pub key: ItemKey,
+}
+
+/// What the privacy rules read for an item. A message is judged on the
+/// whole of it, decoded (`mbox_text::privacy_text`) — never on the part a
+/// reader shows, which is cut and may still be encoded.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Privacy {
+    /// A message read whole: its bytes, and the labels it carries besides
+    /// the ones in its header (Gmail's, the index's) — decoded only when a
+    /// rule has to be checked.
+    Message { raw: Vec<u8>, labels: String },
+    /// A message only the start of which was read: it is read whole from
+    /// this path of the same source before it can be judged (a Gmail
+    /// message, by its uid). If it can't be, it counts as private.
+    ReadAt(String),
+    /// Plain text, as it is (a file, a search snippet).
+    Text(String),
+}
+
+/// An item as `fetch` read it: what the caller is shown, the key its memory
+/// would carry, and what the privacy rules read.
+#[derive(Debug, Clone)]
+pub(crate) struct Fetched {
+    pub shown: String,
+    pub key: ItemKey,
+    pub privacy: Privacy,
 }
 
 /// What the memory made from an item would be keyed by, besides the path
@@ -63,12 +89,21 @@ pub enum ItemKey {
     Unkeyed,
 }
 
-/// A message's key, read from its raw text by the import's own rule.
-/// `parsed`: the Message-ID another parser read from it, also looked up.
+/// A message's key, read from its raw text by the import's own rule, and
+/// beside it the Message-ID as a MIME parser reads it — `parsed`, or read
+/// here when not given. A header holding more than `<id>` (a comment beside
+/// it) gives the two different spellings; the vault check matches a
+/// message's memory by its identity through either (`private_mail_ids`).
 pub fn mail_key(raw: &str, parsed: Option<&str>) -> ItemKey {
     match hearthloom_adapters::mbox::message_id_ref(raw) {
         Some(id) => {
-            let other = parsed.filter(|p| *p != id).map(String::from);
+            let parsed = match parsed {
+                Some(parsed) => Some(parsed.to_string()),
+                None => mail_parser::MessageParser::default()
+                    .parse_headers(raw.as_bytes())
+                    .and_then(|m| m.message_id().map(String::from)),
+            };
+            let other = parsed.filter(|p| *p != id);
             ItemKey::Refs(std::iter::once(id).chain(other).collect())
         }
         None => ItemKey::Unkeyed,
@@ -322,7 +357,7 @@ pub fn search(def: &VirtualSourceDef, query: &str, limit: usize) -> Result<Vec<V
             .map(|(id, snippet)| VirtualHit {
                 path: id,
                 snippet,
-                text: None, // read (and keyed) by the vault check when needed
+                privacy: None, // read (and keyed) by the vault check when needed
                 key: ItemKey::default(),
             })
             .collect());
@@ -334,29 +369,182 @@ pub fn search(def: &VirtualSourceDef, query: &str, limit: usize) -> Result<Vec<V
     }
 }
 
-/// The memory sources an item of this source can have become, keyed by
-/// its path: a promoted item keeps the source's own name; a mail archive's
-/// messages are also the `mbox` memories the Gmail pull and the Takeout
-/// ingest made (keyed by the same Message-ID).
-fn materialized_sources(def: &VirtualSourceDef) -> Vec<&str> {
-    if def.adapter == "mbox" || def.adapter == crate::gmail_search::ADAPTER {
-        vec!["mbox", def.name.as_str()]
-    } else {
-        vec![def.name.as_str()]
-    }
+/// Whether a message's memory is labelled private — the check
+/// `item_private` makes of a message read in place, and the one triage
+/// makes of mail the pull reads. Looked up by its key (`mail_key`) under
+/// every source the record holds, registered or not: the Gmail pull and
+/// the Takeout ingest keep messages under `mbox`, a promotion under the
+/// name of the source it came from (which may since have been
+/// unregistered, or never registered on this node) — matched by identity,
+/// the same way as `private_mail_ids`. Also found: a private promotion an
+/// earlier version kept under a path (`legacy_promotions`). A message whose
+/// memory key can't be rebuilt counts as private while any memory keyed
+/// that way is; every message does while a legacy promotion's message
+/// can't be identified.
+pub(crate) fn mail_memory_private(state: &AppState, key: &ItemKey) -> Result<bool> {
+    Ok(match key {
+        ItemKey::Path => false,
+        ItemKey::Refs(refs) => !private_mail_ids(state, refs)?.is_empty(),
+        ItemKey::Unkeyed => {
+            let legacy = legacy_promotions(state)?;
+            legacy.unknown
+                || legacy.unkeyed
+                || state
+                    .store
+                    .private_ref_prefixed_anywhere(hearthloom_adapters::mbox::UNKEYED_REF_PREFIX)?
+        }
+    })
 }
 
-/// Which of these paths became a memory labelled private.
+/// Which of these keys of a message (Message-IDs as a MIME parser reads
+/// them, or as the mail import keys them) has a memory labelled private,
+/// under any source and any key a mail import can have given it: the key
+/// itself, or a header's text around the id (`id_in_key`); a private
+/// promotion an earlier version kept under a path counts by the Message-ID
+/// its text names — and while one's message can't be identified, every key
+/// counts.
+pub(crate) fn private_mail_ids(
+    state: &AppState,
+    ids: &[String],
+) -> Result<std::collections::HashSet<String>> {
+    let mut out = std::collections::HashSet::new();
+    if ids.is_empty() {
+        return Ok(out);
+    }
+    let legacy = legacy_promotions(state)?;
+    if legacy.unknown {
+        out.extend(ids.iter().cloned());
+        return Ok(out);
+    }
+    out.extend(state.store.private_refs_anywhere(ids)?);
+    for key in state
+        .store
+        .private_refs_not_bare()?
+        .iter()
+        .chain(legacy.keys.iter())
+    {
+        out.extend(ids.iter().filter(|id| id_in_key(key, id)).cloned());
+    }
+    Ok(out)
+}
+
+/// The paths a mail promotion was kept under before promotions kept the
+/// message's own key (0.5.86): an archive copy's `at:<offset>`, a Gmail
+/// `uid:` path. No reader gives a Message-ID either form, so such a
+/// promotion is known by the text it stored, if at all.
+const LEGACY_PROMOTION_PATHS: &[&str] = &["at:", "uid:"];
+
+/// What the private promotions kept under a legacy path
+/// (`LEGACY_PROMOTION_PATHS`) are memories of, under any source.
+#[derive(Debug, Default)]
+struct LegacyPromotions {
+    /// The Message-IDs their stored text names, as the mail import keys
+    /// them (`mbox::message_id_ref`) — an archive promotion stored the
+    /// message as it is, headers first.
+    keys: std::collections::HashSet<String>,
+    /// Some stored a message that names none: counts as a private memory
+    /// of a message the import keys by its text.
+    unkeyed: bool,
+    /// Some can't be identified: a Gmail promotion kept under its `uid:`
+    /// path — Gmail's fetch took a uid for any message, with or without a
+    /// Message-ID, and the promotion stored only the text shown, which
+    /// names none — or one whose text can't be read. No message can be told
+    /// apart from it, so every message counts as private.
+    unknown: bool,
+}
+
+/// Read from the record alone — the stored text of each private promotion
+/// — so it needs no archive, no mailbox and no registered source, and it
+/// covers every such promotion. A memory's text never changes, so each is
+/// read once per process (by its content hash).
+fn legacy_promotions(state: &AppState) -> Result<LegacyPromotions> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static KEY_OF_TEXT: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+    let known = KEY_OF_TEXT.get_or_init(Default::default);
+    let unknown = || LegacyPromotions {
+        unknown: true,
+        ..Default::default()
+    };
+    let mut out = LegacyPromotions::default();
+    for prefix in LEGACY_PROMOTION_PATHS {
+        for memory in state.store.private_prefixed_anywhere(prefix)? {
+            if crate::gmail_search::parse_uid_path(&memory.source_ref).is_some()
+                && reads_gmail(state, &memory.source)?
+            {
+                return Ok(unknown());
+            }
+            let seen = known
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(&memory.content_hash)
+                .cloned();
+            let key = match seen {
+                Some(key) => key,
+                None => match state
+                    .store
+                    .private_memory_text(&memory.source, &memory.source_ref)?
+                {
+                    Some(text) => {
+                        let key = hearthloom_adapters::mbox::message_id_ref(&text);
+                        known
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .insert(memory.content_hash, key.clone());
+                        key
+                    }
+                    // no text to read (relabelled since, or none stored):
+                    // its message can't be identified (not remembered)
+                    None => return Ok(unknown()),
+                },
+            };
+            match key {
+                Some(key) => {
+                    out.keys.insert(key);
+                }
+                None => out.unkeyed = true,
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Whether a source reads Gmail: `gmail`, or another registered here with
+/// Gmail's adapter.
+fn reads_gmail(state: &AppState, source: &str) -> Result<bool> {
+    Ok(source == crate::gmail_search::SOURCE
+        || state
+            .store
+            .virtual_source(source)?
+            .is_some_and(|def| def.adapter == crate::gmail_search::ADAPTER))
+}
+
+/// Whether `key` — what a mail import made of a Message-ID header
+/// (`mbox::message_id_ref`: its value with the angle brackets at its ends
+/// trimmed) — is the key of the message whose Message-ID a MIME parser read
+/// as `id`. A header holding more than `<id>` (a comment before or after
+/// it, folding whitespace) keeps the bracket on that side of the id.
+fn id_in_key(key: &str, id: &str) -> bool {
+    let id = id.trim();
+    if id.is_empty() {
+        return false;
+    }
+    let key = key.trim();
+    key == id
+        || key.ends_with(&format!("<{id}"))
+        || key.starts_with(&format!("{id}>"))
+        || key.contains(&format!("<{id}>"))
+}
+
+/// Which of these paths became a memory labelled private under this
+/// source's own name (a promotion kept under the path asked for). A
+/// message's other keys are `mail_memory_private`'s.
 fn marked_private(
     state: &AppState,
     def: &VirtualSourceDef,
     paths: &[String],
 ) -> Result<std::collections::HashSet<String>> {
-    let mut out = std::collections::HashSet::new();
-    for source in materialized_sources(def) {
-        out.extend(state.store.private_source_refs(source, paths)?);
-    }
-    Ok(out)
+    state.store.private_source_refs(&def.name, paths)
 }
 
 /// Is this item private for the vault (0.5.86)? The tests a memory meets:
@@ -366,34 +554,67 @@ fn marked_private(
 /// rule makes private was searchable and readable through the archive
 /// with the vault locked.
 /// The memory is looked up by every key the item is known by: the path
-/// asked for, and the key an import gives it (`key` — a message's
-/// Message-ID as the mail import reads it, which a `uid:` path or an
-/// archive's `at:<offset>` copy doesn't carry). A message whose memory key
-/// can't be rebuilt (`ItemKey::Unkeyed`) counts as private while any
-/// memory keyed that way is: the check can't tell it isn't that one.
+/// asked for, under this source's name; and for a message the key an
+/// import gives it (`key` — its Message-ID as the mail import reads it,
+/// which a `uid:` path or an archive's `at:<offset>` copy doesn't carry),
+/// under every source the record holds (`mail_memory_private`). A message
+/// whose memory key can't be rebuilt (`ItemKey::Unkeyed`) counts as
+/// private while any memory keyed that way is: the check can't tell it
+/// isn't that one.
+/// The rules read the whole item (`privacy`): for a message, every header
+/// the import reads and all of its text, decoded. A message that can't be
+/// read whole counts as private while any rule exists.
 fn item_private(
     state: &AppState,
     def: &VirtualSourceDef,
     path: &str,
     key: &ItemKey,
-    text: &str,
+    privacy: &Privacy,
 ) -> Result<bool> {
-    let mut keys = vec![path.to_string()];
-    match key {
-        ItemKey::Path => {}
-        ItemKey::Refs(refs) => keys.extend(refs.iter().filter(|r| *r != path).cloned()),
-        ItemKey::Unkeyed => {
-            for source in materialized_sources(def) {
-                if state.store.private_ref_with_prefix(
-                    source,
-                    hearthloom_adapters::mbox::UNKEYED_REF_PREFIX,
-                )? {
-                    return Ok(true);
-                }
-            }
-        }
+    if !marked_private(state, def, &[path.to_string()])?.is_empty()
+        || mail_memory_private(state, key)?
+    {
+        return Ok(true);
     }
-    Ok(!marked_private(state, def, &keys)?.is_empty() || state.store.privacy_rules_match(text)?)
+    if state.store.list_privacy_rules()?.is_empty() {
+        return Ok(false); // nothing to read the text for
+    }
+    match privacy_text(def, privacy) {
+        Some(text) => state.store.privacy_rules_match(&text),
+        None => Ok(true),
+    }
+}
+
+/// The whole text the rules read, or None when it can't be read whole.
+fn privacy_text(def: &VirtualSourceDef, privacy: &Privacy) -> Option<String> {
+    match privacy {
+        Privacy::Text(text) => Some(text.clone()),
+        Privacy::Message { raw, labels } => {
+            Some(format!("{}{labels}", crate::mbox_text::privacy_text(raw)))
+        }
+        Privacy::ReadAt(at) if def.adapter == crate::gmail_search::ADAPTER => {
+            crate::gmail_search::read_whole(at)
+        }
+        Privacy::ReadAt(_) => None,
+    }
+}
+
+/// The key a promotion of a message is stored under: the message's own
+/// Message-ID as the mail import reads it, whichever path reached it (a
+/// `uid:` path, an archive copy's `at:<offset>`), so the label it is given
+/// holds for every path to the message; a message without one is keyed
+/// the way the import keys it (`nomsgid:` and a hash of what was read).
+/// Anything else keeps its path.
+fn promotion_ref(path: &str, key: &ItemKey, content: &str) -> String {
+    match key {
+        ItemKey::Path => path.to_string(),
+        ItemKey::Refs(refs) => refs.first().cloned().unwrap_or_else(|| path.to_string()),
+        ItemKey::Unkeyed => format!(
+            "{}{}",
+            hearthloom_adapters::mbox::UNKEYED_REF_PREFIX,
+            ids::content_hash(content.as_bytes())
+        ),
+    }
 }
 
 /// `search`, leaving out what the vault hides from this caller (the
@@ -432,19 +653,22 @@ pub fn search_with(
         if marked.contains(&hit.path) {
             continue;
         }
-        let (text, key) = if let Some(text) = &hit.text {
-            (text.clone(), hit.key.clone())
+        let (privacy, key) = if let Some(privacy) = &hit.privacy {
+            (privacy.clone(), hit.key.clone())
         } else if def.adapter == "mbox" {
             match fetch(def, &hit.path, None) {
-                Ok(read) => read,
+                Ok(read) => (read.privacy, read.key),
                 // a message that can't be read can't be checked: held back
                 Err(_) => continue,
             }
         } else {
-            (format!("{}\n{}", hit.path, hit.snippet), ItemKey::Path)
+            (
+                Privacy::Text(format!("{}\n{}", hit.path, hit.snippet)),
+                ItemKey::Path,
+            )
         };
         // the path is already checked above; this adds the item's own key
-        if item_private(state, def, &hit.path, &key, &text)? {
+        if item_private(state, def, &hit.path, &key, &privacy)? {
             continue;
         }
         kept.push(hit);
@@ -471,22 +695,32 @@ pub fn fetch_with(
     budget: Option<u32>,
     locked: bool,
 ) -> Result<String> {
-    let (text, key) = fetch(def, path, budget)?;
-    shown_to(state, def, path, text, &key, locked)
+    Ok(fetch_checked(state, def, path, budget, locked)?.shown)
 }
 
-/// What `fetch_with` gives the caller for an item fetched as `text` (with
-/// the key its memory would carry): the text, or — while locked, for a
-/// private item — the same words as an item that isn't there.
+/// `fetch_with`, keeping the item's key (promotion stores it).
+fn fetch_checked(
+    state: &AppState,
+    def: &VirtualSourceDef,
+    path: &str,
+    budget: Option<u32>,
+    locked: bool,
+) -> Result<Fetched> {
+    let fetched = fetch(def, path, budget)?;
+    shown_to(state, def, path, fetched, locked)
+}
+
+/// What `fetch_with` gives the caller for an item as fetched: the item,
+/// or — while locked, for a private item — the same words as an item that
+/// isn't there.
 fn shown_to(
     state: &AppState,
     def: &VirtualSourceDef,
     path: &str,
-    text: String,
-    key: &ItemKey,
+    fetched: Fetched,
     locked: bool,
-) -> Result<String> {
-    if locked && item_private(state, def, path, key, &text)? {
+) -> Result<Fetched> {
+    if locked && item_private(state, def, path, &fetched.key, &fetched.privacy)? {
         return Err(if def.adapter == "mbox" {
             anyhow!("no message {path:?} in the index")
         } else if def.adapter == crate::gmail_search::ADAPTER {
@@ -495,7 +729,7 @@ fn shown_to(
             anyhow!("nothing at {path:?}")
         });
     }
-    Ok(text)
+    Ok(fetched)
 }
 
 fn magic_search(mount: &Path, query: &str, limit: usize) -> Result<Vec<VirtualHit>> {
@@ -526,7 +760,7 @@ fn magic_search(mount: &Path, query: &str, limit: usize) -> Result<Vec<VirtualHi
             hits.push(VirtualHit {
                 path,
                 snippet: String::new(),
-                text: None,
+                privacy: None,
                 key: ItemKey::Path,
             });
         } else if let Some(hit) = hits.last_mut() {
@@ -583,7 +817,7 @@ fn fs_search(mount: &Path, query: &str, limit: usize) -> Result<Vec<VirtualHit>>
                 hits.push(VirtualHit {
                     path: rel,
                     snippet: snippet_of(&content),
-                    text: None,
+                    privacy: None,
                     key: ItemKey::Path,
                 });
                 if hits.len() >= limit {
@@ -602,8 +836,9 @@ fn fs_search(mount: &Path, query: &str, limit: usize) -> Result<Vec<VirtualHit>>
 /// Message-ID as the mail import reads it, which the path that reached it
 /// need not be (a `uid:` path, an archive's `at:<offset>` duplicate copy,
 /// another parser's spelling). Callers read through `fetch_with`, which
-/// checks the vault on both.
-fn fetch(def: &VirtualSourceDef, path: &str, budget: Option<u32>) -> Result<(String, ItemKey)> {
+/// checks the vault on both — a message on the whole of it, decoded, not on
+/// the raw (and cut) text shown.
+fn fetch(def: &VirtualSourceDef, path: &str, budget: Option<u32>) -> Result<Fetched> {
     if def.adapter == crate::gmail_search::ADAPTER {
         return crate::gmail_search::fetch(path);
     }
@@ -618,9 +853,21 @@ fn fetch(def: &VirtualSourceDef, path: &str, budget: Option<u32>) -> Result<(Str
     if def.adapter == "mbox" {
         // `path` is a message id from a prior vsearch; the sidecar index
         // maps it to a byte range in the archive.
-        let text = crate::mbox_index::fetch(&mount, path, MAX_FETCH_CHARS)?;
+        let raw = crate::mbox_index::fetch_bytes(&mount, path)?;
+        let text = String::from_utf8_lossy(&raw);
         let key = mail_key(&text, None);
-        return Ok((text, key));
+        let shown = text.chars().take(MAX_FETCH_CHARS).collect();
+        // the labels the live pull read again since (the archive keeps
+        // the ones it arrived with)
+        let labels = crate::mbox_index::labels_of(&mount, path)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        return Ok(Fetched {
+            shown,
+            key,
+            privacy: Privacy::Message { raw, labels },
+        });
     }
     let target = match (uses_magic(def), budget) {
         (true, Some(budget)) => {
@@ -638,11 +885,15 @@ fn fetch(def: &VirtualSourceDef, path: &str, budget: Option<u32>) -> Result<(Str
         _ => safe_join(&mount, path)?,
     };
     let bytes = std::fs::read(&target).with_context(|| format!("fetching {}", target.display()))?;
-    let text = String::from_utf8_lossy(&bytes)
+    let text: String = String::from_utf8_lossy(&bytes)
         .chars()
         .take(MAX_FETCH_CHARS)
         .collect();
-    Ok((text, ItemKey::Path))
+    Ok(Fetched {
+        privacy: Privacy::Text(text.clone()),
+        shown: text,
+        key: ItemKey::Path,
+    })
 }
 
 /// `vquery`: read-only SQL over a source's numeric sidecar. The sidecar
@@ -678,7 +929,9 @@ fn sidecar_of(def: &VirtualSourceDef) -> Result<PathBuf> {
 
 /// Promote a virtual result into the substrate: fetch it, then materialize
 /// (or quarantine, for untrusted origins) with provenance = origin +
-/// fetch time. Idempotent on `(source, path)` — re-promoting is a no-op.
+/// fetch time. Idempotent on `(source, item)` — re-promoting is a no-op. A
+/// message is stored under its own Message-ID (`promotion_ref`), whichever
+/// path reached it, so its label covers every path to it.
 pub fn promote(
     state: &AppState,
     actor: &Actor,
@@ -690,7 +943,9 @@ pub fn promote(
 ) -> Result<PromoteOutcome> {
     let def = resolve(state, name)?;
     // a message the vault hides from this caller can't be promoted by it
-    let content = fetch_for_viewer(state, &def, path, budget)?;
+    let fetched = fetch_checked(state, &def, path, budget, state.store.vault_status().0)?;
+    let source_ref = promotion_ref(path, &fetched.key, &fetched.shown);
+    let content = fetched.shown;
     let trust = trust_of(&def);
     let is_mail = def.adapter == "mbox";
     let kind = kind
@@ -711,7 +966,7 @@ pub fn promote(
             "text": content,
             "title": title,
             "source": def.name,
-            "source_ref": path,
+            "source_ref": source_ref,
             "trust": "untrusted",
             "promoted_from": {"virtual_source": def.name, "origin": path},
         });
@@ -728,7 +983,7 @@ pub fn promote(
         session_id: actor.session_id.clone(),
         episodes: vec![EpisodeDraft {
             source: def.name.clone(),
-            source_ref: path.to_string(),
+            source_ref: source_ref.clone(),
             kind,
             title,
             body: content,
@@ -741,7 +996,7 @@ pub fn promote(
     };
     let report = state.store.apply_batch(&state.home, &batch)?;
     Ok(PromoteOutcome {
-        episode_id: Some(ids::episode_id(&def.name, path)),
+        episode_id: Some(ids::episode_id(&def.name, &source_ref)),
         quarantined: None,
         existing: report.episodes_new == 0 && report.episodes_existing > 0,
     })
@@ -1444,6 +1699,37 @@ mod tests {
             .unwrap();
     }
 
+    /// The key a mail import gives a Message-ID header is found from the
+    /// id a MIME parser reads in the same header, however the header is
+    /// written — and isn't taken for another message's.
+    #[test]
+    fn test_a_parsed_message_id_finds_the_imports_key() {
+        for header in [
+            "Message-ID: <plain@x>",
+            "Message-ID: (desk) <hush@x>",
+            "Message-ID: <after@x> (trailing)",
+            "Message-ID: (a) <both@x> (b)",
+            "Message-ID:\r\n <folded@x>",
+            "Message-ID: < spaced@x >",
+        ] {
+            let raw = format!(
+                "From: Ann <ann@x.example>\r\nSubject: s\r\n\
+                 Date: Mon, 05 Jan 2026 10:00:00 -0400\r\n{header}\r\n\r\nbody\r\n"
+            );
+            let key = hearthloom_adapters::mbox::message_id_ref(&raw).unwrap();
+            let parsed = mail_parser::MessageParser::default()
+                .parse(raw.as_bytes())
+                .unwrap()
+                .message_id()
+                .unwrap()
+                .to_string();
+            assert!(id_in_key(&key, &parsed), "{header}: {key:?} / {parsed:?}");
+        }
+        assert!(!id_in_key("(desk) <hush@x.example", "hush@x"));
+        assert!(!id_in_key("ahush@x", "hush@x"));
+        assert!(!id_in_key("anything", ""));
+    }
+
     /// An archive message whose memory is private stays held back while
     /// locked whatever path reaches it: its Message-ID, or the
     /// `at:<offset>` of a duplicate copy — judged by the import's own key.
@@ -1585,20 +1871,8 @@ mod tests {
             .into_iter()
             .collect::<Vec<_>>()
         };
-        let gmail = VirtualSourceDef {
-            name: crate::gmail_search::SOURCE.into(),
-            adapter: crate::gmail_search::ADAPTER.into(),
-            config: json!({}),
-            capabilities: vec!["search".into(), "fetch".into()],
-        };
-        let shown = |raw: &[u8], path: &str, locked: bool| {
-            let (text, key) = crate::gmail_search::as_text(raw);
-            shown_to(&state, &gmail, path, text, &key, locked)
-        };
-        let held = |raw: &[u8], path: &str| {
-            shown(raw, path, true).unwrap_err().to_string()
-                == format!("no message {path:?} in Gmail")
-        };
+        let shown = |raw: &[u8], path: &str, locked: bool| gmail_read(&state, raw, path, locked);
+        let held = |raw: &[u8], path: &str| gmail_held(&state, raw, path);
 
         let clinic = raw(Some("(desk) <hush2@x>"), "the clinic");
         let sail = raw(Some("<sail2@x>"), "saturday");
@@ -1619,6 +1893,778 @@ mod tests {
         for (raw, path) in [(&clinic, "uid:48211"), (&bare, "uid:48213")] {
             assert!(shown(raw, path, false).is_ok());
         }
+    }
+
+    fn gmail_def() -> VirtualSourceDef {
+        VirtualSourceDef {
+            name: crate::gmail_search::SOURCE.into(),
+            adapter: crate::gmail_search::ADAPTER.into(),
+            config: json!({}),
+            capabilities: vec!["search".into(), "fetch".into()],
+        }
+    }
+
+    /// What vfetch on the `gmail` source gives for this raw message reached
+    /// by `path` (its uid read from a `uid:` path), read whole.
+    fn gmail_read(state: &AppState, raw: &[u8], path: &str, locked: bool) -> Result<String> {
+        let uid = path
+            .strip_prefix("uid:")
+            .and_then(|u| u.parse().ok())
+            .unwrap_or(1);
+        gmail_read_uid(state, raw, uid, path, locked)
+    }
+
+    /// `gmail_read` of the message with this uid.
+    fn gmail_read_uid(
+        state: &AppState,
+        raw: &[u8],
+        uid: u32,
+        path: &str,
+        locked: bool,
+    ) -> Result<String> {
+        let message = hearthloom_adapters::gmail_imap::FetchedMessage {
+            uid,
+            labels: vec![],
+            raw: raw.to_vec(),
+        };
+        let fetched = crate::gmail_search::as_text(&message, None, usize::MAX);
+        shown_to(state, &gmail_def(), path, fetched, locked).map(|f| f.shown)
+    }
+
+    fn gmail_held(state: &AppState, raw: &[u8], path: &str) -> bool {
+        gmail_read(state, raw, path, true)
+            .is_err_and(|e| e.to_string() == format!("no message {path:?} in Gmail"))
+    }
+
+    /// The privacy rules read the whole Gmail message, decoded — every
+    /// address header and all of its text — not the part vfetch shows or
+    /// the start a search reads. A message that can't be read whole counts
+    /// as private while a rule exists.
+    #[test]
+    fn test_gmail_privacy_rules_read_the_whole_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, _home) = state_with(tmp.path(), "imported");
+        let actor = Actor::new("human:test");
+        let message = |id: &str, cc: &str, body: &str| {
+            format!(
+                "From: Ann <ann@x.example>\r\nTo: Jon <jon@x.example>\r\n{cc}Subject: notes\r\n\
+                 Date: Mon, 05 Jan 2026 10:00:00 -0400\r\nMessage-ID: <{id}>\r\n\
+                 Content-Type: text/plain; charset=utf-8\r\n\r\n{body}\r\n"
+            )
+            .into_bytes()
+        };
+        let filler = "the weekly notes go on at some length. ".repeat(600);
+        assert!(filler.len() > 20_000);
+        let late = message("late@x", "", &format!("{filler}Then the mediation."));
+        let copied = message(
+            "copied@x",
+            "Cc: Counsel <counsel@firm.example>\r\n",
+            "See below.",
+        );
+        let plain = message("plain@x", "", "Lunch at noon.");
+        let cut_at = Privacy::ReadAt("uid:nosuchbox:5".into());
+        let gmail = gmail_def();
+
+        // no rules: nothing to read the text for
+        assert!(!item_private(&state, &gmail, "x@x", &ItemKey::Path, &cut_at).unwrap());
+
+        state
+            .store
+            .add_privacy_rule(&actor, "term", "mediation")
+            .unwrap();
+        state
+            .store
+            .add_privacy_rule(&actor, "term", "counsel@firm.example")
+            .unwrap();
+        // what vfetch shows stops before the term …
+        let shown = gmail_read(&state, &late, "late@x", false).unwrap();
+        assert!(!shown.contains("mediation"));
+        // … and the message is held back all the same
+        assert!(gmail_held(&state, &late, "late@x"));
+        assert!(gmail_held(&state, &copied, "copied@x"), "a Cc only");
+        assert!(gmail_read(&state, &plain, "plain@x", true).is_ok());
+        // a search hit judged on the whole of what it read
+        let whole = |raw: &[u8]| Privacy::Message {
+            raw: raw.to_vec(),
+            labels: String::new(),
+        };
+        assert!(item_private(&state, &gmail, "late@x", &ItemKey::Path, &whole(&late)).unwrap());
+        assert!(!item_private(&state, &gmail, "plain@x", &ItemKey::Path, &whole(&plain)).unwrap());
+        // a label the import would show counts too
+        let labelled = Privacy::Message {
+            raw: plain.clone(),
+            labels: "Inbox, Mediation".into(),
+        };
+        assert!(item_private(&state, &gmail, "plain@x", &ItemKey::Path, &labelled).unwrap());
+        // a message that can't be read whole
+        assert!(item_private(&state, &gmail, "x@x", &ItemKey::Path, &cut_at).unwrap());
+
+        // open
+        assert!(gmail_read(&state, &late, "late@x", false).is_ok());
+    }
+
+    /// A term rule matches a message whose text breaks the term across a
+    /// line or spaces it out, as it matches the text a reader is shown.
+    #[test]
+    fn test_a_rule_matches_across_a_line_break() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, _home) = state_with(tmp.path(), "imported");
+        state
+            .store
+            .add_privacy_rule(&Actor::new("human:test"), "term", "secret project")
+            .unwrap();
+        let message = |id: &str, body: &str| {
+            format!(
+                "From: Ann <ann@x.example>\r\nSubject: notes\r\n\
+                 Date: Mon, 05 Jan 2026 10:00:00 -0400\r\nMessage-ID: <{id}>\r\n\
+                 Content-Type: text/plain; charset=utf-8\r\n\r\n{body}\r\n"
+            )
+            .into_bytes()
+        };
+        let broken = message("broken@x", "The secret\r\nproject starts Monday.");
+        let spaced = message("spaced@x", "The secret   project starts Monday.");
+        let other = message("other@x", "The secret garden project starts Monday.");
+        let shown = gmail_read(&state, &broken, "broken@x", false).unwrap();
+        assert!(shown.contains("secret project"), "{shown}");
+        assert!(gmail_held(&state, &broken, "broken@x"));
+        assert!(gmail_held(&state, &spaced, "spaced@x"));
+        assert!(gmail_read(&state, &other, "other@x", true).is_ok());
+    }
+
+    /// An archive message is judged on its decoded text: a body in base64
+    /// or quoted-printable whose words a rule names is held back while
+    /// locked — from search (which finds it by the decoded words) and from
+    /// vfetch — though no memory was ever made of it.
+    #[test]
+    fn test_archive_privacy_rules_read_the_decoded_text() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mbox = tmp.path().join("archive.mbox");
+        let message = |id: &str, subject: &str, encoding: &str, body: &str| {
+            format!(
+                "From a@x Mon Jan 05 10:00:00 2026\nFrom: Ann <ann@x.example>\nSubject: {subject}\n\
+                 Date: Mon, 05 Jan 2026 10:00:00 -0400\nMessage-ID: <{id}>\n\
+                 Content-Type: text/plain; charset=utf-8\n\
+                 Content-Transfer-Encoding: {encoding}\n\n{body}\n\n"
+            )
+        };
+        std::fs::write(
+            &mbox,
+            [
+                message(
+                    "b64@x",
+                    "plans for tuesday",
+                    "base64",
+                    "VGhlIG1lZGlhdGlvbiBpcyBvbiBUdWVzZGF5IGF0IG5vb24u",
+                ),
+                message(
+                    "qp@x",
+                    "plans for wednesday",
+                    "quoted-printable",
+                    "The medi=\nation is on Wednesday.",
+                ),
+                message(
+                    "plain@x",
+                    "plans for lunch",
+                    "7bit",
+                    "Noon at the usual place.",
+                ),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let raw_archive = std::fs::read_to_string(&mbox).unwrap();
+        assert!(
+            !raw_archive.contains("mediation"),
+            "only the decoded text says it"
+        );
+        crate::mbox_index::build(&mbox).unwrap();
+        crate::mbox_text::index_batch(&mbox, 10).unwrap();
+
+        let (state, _home) = state_with(tmp.path(), "imported");
+        let actor = Actor::new("human:test");
+        state
+            .store
+            .register_virtual_source(
+                &actor,
+                "gmail-archive",
+                "mbox",
+                &json!({"mount": mbox.to_string_lossy(), "trust": "imported"}),
+                &["search".into(), "fetch".into(), "promote".into()],
+            )
+            .unwrap();
+        state
+            .store
+            .add_privacy_rule(&actor, "term", "mediation")
+            .unwrap();
+        let def = resolve(&state, "gmail-archive").unwrap();
+        let paths = |q: &str| {
+            let mut p: Vec<String> = search_for_viewer(&state, &def, q, 10)
+                .unwrap()
+                .into_iter()
+                .map(|h| h.path)
+                .collect();
+            p.sort();
+            p
+        };
+
+        assert!(paths("mediation").is_empty());
+        assert_eq!(paths("plans"), ["plain@x"]);
+        for held in ["b64@x", "qp@x"] {
+            assert_eq!(
+                fetch_for_viewer(&state, &def, held, None)
+                    .unwrap_err()
+                    .to_string(),
+                format!("no message {held:?} in the index")
+            );
+        }
+        assert!(fetch_for_viewer(&state, &def, "plain@x", None).is_ok());
+
+        state.store.vault_unlock(15);
+        assert_eq!(paths("mediation"), ["b64@x", "qp@x"]);
+        assert!(fetch_for_viewer(&state, &def, "b64@x", None).is_ok());
+    }
+
+    /// A promoted message is kept under its own Message-ID, whichever path
+    /// promoted it, so a private promotion is held back on every path to
+    /// the message — and so is one an earlier version kept under the path
+    /// it was asked for (an archive copy's `at:<offset>`, a Gmail `uid:`).
+    #[test]
+    fn test_a_private_promotion_holds_on_every_path_to_the_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mbox = tmp.path().join("archive.mbox");
+        let message = |id: &str, subject: &str| {
+            format!(
+                "From a@x Mon Jan 05 10:00:00 2026\nFrom: Ann <ann@x.example>\nSubject: {subject}\n\
+                 Date: Mon, 05 Jan 2026 10:00:00 -0400\nMessage-ID: <{id}>\n\nSee you then.\n\n"
+            )
+        };
+        let first = message("dup1@x", "plans for the clinic");
+        let second = message("dup2@x", "plans for the dentist");
+        std::fs::write(
+            &mbox,
+            [
+                first.clone(),
+                first.clone(), // a second copy: indexed as at:<offset>
+                second.clone(),
+                second.clone(),
+                message("sail@x", "plans for saturday"),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        crate::mbox_index::build(&mbox).unwrap();
+        let copy_of = |q: &str| {
+            crate::mbox_index::search(&mbox, q, 10)
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .find(|id| id.starts_with("at:"))
+                .unwrap()
+        };
+        let (clinic_copy, dentist_copy) = (copy_of("clinic"), copy_of("dentist"));
+
+        let (state, _home) = state_with(tmp.path(), "imported");
+        let actor = Actor::new("human:test");
+        state
+            .store
+            .register_virtual_source(
+                &actor,
+                "gmail-archive",
+                "mbox",
+                &json!({"mount": mbox.to_string_lossy(), "trust": "imported"}),
+                &["search".into(), "fetch".into(), "promote".into()],
+            )
+            .unwrap();
+        let def = resolve(&state, "gmail-archive").unwrap();
+        let found = || {
+            let mut p: Vec<String> = search_for_viewer(&state, &def, "plans", 10)
+                .unwrap()
+                .into_iter()
+                .map(|h| h.path)
+                .collect();
+            p.sort();
+            p
+        };
+        let held = |path: &str| fetch_for_viewer(&state, &def, path, None).is_err();
+
+        // promoted privately from its second copy: kept under its Message-ID
+        state.store.vault_unlock(15);
+        let promoted = promote(
+            &state,
+            &actor,
+            "gmail-archive",
+            &clinic_copy,
+            None,
+            Some("private"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            promoted.episode_id.as_deref(),
+            Some(ids::episode_id("gmail-archive", "dup1@x").as_str())
+        );
+        // the same message by its other path is the same memory
+        let again = promote(&state, &actor, "gmail-archive", "dup1@x", None, None, None).unwrap();
+        assert!(again.existing);
+        // one an earlier version kept under the copy's own path
+        state
+            .store
+            .apply_batch(
+                &state.home,
+                &hearthloom_core::IngestBatch {
+                    actor: "human:test".into(),
+                    session_id: None,
+                    episodes: vec![EpisodeDraft {
+                        source: "gmail-archive".into(),
+                        source_ref: dentist_copy.clone(),
+                        kind: "email".into(),
+                        title: "plans for the dentist".into(),
+                        body: second.clone(),
+                        event_time: EventTime::unknown(),
+                        trust: "imported".into(),
+                        scope: Some("private".into()),
+                        entities: vec![],
+                        edges: vec![],
+                    }],
+                },
+            )
+            .unwrap();
+        state.store.vault_lock();
+
+        for path in [
+            "dup1@x",
+            clinic_copy.as_str(),
+            "dup2@x",
+            dentist_copy.as_str(),
+        ] {
+            assert!(held(path), "{path}");
+        }
+        assert_eq!(found(), ["sail@x"]);
+
+        // Gmail: a promotion kept under its Message-ID holds for its uid
+        // path; one kept under a uid path holds for its Message-ID
+        let gmail = |id: &str| {
+            format!(
+                "From: Ann <ann@x.example>\r\nSubject: s\r\nDate: Mon, 05 Jan 2026 10:00:00 -0400\r\n\
+                 Message-ID: <{id}>\r\n\r\nSee you then.\r\n"
+            )
+            .into_bytes()
+        };
+        let private_gmail = |source_ref: &str| {
+            state
+                .store
+                .apply_batch(
+                    &state.home,
+                    &hearthloom_core::IngestBatch {
+                        actor: "human:test".into(),
+                        session_id: None,
+                        episodes: vec![EpisodeDraft {
+                            source: "gmail".into(),
+                            source_ref: source_ref.into(),
+                            kind: "file".into(),
+                            title: "s".into(),
+                            body: "s".into(),
+                            event_time: EventTime::unknown(),
+                            trust: "imported".into(),
+                            scope: Some("private".into()),
+                            entities: vec![],
+                            edges: vec![],
+                        }],
+                    },
+                )
+                .unwrap();
+        };
+        let new_style = gmail("g1@x");
+        let key = mail_key(&String::from_utf8_lossy(&new_style), None);
+        assert_eq!(promotion_ref("uid:41", &key, "s"), "g1@x");
+        private_gmail("g1@x");
+        assert!(gmail_held(&state, &new_style, "uid:41"));
+        assert!(gmail_read_uid(&state, &gmail("g3@x"), 43, "g3@x", true).is_ok());
+        // the archive's private promotion holds when Gmail finds the message
+        assert!(gmail_held(&state, &gmail("dup1@x"), "uid:77"));
+        // one kept under a uid path names no Message-ID: no message can be
+        // told apart from it (`test_an_unidentified_legacy_promotion_holds_every_message`)
+        private_gmail("uid:42");
+        assert!(gmail_read_uid(&state, &gmail("g2@x"), 42, "g2@x", true)
+            .is_err_and(|e| e.to_string() == "no message \"g2@x\" in Gmail"));
+        assert!(gmail_read_uid(&state, &gmail("g3@x"), 43, "g3@x", true).is_err());
+    }
+
+    /// A private memory as an earlier version stored it, under `source`.
+    fn stored_private(source: &str, source_ref: &str, body: &str) -> EpisodeDraft {
+        EpisodeDraft {
+            source: source.into(),
+            source_ref: source_ref.into(),
+            kind: "email".into(),
+            title: "promoted".into(),
+            body: body.into(),
+            event_time: EventTime::unknown(),
+            trust: "imported".into(),
+            scope: Some("private".into()),
+            entities: vec![],
+            edges: vec![],
+        }
+    }
+
+    /// A private promotion an earlier version kept under an archive copy's
+    /// `at:<offset>` is known by the Message-ID its stored text names: the
+    /// message is held back on every path to it — the same archive (however
+    /// many such promotions there are), another archive, Gmail — and from
+    /// triage and an ember's delivery. One whose message has no Message-ID
+    /// counts as a private message without one.
+    #[test]
+    fn test_a_legacy_private_promotion_holds_on_every_mail_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let message = |id: &str, subject: &str| {
+            format!(
+                "From a@x Mon Jan 05 10:00:00 2026\nFrom: Ann <ann@x.example>\nSubject: {subject}\n\
+                 Date: Mon, 05 Jan 2026 10:00:00 -0400\nMessage-ID: <{id}>\n\nSee you then.\n\n"
+            )
+        };
+        let clinic = message("clinic@x", "plans for the clinic");
+        let sail = message("sail@x", "plans for saturday");
+        let first = tmp.path().join("first.mbox");
+        std::fs::write(
+            &first,
+            [clinic.clone(), clinic.clone(), sail.clone()].concat(),
+        )
+        .unwrap();
+        let second = tmp.path().join("second.mbox");
+        std::fs::write(&second, [clinic.clone(), sail.clone()].concat()).unwrap();
+        for mbox in [&first, &second] {
+            crate::mbox_index::build(mbox).unwrap();
+        }
+        let copy = crate::mbox_index::search(&first, "clinic", 10)
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .find(|id| id.starts_with("at:"))
+            .unwrap();
+
+        let (state, _home) = state_with(tmp.path(), "imported");
+        let actor = Actor::new("human:test");
+        for (name, mbox) in [("first-archive", &first), ("second-archive", &second)] {
+            state
+                .store
+                .register_virtual_source(
+                    &actor,
+                    name,
+                    "mbox",
+                    &json!({"mount": mbox.to_string_lossy(), "trust": "imported"}),
+                    &["search".into(), "fetch".into(), "promote".into()],
+                )
+                .unwrap();
+        }
+        // what an earlier version kept: the clinic message promoted private
+        // from its second copy, under that copy's path — after a thousand
+        // other private promotions whose paths come first
+        let mut kept: Vec<EpisodeDraft> = (0..1000)
+            .map(|i| {
+                stored_private(
+                    "first-archive",
+                    &format!("at:0{i:04}"),
+                    &message(&format!("other{i}@x"), "other"),
+                )
+            })
+            .collect();
+        kept.push(stored_private("first-archive", &copy, &clinic));
+        import_private(&state, kept);
+
+        let fetch = |source: &str, path: &str| {
+            fetch_for_viewer(&state, &resolve(&state, source).unwrap(), path, None)
+        };
+        // the same archive, by the message's own id
+        assert!(fetch("first-archive", "clinic@x").is_err());
+        // another archive
+        assert!(fetch("second-archive", "clinic@x").is_err());
+        let second_def = resolve(&state, "second-archive").unwrap();
+        let found: Vec<String> = search_for_viewer(&state, &second_def, "plans", 10)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.path)
+            .collect();
+        assert_eq!(found, ["sail@x"]);
+        assert!(fetch("second-archive", "sail@x").is_ok());
+        // Gmail
+        let gmail = |id: &str| {
+            format!(
+                "From: Ann <ann@x.example>\r\nSubject: s\r\nDate: Mon, 05 Jan 2026 10:00:00 -0400\r\n\
+                 Message-ID: <{id}>\r\n\r\nSee you then.\r\n"
+            )
+            .into_bytes()
+        };
+        assert!(gmail_held(&state, &gmail("clinic@x"), "uid:77"));
+        assert!(gmail_read_uid(&state, &gmail("sail@x"), 78, "sail@x", true).is_ok());
+        // triage, and an ember's delivery (which holds only the parsed id)
+        let key = |raw: &str| mail_key(raw, None);
+        assert!(mail_memory_private(&state, &key(&clinic)).unwrap());
+        assert!(!mail_memory_private(&state, &key(&sail)).unwrap());
+        let ids = private_mail_ids(&state, &["clinic@x".into(), "sail@x".into()]).unwrap();
+        assert_eq!(ids.into_iter().collect::<Vec<_>>(), ["clinic@x"]);
+
+        // one whose stored message has no Message-ID counts as a private
+        // message without one
+        assert!(!mail_memory_private(&state, &ItemKey::Unkeyed).unwrap());
+        import_private(
+            &state,
+            vec![stored_private(
+                "first-archive",
+                "at:9999999",
+                "From a@x Mon Jan 05 10:00:00 2026\nFrom: Ann <ann@x.example>\nSubject: picnic\n\
+                 Date: Mon, 05 Jan 2026 10:00:00 -0400\n\nBring the blanket.\n",
+            )],
+        );
+        assert!(mail_memory_private(&state, &ItemKey::Unkeyed).unwrap());
+        assert!(!mail_memory_private(&state, &key(&sail)).unwrap());
+
+        // open
+        state.store.vault_unlock(15);
+        assert!(fetch("second-archive", "clinic@x").is_ok());
+    }
+
+    /// A private promotion an earlier version kept under an archive copy's
+    /// `at:` path is matched by the message's identity, not by how its
+    /// Message-ID header is written: a comment beside the id in the stored
+    /// copy, or in the copy read, still finds it — on an archive read, in a
+    /// search, in triage's check and in an ember's delivery alike.
+    #[test]
+    fn test_a_legacy_promotion_is_matched_by_message_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let message = |id_header: &str, subject: &str| {
+            format!(
+                "From a@x Mon Jan 05 10:00:00 2026\nFrom: Ann <ann@x.example>\nSubject: {subject}\n\
+                 Date: Mon, 05 Jan 2026 10:00:00 -0400\nMessage-ID: {id_header}\n\nSee you then.\n\n"
+            )
+        };
+        // stored with a comment beside the id, read without one
+        let clinic_stored = message("<clinic@x> (archive copy)", "plans for the clinic");
+        let clinic_read = message("<clinic@x>", "plans for the clinic");
+        // stored without one, read with one
+        let dentist_stored = message("<dentist@x>", "plans for the dentist");
+        let dentist_read = message("<dentist@x> (archive copy)", "plans for the dentist");
+        let sail = message("<sail@x>", "plans for saturday");
+        let mbox = tmp.path().join("archive.mbox");
+        std::fs::write(
+            &mbox,
+            [clinic_read.clone(), dentist_read.clone(), sail.clone()].concat(),
+        )
+        .unwrap();
+        crate::mbox_index::build(&mbox).unwrap();
+        let path_of = |q: &str| {
+            crate::mbox_index::search(&mbox, q, 10).unwrap()[0]
+                .0
+                .clone()
+        };
+        let (clinic_path, dentist_path) = (path_of("clinic"), path_of("dentist"));
+        assert_eq!(clinic_path, "clinic@x");
+        assert_eq!(dentist_path, "dentist@x> (archive copy)");
+
+        let (state, _home) = state_with(tmp.path(), "imported");
+        state
+            .store
+            .register_virtual_source(
+                &Actor::new("human:test"),
+                "archive",
+                "mbox",
+                &json!({"mount": mbox.to_string_lossy(), "trust": "imported"}),
+                &["search".into(), "fetch".into()],
+            )
+            .unwrap();
+        // what an earlier version kept: both promoted private from another
+        // archive's copies, under those copies' paths
+        import_private(
+            &state,
+            vec![
+                stored_private("old-archive", "at:100", &clinic_stored),
+                stored_private("old-archive", "at:200", &dentist_stored),
+            ],
+        );
+        let def = resolve(&state, "archive").unwrap();
+        let held = |path: &str| {
+            fetch_for_viewer(&state, &def, path, None)
+                .is_err_and(|e| e.to_string() == format!("no message {path:?} in the index"))
+        };
+        assert!(held(&clinic_path));
+        assert!(held(&dentist_path));
+        assert!(fetch_for_viewer(&state, &def, "sail@x", None).is_ok());
+        let found: Vec<String> = search_for_viewer(&state, &def, "plans", 10)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.path)
+            .collect();
+        assert_eq!(found, ["sail@x"]);
+        // triage's check, and an ember's delivery (the parsed id)
+        let key = |raw: &str| mail_key(raw, None);
+        assert!(mail_memory_private(&state, &key(&clinic_read)).unwrap());
+        assert!(mail_memory_private(&state, &key(&dentist_read)).unwrap());
+        assert!(!mail_memory_private(&state, &key(&sail)).unwrap());
+        let mut ids: Vec<String> = private_mail_ids(
+            &state,
+            &["clinic@x".into(), "dentist@x".into(), "sail@x".into()],
+        )
+        .unwrap()
+        .into_iter()
+        .collect();
+        ids.sort();
+        assert_eq!(ids, ["clinic@x", "dentist@x"]);
+
+        // open
+        state.store.vault_unlock(15);
+        for path in [&clinic_path, &dentist_path] {
+            assert!(fetch_for_viewer(&state, &def, path, None).is_ok());
+        }
+    }
+
+    /// A Gmail promotion an earlier version kept under a `uid:` path can't
+    /// be identified: Gmail's fetch took a uid for any message, and the
+    /// promotion stored only the text shown, which names no Message-ID. While
+    /// it is private, no message can be told apart from it, so every message
+    /// is held back on every mail path — archives, Gmail, triage's check, an
+    /// ember's delivery — until the vault is opened. A `uid:` ref under a
+    /// source that doesn't read Gmail is not such a promotion.
+    #[test]
+    fn test_an_unidentified_legacy_promotion_holds_every_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let message = |id: &str, subject: &str| {
+            format!(
+                "From a@x Mon Jan 05 10:00:00 2026\nFrom: Ann <ann@x.example>\nSubject: {subject}\n\
+                 Date: Mon, 05 Jan 2026 10:00:00 -0400\nMessage-ID: <{id}>\n\nSee you then.\n\n"
+            )
+        };
+        let clinic = message("clinic@x", "plans for the clinic");
+        let sail = message("sail@x", "plans for saturday");
+        let mbox = tmp.path().join("archive.mbox");
+        std::fs::write(&mbox, [clinic.clone(), sail.clone()].concat()).unwrap();
+        crate::mbox_index::build(&mbox).unwrap();
+        let (state, _home) = state_with(tmp.path(), "imported");
+        state
+            .store
+            .register_virtual_source(
+                &Actor::new("human:test"),
+                "archive",
+                "mbox",
+                &json!({"mount": mbox.to_string_lossy(), "trust": "imported"}),
+                &["search".into(), "fetch".into()],
+            )
+            .unwrap();
+        let def = resolve(&state, "archive").unwrap();
+        let shown = |path: &str| fetch_for_viewer(&state, &def, path, None).is_ok();
+        let found = || search_for_viewer(&state, &def, "plans", 10).unwrap().len();
+        let key = |raw: &str| mail_key(raw, None);
+        let private_ids = || {
+            private_mail_ids(&state, &["clinic@x".into(), "sail@x".into()])
+                .unwrap()
+                .len()
+        };
+        let gmail = |id: &str| {
+            format!(
+                "From: Ann <ann@x.example>\r\nSubject: s\r\nDate: Mon, 05 Jan 2026 10:00:00 -0400\r\n\
+                 Message-ID: <{id}>\r\n\r\nSee you then.\r\n"
+            )
+            .into_bytes()
+        };
+
+        // a private memory under a `uid:` ref of a source that doesn't read
+        // Gmail holds no message back
+        import_private(
+            &state,
+            vec![stored_private("ics", "uid:7", "the clinic visit")],
+        );
+        assert!(shown("clinic@x") && shown("sail@x"));
+        assert_eq!(found(), 2);
+        assert!(!mail_memory_private(&state, &key(&clinic)).unwrap());
+        assert_eq!(private_ids(), 0);
+
+        // the clinic message, promoted private through its uid
+        import_private(
+            &state,
+            vec![stored_private(
+                crate::gmail_search::SOURCE,
+                "uid:42",
+                "From: Ann <ann@x.example>\nTo: Jon <jon@x.example>\n\
+                 Date: Mon, 05 Jan 2026 10:00:00 -0400\nSubject: plans for the clinic\n\nSee you then.",
+            )],
+        );
+        assert!(!shown("clinic@x") && !shown("sail@x"));
+        assert_eq!(found(), 0);
+        assert!(gmail_held(&state, &gmail("clinic@x"), "uid:77"));
+        assert!(gmail_held(&state, &gmail("sail@x"), "uid:78"));
+        for raw in [&clinic, &sail] {
+            assert!(mail_memory_private(&state, &key(raw)).unwrap());
+        }
+        assert!(mail_memory_private(&state, &ItemKey::Unkeyed).unwrap());
+        assert_eq!(private_ids(), 2);
+
+        // open
+        state.store.vault_unlock(15);
+        assert!(shown("clinic@x") && shown("sail@x"));
+        assert_eq!(found(), 2);
+    }
+
+    /// A private promotion holds wherever the message is read, whether or
+    /// not the source it was promoted from is registered here: after it is
+    /// unregistered (archives move between nodes), and when it was never
+    /// registered on this node (the promotion synced from another).
+    #[test]
+    fn test_a_private_promotion_outlasts_its_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mbox = tmp.path().join("archive.mbox");
+        std::fs::write(
+            &mbox,
+            "From a@x Mon Jan 05 10:00:00 2026\nFrom: Ann <ann@x.example>\nSubject: the clinic\n\
+             Date: Mon, 05 Jan 2026 10:00:00 -0400\nMessage-ID: <clinic@x>\n\nSee you then.\n\n",
+        )
+        .unwrap();
+        crate::mbox_index::build(&mbox).unwrap();
+        let (state, _home) = state_with(tmp.path(), "imported");
+        let actor = Actor::new("human:test");
+        state
+            .store
+            .register_virtual_source(
+                &actor,
+                "old-archive",
+                "mbox",
+                &json!({"mount": mbox.to_string_lossy(), "trust": "imported"}),
+                &["search".into(), "fetch".into(), "promote".into()],
+            )
+            .unwrap();
+        state.store.vault_unlock(15);
+        promote(
+            &state,
+            &actor,
+            "old-archive",
+            "clinic@x",
+            None,
+            Some("private"),
+            None,
+        )
+        .unwrap();
+        state.store.vault_lock();
+        assert!(state
+            .store
+            .unregister_virtual_source(&actor, "old-archive")
+            .unwrap());
+        // promoted on another node from an archive never registered here
+        import_private(
+            &state,
+            vec![stored_private("laptop-archive", "dentist@x", "promoted")],
+        );
+
+        let gmail = |id: &str| {
+            format!(
+                "From: Ann <ann@x.example>\r\nSubject: s\r\nDate: Mon, 05 Jan 2026 10:00:00 -0400\r\n\
+                 Message-ID: <{id}>\r\n\r\nSee you then.\r\n"
+            )
+            .into_bytes()
+        };
+        assert!(gmail_held(&state, &gmail("clinic@x"), "uid:5"));
+        assert!(gmail_held(&state, &gmail("dentist@x"), "uid:6"));
+        assert!(gmail_read_uid(&state, &gmail("sail@x"), 7, "sail@x", true).is_ok());
+        let key = |id: &str| mail_key(&String::from_utf8_lossy(&gmail(id)), None);
+        assert!(mail_memory_private(&state, &key("clinic@x")).unwrap());
+        assert!(mail_memory_private(&state, &key("dentist@x")).unwrap());
+        let ids = private_mail_ids(&state, &["dentist@x".into(), "sail@x".into()]).unwrap();
+        assert_eq!(ids.into_iter().collect::<Vec<_>>(), ["dentist@x"]);
     }
 
     /// 0.5.86: Ask is told what each mail archive holds (rounded, so its
@@ -1754,9 +2800,9 @@ mod tests {
         assert_eq!(hits[0].path, "sail1@x");
         assert!(hits[0].snippet.contains("sailing plans"));
 
-        let (raw, key) = fetch(&def, "sail1@x", None).unwrap();
-        assert!(raw.contains("regatta"));
-        assert_eq!(key, ItemKey::Refs(vec!["sail1@x".into()]));
+        let read = fetch(&def, "sail1@x", None).unwrap();
+        assert!(read.shown.contains("regatta"));
+        assert_eq!(read.key, ItemKey::Refs(vec!["sail1@x".into()]));
 
         let actor = Actor::new("human:test");
         let outcome =

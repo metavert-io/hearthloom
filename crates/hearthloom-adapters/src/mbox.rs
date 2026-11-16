@@ -2,10 +2,13 @@
 //! and recipients become Person entities keyed by email address, so mail
 //! participates in the same cross-source identity as git and calendars.
 //!
-//! Deliberately shallow MIME handling: headers are unfolded and the first
-//! text/plain part is preferred, but no full MIME tree is built. The raw
-//! message text is kept as the episode body (capped), so a better parser
-//! later can re-derive everything.
+//! The message is read with `mail-parser` (the same reader as the daemon's
+//! archive text index): the subject and display names decoded (RFC 2047),
+//! the body's first text part decoded from its transfer encoding and
+//! charset, wherever it sits in the MIME tree. The episode body is that
+//! readable text (capped); the original bytes stay in the archive. The
+//! message's identity (Message-ID, or the hash of its text) and its Gmail
+//! labels are read from the raw header block, as before.
 
 use std::path::Path;
 
@@ -49,7 +52,8 @@ impl LabelFilter {
         }
     }
 
-    fn keeps(&self, labels: &[String]) -> bool {
+    /// Whether a message with these labels passes the filter.
+    pub fn keeps(&self, labels: &[String]) -> bool {
         let has = |list: &[String]| {
             list.iter()
                 .any(|want| labels.iter().any(|l| l.eq_ignore_ascii_case(want)))
@@ -139,37 +143,37 @@ pub fn ingest_batched_filtered(
     // 1MB buffer: mbox lines are short but plentiful.
     let reader = std::io::BufReader::with_capacity(1 << 20, file);
 
-    let mut current = String::new();
+    // The message's bytes as they are (old mail is full of 8-bit text in
+    // legacy charsets — decoded by the charset it declares), lines ending
+    // in LF.
+    let mut current: Vec<u8> = Vec::new();
     let mut in_message = false;
     let mut prev_blank = true;
     let mut batch: Vec<EpisodeDraft> = Vec::new();
     let mut total = 0usize;
 
-    let flush_message = |current: &mut String, batch: &mut Vec<EpisodeDraft>, total: &mut usize| {
-        if current.is_empty() {
-            return;
-        }
-        let labels = gmail_labels(current);
-        if !filter.keeps(&labels) {
-            current.clear();
-            return;
-        }
-        match message_to_draft(current, &labels, scope) {
-            Ok(draft) => {
-                batch.push(draft);
-                *total += 1;
+    let flush_message =
+        |current: &mut Vec<u8>, batch: &mut Vec<EpisodeDraft>, total: &mut usize| {
+            if current.is_empty() {
+                return;
             }
-            Err(err) => tracing::warn!("skipping message: {err}"),
-        }
-        current.clear();
-    };
+            match draft_from_bytes_filtered(current, filter, scope) {
+                Ok(Some(draft)) => {
+                    batch.push(draft);
+                    *total += 1;
+                }
+                Ok(None) => {}
+                Err(err) => tracing::warn!("skipping message: {err}"),
+            }
+            current.clear();
+        };
 
     for line in reader.split(b'\n') {
-        let line = line?;
-        // Tolerate non-UTF8 bytes (old mail is full of them).
-        let line = String::from_utf8_lossy(&line);
-        let line = line.trim_end_matches('\r');
-        if prev_blank && line.starts_with("From ") {
+        let mut line = line?;
+        while line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        if prev_blank && line.starts_with(b"From ") {
             flush_message(&mut current, &mut batch, &mut total);
             if batch.len() >= batch_size {
                 sink(std::mem::take(&mut batch))?;
@@ -179,10 +183,10 @@ pub fn ingest_batched_filtered(
             continue;
         }
         if in_message {
-            current.push_str(line);
-            current.push('\n');
+            current.extend_from_slice(&line);
+            current.push(b'\n');
         }
-        prev_blank = line.trim().is_empty();
+        prev_blank = String::from_utf8_lossy(&line).trim().is_empty();
     }
     flush_message(&mut current, &mut batch, &mut total);
     if !batch.is_empty() {
@@ -200,7 +204,18 @@ pub fn draft_from_message_filtered(
     filter: &LabelFilter,
     scope: Option<&str>,
 ) -> Result<Option<EpisodeDraft>> {
-    let labels = gmail_labels(message);
+    draft_from_bytes_filtered(message.as_bytes(), filter, scope)
+}
+
+/// [`draft_from_message_filtered`] from the message's bytes, so 8-bit text
+/// is decoded by the charset the message declares rather than read as
+/// UTF-8 first.
+pub fn draft_from_bytes_filtered(
+    message: &[u8],
+    filter: &LabelFilter,
+    scope: Option<&str>,
+) -> Result<Option<EpisodeDraft>> {
+    let labels = gmail_labels(&String::from_utf8_lossy(message));
     if !filter.keeps(&labels) {
         return Ok(None);
     }
@@ -232,12 +247,11 @@ fn split_mbox(raw: &str) -> Vec<&str> {
     messages
 }
 
-struct Headers<'a> {
+struct Headers {
     entries: Vec<(String, String)>,
-    body: &'a str,
 }
 
-impl Headers<'_> {
+impl Headers {
     fn get(&self, name: &str) -> Option<&str> {
         self.entries
             .iter()
@@ -246,15 +260,12 @@ impl Headers<'_> {
     }
 }
 
-/// Parse headers (with RFC 5322 unfolding) and locate the body.
-fn parse_headers(message: &str) -> Headers<'_> {
+/// Parse the header block (with RFC 5322 unfolding).
+fn parse_headers(message: &str) -> Headers {
     let mut entries: Vec<(String, String)> = Vec::new();
-    let mut body_start = message.len();
-    let mut offset = 0;
     for line in message.split_inclusive('\n') {
         let trimmed = line.trim_end();
         if trimmed.is_empty() {
-            body_start = offset + line.len();
             break;
         }
         if (line.starts_with(' ') || line.starts_with('\t')) && !entries.is_empty() {
@@ -264,87 +275,32 @@ fn parse_headers(message: &str) -> Headers<'_> {
         } else if let Some((name, value)) = trimmed.split_once(':') {
             entries.push((name.trim().to_string(), value.trim().to_string()));
         }
-        offset += line.len();
     }
-    Headers {
-        entries,
-        body: &message[body_start..],
-    }
+    Headers { entries }
 }
 
-/// Extract (email, display name) pairs from an address header value.
-fn parse_addresses(value: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    // Split on commas outside quotes/angle brackets.
-    let mut depth = 0;
-    let mut in_quotes = false;
-    let mut current = String::new();
-    let mut parts = Vec::new();
-    for c in value.chars() {
-        match c {
-            '"' => in_quotes = !in_quotes,
-            '<' if !in_quotes => depth += 1,
-            '>' if !in_quotes => depth -= 1,
-            ',' if !in_quotes && depth == 0 => {
-                parts.push(std::mem::take(&mut current));
-                continue;
+/// (email, display name) pairs of an address header, decoded. An address
+/// without `@` or with whitespace is skipped; a missing name is the
+/// mailbox's local part. Names are one line: the body lists them one per
+/// line.
+fn people(list: Option<mail_parser::AddressList<'_>>) -> Vec<(String, String)> {
+    let Some(list) = list else {
+        return vec![];
+    };
+    list.mailboxes()
+        .filter_map(|mailbox| {
+            let email = mailbox.address()?.trim().to_lowercase();
+            if !email.contains('@') || email.chars().any(char::is_whitespace) {
+                return None;
             }
-            _ => {}
-        }
-        current.push(c);
-    }
-    parts.push(current);
-
-    for part in parts {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        let (name, email) = match (part.find('<'), part.find('>')) {
-            (Some(lt), Some(gt)) if gt > lt => {
-                (part[..lt].trim().trim_matches('"'), part[lt + 1..gt].trim())
-            }
-            _ => ("", part),
-        };
-        let email = email.trim().to_lowercase();
-        if !email.contains('@') || email.contains(' ') {
-            continue;
-        }
-        // RFC 2047 encoded-word display names are left undecoded; fall
-        // back to the mailbox local part instead of showing gibberish.
-        let name = if name.is_empty() || name.starts_with("=?") {
-            email.split('@').next().unwrap_or(&email).to_string()
-        } else {
-            name.to_string()
-        };
-        out.push((email, name));
-    }
-    out
-}
-
-/// Prefer the first text/plain part of a multipart body; otherwise the
-/// body as-is. Shallow: looks for the boundary marker, not a MIME tree.
-fn extract_text(headers: &Headers<'_>) -> String {
-    let body = headers.body;
-    let content_type = headers.get("Content-Type").unwrap_or("text/plain");
-    if let Some(boundary) = content_type
-        .split("boundary=")
-        .nth(1)
-        .map(|b| b.trim_matches(|c| c == '"' || c == ' ' || c == ';'))
-    {
-        let marker = format!("--{boundary}");
-        for part in body.split(&marker) {
-            if part.trim().is_empty() || part.trim() == "--" {
-                continue; // preamble / closing delimiter
-            }
-            let parsed = parse_headers(part.trim_start_matches(['\r', '\n']));
-            let part_type = parsed.get("Content-Type").unwrap_or("text/plain");
-            if part_type.starts_with("text/plain") && !parsed.body.trim().is_empty() {
-                return parsed.body.to_string();
-            }
-        }
-    }
-    body.to_string()
+            let name = mailbox
+                .name()
+                .map(hearthloom_core::one_line)
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| email.split('@').next().unwrap_or(&email).to_string());
+            Some((email, name))
+        })
+        .collect()
 }
 
 /// The `source_ref` prefix of a message without a Message-ID: its memory
@@ -362,15 +318,27 @@ pub fn message_id_ref(message: &str) -> Option<String> {
     id_ref(&parse_headers(message))
 }
 
-fn id_ref(headers: &Headers<'_>) -> Option<String> {
+fn id_ref(headers: &Headers) -> Option<String> {
     headers
         .get("Message-ID")
         .map(|id| id.trim_matches(|c| c == '<' || c == '>').to_string())
 }
 
-fn message_to_draft(message: &str, labels: &[String], scope: Option<&str>) -> Result<EpisodeDraft> {
-    let headers = parse_headers(message);
-    let subject = headers.get("Subject").unwrap_or("(no subject)").to_string();
+fn message_to_draft(raw: &[u8], labels: &[String], scope: Option<&str>) -> Result<EpisodeDraft> {
+    // The text the identity is read from: the header block, and for a
+    // message without a Message-ID, the hash of this text (the same text
+    // earlier versions hashed, so a re-import finds the same memory).
+    let message = String::from_utf8_lossy(raw);
+    let headers = parse_headers(&message);
+    // Everything shown is decoded: encoded words, transfer encodings,
+    // charsets, nested parts.
+    let parsed = mail_parser::MessageParser::default().parse(raw);
+    let subject = parsed
+        .as_ref()
+        .and_then(|m| m.subject())
+        .or_else(|| headers.get("Subject"))
+        .map(hearthloom_core::one_line)
+        .unwrap_or_else(|| "(no subject)".to_string());
     let date = headers
         .get("Date")
         .ok_or_else(|| anyhow!("message without Date: {subject}"))?;
@@ -379,13 +347,14 @@ fn message_to_draft(message: &str, labels: &[String], scope: Option<&str>) -> Re
         Err(_) => EventTime::unknown(),
     };
 
-    let from = headers.get("From").map(parse_addresses).unwrap_or_default();
-    let mut recipients = Vec::new();
-    for header in ["To", "Cc"] {
-        if let Some(value) = headers.get(header) {
-            recipients.extend(parse_addresses(value));
+    let (from, recipients) = match parsed.as_ref() {
+        Some(m) => {
+            let mut recipients = people(m.to());
+            recipients.extend(people(m.cc()));
+            (people(m.from()), recipients)
         }
-    }
+        None => (vec![], vec![]),
+    };
 
     // Source-native identity: Message-ID, else a content hash stand-in.
     let source_ref = id_ref(&headers).unwrap_or_else(|| {
@@ -395,7 +364,11 @@ fn message_to_draft(message: &str, labels: &[String], scope: Option<&str>) -> Re
         )
     });
 
-    let mut text = extract_text(&headers);
+    let mut text = parsed
+        .as_ref()
+        .and_then(|m| m.body_text(0))
+        .map(|t| t.replace("\r\n", "\n"))
+        .unwrap_or_default();
     if text.len() > BODY_CAP {
         let mut cut = BODY_CAP;
         while !text.is_char_boundary(cut) {
@@ -494,7 +467,7 @@ Content-Type: text/html\n\
         let messages = split_mbox(SAMPLE);
         assert_eq!(messages.len(), 2);
 
-        let draft = message_to_draft(messages[0], &[], None).unwrap();
+        let draft = message_to_draft(messages[0].as_bytes(), &[], None).unwrap();
         assert_eq!(draft.title, "Re: roadmap");
         assert_eq!(draft.source_ref, "abc123@mail.example.com");
         assert_eq!(draft.kind, "email");
@@ -528,7 +501,7 @@ Content-Type: text/html\n\
                  Date: Mon, 05 Jan 2026 10:00:00 -0400\r\n{}\r\n\r\nbody\r\n",
                 header.replace('\n', "\r\n")
             );
-            let draft = message_to_draft(&message, &[], None).unwrap();
+            let draft = message_to_draft(message.as_bytes(), &[], None).unwrap();
             assert_eq!(
                 message_id_ref(&message).as_deref(),
                 Some(draft.source_ref.as_str()),
@@ -537,20 +510,153 @@ Content-Type: text/html\n\
         }
         let none = "From: a@x\nDate: Mon, 05 Jan 2026 10:00:00 -0400\n\nbody\n";
         assert_eq!(message_id_ref(none), None);
-        assert!(message_to_draft(none, &[], None)
+        assert!(message_to_draft(none.as_bytes(), &[], None)
             .unwrap()
             .source_ref
             .starts_with(UNKEYED_REF_PREFIX));
     }
 
+    /// A message without a Message-ID keeps the key earlier versions gave
+    /// it (the hash of its text, invalid UTF-8 replaced), so importing it
+    /// again finds the same memory.
+    #[test]
+    fn test_an_unkeyed_message_keeps_its_key() {
+        let raw = b"From: a@x\nDate: Mon, 05 Jan 2026 10:00:00 -0400\n\ncaf\xe9\n";
+        let text = String::from_utf8_lossy(raw);
+        let draft = message_to_draft(raw, &[], None).unwrap();
+        assert_eq!(
+            draft.source_ref,
+            format!(
+                "{UNKEYED_REF_PREFIX}{}",
+                hearthloom_core::ids::content_hash(text.as_bytes())
+            )
+        );
+    }
+
     #[test]
     fn test_multipart_prefers_text_plain() {
         let messages = split_mbox(SAMPLE);
-        let draft = message_to_draft(messages[1], &[], None).unwrap();
+        let draft = message_to_draft(messages[1].as_bytes(), &[], None).unwrap();
         assert!(draft.body.contains("plain part here"));
         assert!(!draft.body.contains("<b>html part</b>"));
-        // Encoded-word display name falls back to the local part.
-        assert_eq!(draft.entities[0].name, "jane");
+        // An encoded-word display name is decoded.
+        assert_eq!(draft.entities[0].name, "Jane");
+    }
+
+    /// What is stored is readable text: encoded subjects and names decoded,
+    /// base64 and quoted-printable bodies decoded, the text part found
+    /// inside nested multiparts, attachments left out, 8-bit text read by
+    /// its declared charset.
+    #[test]
+    fn test_stored_mail_is_decoded() {
+        let header = |extra: &str| {
+            format!(
+                "From: =?UTF-8?B?Sm9zw6kgR2FyY8OtYQ==?= <jose@x.example>\n\
+                 To: \"Doe, Jane\" <Jane@X.example>, bob@y.example, =?ISO-8859-1?Q?Ren=E9?= <rene@z.example>\n\
+                 Subject: =?UTF-8?Q?Caf=C3=A9_plans?=\n\
+                 Date: Mon, 05 Jan 2026 10:00:00 -0400\n\
+                 Message-ID: <dec1@x>\n{extra}"
+            )
+        };
+        let base64 = format!(
+            "{}Content-Type: text/plain; charset=utf-8\nContent-Transfer-Encoding: base64\n\n\
+             TWVldCBhdCB0aGUgY2Fmw6kgb24gVHVlc2RheS4K\n",
+            header("")
+        );
+        let draft = message_to_draft(base64.as_bytes(), &[], None).unwrap();
+        assert_eq!(draft.title, "Café plans");
+        assert!(draft.body.starts_with("subject: Café plans\n"));
+        assert!(
+            draft.body.contains("Meet at the café on Tuesday."),
+            "{}",
+            draft.body
+        );
+        assert_eq!(draft.entities[0].name, "José García");
+        let people: Vec<(&str, &str)> = draft
+            .entities
+            .iter()
+            .map(|e| (e.attributes[0].1.as_str(), e.name.as_str()))
+            .collect();
+        assert_eq!(
+            people,
+            vec![
+                ("jose@x.example", "José García"),
+                ("jane@x.example", "Doe, Jane"),
+                ("bob@y.example", "bob"),
+                ("rene@z.example", "René"),
+            ]
+        );
+
+        let quoted_printable = format!(
+            "{}Content-Type: text/plain; charset=utf-8\nContent-Transfer-Encoding: quoted-printable\n\n\
+             I=E2=80=99ll bring the =\nreceipts.\n",
+            header("")
+        );
+        let draft = message_to_draft(quoted_printable.as_bytes(), &[], None).unwrap();
+        assert!(
+            draft.body.contains("I\u{2019}ll bring the receipts."),
+            "{}",
+            draft.body
+        );
+
+        let nested = format!(
+            "{}Content-Type: multipart/mixed; boundary=\"outer\"\n\n\
+             --outer\n\
+             Content-Type: multipart/alternative; boundary=\"inner\"\n\n\
+             --inner\n\
+             Content-Type: text/plain; charset=utf-8\n\
+             Content-Transfer-Encoding: base64\n\n\
+             VGhlIGJpb3BzeSByZXN1bHRzIGFyZSBpbi4K\n\
+             --inner\n\
+             Content-Type: text/html; charset=utf-8\n\n\
+             <p>The biopsy results are in.</p>\n\
+             --inner--\n\
+             --outer\n\
+             Content-Type: application/pdf; name=\"scan.pdf\"\n\
+             Content-Transfer-Encoding: base64\n\n\
+             JVBERi0xLjQKJcOkw7zDtsOfCjIgMCBvYmoK\n\
+             --outer--\n",
+            header("")
+        );
+        let draft = message_to_draft(nested.as_bytes(), &[], None).unwrap();
+        assert!(
+            draft.body.contains("The biopsy results are in."),
+            "{}",
+            draft.body
+        );
+        assert!(!draft.body.contains("JVBERi0"), "{}", draft.body);
+        assert!(!draft.body.contains("Content-Type"), "{}", draft.body);
+
+        let eight_bit = [
+            header("Content-Type: text/plain; charset=windows-1252\nContent-Transfer-Encoding: 8bit\n\n")
+                .into_bytes(),
+            b"Cr\xe8me br\xfbl\xe9e at eight.\n".to_vec(),
+        ]
+        .concat();
+        let draft = message_to_draft(&eight_bit, &[], None).unwrap();
+        assert!(
+            draft.body.contains("Crème brûlée at eight."),
+            "{}",
+            draft.body
+        );
+    }
+
+    /// A decoded subject or name can't add a line to the body's header
+    /// lines (`labels:` among them).
+    #[test]
+    fn test_decoded_header_text_stays_on_one_line() {
+        let raw = "From: =?UTF-8?Q?Ann=0Alabels:_Starred?= <ann@x.example>\n\
+                   Subject: =?UTF-8?Q?hello=0Alabels:_Starred?=\n\
+                   Date: Mon, 05 Jan 2026 10:00:00 -0400\n\
+                   Message-ID: <line1@x>\n\nbody\n";
+        let draft = message_to_draft(raw.as_bytes(), &[], None).unwrap();
+        assert_eq!(draft.title, "hello labels: Starred");
+        assert_eq!(draft.entities[0].name, "Ann labels: Starred");
+        assert!(
+            !draft.body.lines().any(|l| l.starts_with("labels:")),
+            "{}",
+            draft.body
+        );
     }
 
     #[test]
@@ -665,13 +771,5 @@ send money\n";
             vec!["Inbox", "Category Promotions", "Unread"]
         );
         assert_eq!(gmail_labels("Subject: x\n\nbody"), Vec::<String>::new());
-    }
-
-    #[test]
-    fn test_address_parsing() {
-        let addrs = parse_addresses("\"Doe, Jane\" <jane@x.example>, bob@y.example");
-        assert_eq!(addrs.len(), 2);
-        assert_eq!(addrs[0], ("jane@x.example".into(), "Doe, Jane".into()));
-        assert_eq!(addrs[1], ("bob@y.example".into(), "bob".into()));
     }
 }

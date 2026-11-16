@@ -24,17 +24,23 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use anyhow::{anyhow, bail, Result};
-use hearthloom_adapters::gmail_imap::{is_auth_failure, is_message_id, FoundMessage, GmailSearch};
+use hearthloom_adapters::gmail_imap::{
+    is_auth_failure, is_message_id, FetchedMessage, FoundMessage, GmailSearch, SEARCH_TEXT_HEAD,
+};
 use serde_json::json;
 
 use crate::mailboxes::{self, Mailbox};
-use crate::virtual_source::{mail_key, ItemKey, VirtualHit};
+use crate::virtual_source::{mail_key, Fetched, ItemKey, Privacy, VirtualHit};
 use crate::AppState;
 
 pub const SOURCE: &str = "gmail";
 pub const ADAPTER: &str = "gmail";
 /// Bytes of one message read for vfetch (attachments come after the text).
 const FETCH_CAP: usize = 2 * 1024 * 1024;
+/// Bytes of one message read for the privacy check when what was read
+/// first was cut — more than any message Gmail accepts (50 MB, encoded).
+/// A message longer still can't be checked, and counts as private.
+const WHOLE_CAP: usize = 96 * 1024 * 1024;
 /// Characters of a message's readable text vfetch returns.
 const TEXT_CAP: usize = 12_000;
 
@@ -146,11 +152,25 @@ fn uid_path(mb: Option<&Mailbox>, uid: u32) -> String {
 }
 
 /// `uid:<n>` (the first mailbox) or `uid:<id>:<n>` → (mailbox id, uid).
-fn parse_uid_path(path: &str) -> Option<(Option<&str>, u32)> {
+pub(crate) fn parse_uid_path(path: &str) -> Option<(Option<&str>, u32)> {
     let rest = path.strip_prefix("uid:")?;
     match rest.split_once(':') {
         Some((id, uid)) => Some((Some(id), uid.parse().ok()?)),
         None => Some((None, rest.parse().ok()?)),
+    }
+}
+
+/// The key a message's memory carries (`mail_key`: its Message-ID as the
+/// import reads it, and as `parsed` spells it), plus its uid path in the
+/// mailbox it was read from — the path a promotion made before promotions
+/// kept the Message-ID was stored under.
+fn key_of(raw: &[u8], parsed: Option<&str>, uid_path: String) -> ItemKey {
+    match mail_key(&String::from_utf8_lossy(raw), parsed) {
+        ItemKey::Refs(mut refs) => {
+            refs.push(uid_path);
+            ItemKey::Refs(refs)
+        }
+        other => other,
     }
 }
 
@@ -161,11 +181,19 @@ fn hit(found: &FoundMessage, mailbox: Option<&Mailbox>, label: bool) -> VirtualH
     raw.extend_from_slice(b"\r\n");
     raw.extend_from_slice(&found.text_head);
     let r = read(&raw);
-    let path = r
-        .message_id
-        .clone()
-        .unwrap_or_else(|| uid_path(mailbox, found.uid));
+    let at = uid_path(mailbox, found.uid);
+    let path = r.message_id.clone().unwrap_or_else(|| at.clone());
     let preview: String = r.text.chars().take(160).collect();
+    // the privacy rules read the whole message: a text the search cut is
+    // read whole, by its uid, before the vault lets the hit through
+    let privacy = if found.text_head.len() < SEARCH_TEXT_HEAD {
+        Privacy::Message {
+            labels: found.labels.join(", "),
+            raw: raw.clone(),
+        }
+    } else {
+        Privacy::ReadAt(at.clone())
+    };
     VirtualHit {
         path,
         snippet: format!(
@@ -184,14 +212,8 @@ fn hit(found: &FoundMessage, mailbox: Option<&Mailbox>, label: bool) -> VirtualH
                 format!(" | text: {preview}…")
             }
         ),
-        text: Some(format!(
-            "{}\n{}\n{}\n{}\n{}",
-            r.from, r.to, r.subject, r.text, r.links
-        )),
-        key: mail_key(
-            &String::from_utf8_lossy(&found.header),
-            r.message_id.as_deref(),
-        ),
+        privacy: Some(privacy),
+        key: key_of(&found.header, r.message_id.as_deref(), at),
     }
 }
 
@@ -270,21 +292,19 @@ fn carries(raw: &[u8], id: &str) -> bool {
 /// names none, and another parser may spell the Message-ID differently
 /// from the import): the vault check needs the message's identity, not
 /// only the path asked for.
-pub fn fetch(path: &str) -> Result<(String, ItemKey)> {
+pub(crate) fn fetch(path: &str) -> Result<Fetched> {
     let not_found = || anyhow!("no message {path:?} in Gmail");
     if parse_uid_path(path).is_none() && !is_message_id(path) {
         return Err(not_found());
     }
     let boxes = mailboxes::all();
-    let raw = match parse_uid_path(path) {
+    let (mb, message) = match parse_uid_path(path) {
         // a uid means something in one mailbox only
         Some((id, uid)) => {
-            let mb = match id {
-                Some(id) => boxes.iter().find(|mb| mb.id == id),
-                None => boxes.iter().find(|mb| mb.first).or(boxes.first()),
-            }
-            .ok_or_else(|| anyhow!("no mailbox here holds {path:?}"))?;
-            with_session(mb, |s| s.fetch(&format!("uid:{uid}"), FETCH_CAP))?
+            let mb =
+                uid_mailbox(&boxes, id).ok_or_else(|| anyhow!("no mailbox here holds {path:?}"))?;
+            let found = with_session(mb, |s| s.fetch(&format!("uid:{uid}"), FETCH_CAP))?;
+            (mb, found)
         }
         // a Message-ID: whichever mailbox has it
         None => {
@@ -292,8 +312,8 @@ pub fn fetch(path: &str) -> Result<(String, ItemKey)> {
             let mut first_err = None;
             for mb in boxes.iter().filter(|mb| !mailboxes::refused(&mb.id)) {
                 match with_session(mb, |s| s.fetch(path, FETCH_CAP)) {
-                    Ok(Some(raw)) if carries(&raw, path) => {
-                        out = Some(raw);
+                    Ok(Some(m)) if carries(&m.raw, path) => {
+                        out = Some((mb, m));
                         break;
                     }
                     Ok(_) => {}
@@ -303,20 +323,63 @@ pub fn fetch(path: &str) -> Result<(String, ItemKey)> {
                 }
             }
             match (out, first_err) {
-                (Some(raw), _) => Some(raw),
+                (Some((mb, m)), _) => (mb, Some(m)),
                 (None, Some(err)) => return Err(err),
-                (None, None) => None,
+                (None, None) => return Err(not_found()),
             }
         }
-    }
-    .ok_or_else(not_found)?;
-    Ok(as_text(&raw))
+    };
+    let message = message.ok_or_else(not_found)?;
+    Ok(as_text(&message, Some(mb), FETCH_CAP))
 }
 
-/// A fetched message as vfetch shows it, with the key its memory carries.
-pub(crate) fn as_text(raw: &[u8]) -> (String, ItemKey) {
+/// The mailbox a uid path names: an added one by its id, else the first.
+fn uid_mailbox<'a>(boxes: &'a [Mailbox], id: Option<&str>) -> Option<&'a Mailbox> {
+    match id {
+        Some(id) => boxes.iter().find(|mb| mb.id == id),
+        None => boxes.iter().find(|mb| mb.first).or(boxes.first()),
+    }
+}
+
+/// What the privacy rules read for the message at this uid path, read
+/// whole: None when it can't be read, or is longer than `WHOLE_CAP` — a
+/// message that can't be read whole counts as private.
+pub(crate) fn read_whole(at: &str) -> Option<String> {
+    let (id, uid) = parse_uid_path(at)?;
+    let boxes = mailboxes::all();
+    let mb = uid_mailbox(&boxes, id)?;
+    let message = match with_session(mb, |s| s.fetch(&format!("uid:{uid}"), WHOLE_CAP)) {
+        Ok(Some(message)) => message,
+        Ok(None) => return None,
+        Err(err) => {
+            tracing::warn!("gmail: reading {at} whole for the privacy check: {err:#}");
+            return None;
+        }
+    };
+    match as_text(&message, Some(mb), WHOLE_CAP).privacy {
+        Privacy::Message { raw, labels } => {
+            Some(format!("{}{labels}", crate::mbox_text::privacy_text(&raw)))
+        }
+        _ => None,
+    }
+}
+
+/// A fetched message as vfetch shows it, with the key its memory carries
+/// and what the privacy rules read: the whole message, or — when the read
+/// stopped at `cap` — where to read it whole from.
+pub(crate) fn as_text(message: &FetchedMessage, mailbox: Option<&Mailbox>, cap: usize) -> Fetched {
+    let raw = &message.raw;
     let r = read(raw);
-    let key = mail_key(&String::from_utf8_lossy(raw), r.message_id.as_deref());
+    let at = uid_path(mailbox, message.uid);
+    let key = key_of(raw, r.message_id.as_deref(), at.clone());
+    let privacy = if raw.len() < cap {
+        Privacy::Message {
+            raw: raw.clone(),
+            labels: message.labels.join(", "),
+        }
+    } else {
+        Privacy::ReadAt(at)
+    };
     let text: String = r.text.chars().take(TEXT_CAP).collect();
     let shown = format!(
         "From: {}\nTo: {}\nDate: {}\nSubject: {}\n\n{}{}",
@@ -331,7 +394,11 @@ pub(crate) fn as_text(raw: &[u8]) -> (String, ItemKey) {
             format!("\n\nLinks: {}", r.links)
         }
     );
-    (shown, key)
+    Fetched {
+        shown,
+        key,
+        privacy,
+    }
 }
 
 /// Keep the `gmail` source registered while Gmail is connected here, naming
@@ -441,9 +508,29 @@ Message-ID: <Stmt-7@bank.example>\r\n\r\nYour balance.\r\n";
             b"From: a@x\r\n\r\nno id\r\n",
             "p1@neutral.example"
         ));
-        let (text, key) = as_text(raw);
-        assert!(text.contains("Subject: statement"));
-        assert_eq!(key, ItemKey::Refs(vec!["Stmt-7@bank.example".into()]));
+        let message = FetchedMessage {
+            uid: 7,
+            labels: vec!["Inbox".into()],
+            raw: raw.to_vec(),
+        };
+        let fetched = as_text(&message, None, FETCH_CAP);
+        assert!(fetched.shown.contains("Subject: statement"));
+        assert_eq!(
+            fetched.key,
+            ItemKey::Refs(vec!["Stmt-7@bank.example".into(), "uid:7".into()])
+        );
+        assert_eq!(
+            fetched.privacy,
+            Privacy::Message {
+                raw: raw.to_vec(),
+                labels: "Inbox".into()
+            }
+        );
+        // a read that stopped at the cap is read whole before it's judged
+        assert_eq!(
+            as_text(&message, None, raw.len()).privacy,
+            Privacy::ReadAt("uid:7".into())
+        );
         // a path that isn't a uid or one Message-ID is never looked up
         let err = fetch("p1@neutral.example OR from:bank.example")
             .unwrap_err()
@@ -474,6 +561,25 @@ Content-Type: text/plain; charset=utf-8\r\n"
         assert!(h
             .snippet
             .contains("text: Log in at https://portal.neutral.example/clients"));
-        assert!(h.text.unwrap().contains("portal.neutral.example/clients"));
+        assert!(matches!(
+            &h.privacy,
+            Some(Privacy::Message { raw, labels })
+                if labels == "Inbox, Important"
+                    && String::from_utf8_lossy(raw).contains("portal.neutral.example/clients")
+        ));
+        assert_eq!(
+            h.key,
+            ItemKey::Refs(vec!["p1@neutral.example".into(), "uid:42".into()])
+        );
+
+        // a text the search read only the start of: read whole by its uid
+        let long = FoundMessage {
+            text_head: vec![b'x'; SEARCH_TEXT_HEAD],
+            ..found
+        };
+        assert_eq!(
+            hit(&long, None, false).privacy,
+            Some(Privacy::ReadAt("uid:42".into()))
+        );
     }
 }

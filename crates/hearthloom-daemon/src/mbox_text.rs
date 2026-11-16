@@ -10,7 +10,7 @@
 //!
 //! It fills in the background, in small resumable batches, behind a
 //! `text_rowid` watermark over `messages.rowid` (a full rebuild starts a
-//! new file with no watermark; `carry_meta` leaves it behind). Search works
+//! new file with no watermark; `carry_over` leaves it behind). Search works
 //! on headers throughout and gains the text as it lands; new mail from the
 //! live watch is picked up the same way. Progress is kept in memory for
 //! Ask's instructions, so reading it touches no disk.
@@ -163,6 +163,80 @@ pub fn message_text(raw: &[u8]) -> (String, String) {
         scan(&html);
     }
     (text, links.join(" "))
+}
+
+/// What the privacy rules read for one raw message read in place: its
+/// Message-ID and subject, the names and addresses of every address header
+/// (From, Sender, Reply-To, To, Cc, Bcc), its `X-Gmail-Labels`, and the
+/// decoded text of every text and HTML part — none of it cut. This covers
+/// everything the mail import checks (subject, sender, recipients, labels
+/// and the start of the first text part), so a message a rule makes
+/// private at import is private when read in place too. Unlike
+/// `message_text` (what search shows), nothing here is capped: the caller
+/// bounds how much of the message it read. Each part is read as decoded
+/// and, where its spacing differs, with every run of whitespace read as
+/// one space — the way `message_text` shows it — so a rule's words match
+/// across a line break or a run of spaces.
+pub fn privacy_text(raw: &[u8]) -> String {
+    let lossy = String::from_utf8_lossy(raw);
+    let mut out = String::new();
+    let mut add = |s: &str| {
+        if !s.is_empty() {
+            out.push_str(&s.replace("\r\n", "\n"));
+            out.push('\n');
+            let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+            if flat != s {
+                out.push_str(&flat);
+                out.push('\n');
+            }
+        }
+    };
+    add(&hearthloom_adapters::mbox::gmail_labels(&lossy).join(", "));
+    if let Some(id) = hearthloom_adapters::mbox::message_id_ref(&lossy) {
+        add(&id);
+    }
+    let Some(message) = mail_parser::MessageParser::default().parse(raw) else {
+        // nothing readable as a message: the bytes as they are
+        add(&lossy);
+        return out;
+    };
+    if let Some(id) = message.message_id() {
+        add(id);
+    }
+    if let Some(subject) = message.subject() {
+        add(&hearthloom_core::one_line(subject));
+    }
+    for list in [
+        message.from(),
+        message.sender(),
+        message.reply_to(),
+        message.to(),
+        message.cc(),
+        message.bcc(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for mailbox in list.mailboxes() {
+            if let Some(name) = mailbox.name() {
+                add(&hearthloom_core::one_line(name));
+            }
+            if let Some(address) = mailbox.address() {
+                add(address);
+            }
+        }
+    }
+    let mut i = 0;
+    while let Some(text) = message.body_text(i) {
+        add(&text);
+        i += 1;
+    }
+    let mut i = 0;
+    while let Some(html) = message.body_html(i) {
+        add(&html);
+        i += 1;
+    }
+    out
 }
 
 /// `https://portal.example.com/client/login?x=1` → `portal.example.com/client/login`.

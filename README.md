@@ -33,7 +33,7 @@ software.* (See `architecture.md` for how it is built.)
 |---|---|---|
 | Git repos | `hearthloom ingest git <path>` | each commit (author/repo/files as entities+edges) |
 | Calendars (.ics) | `hearthloom ingest ics <file>` | each event; attendee emails drive person identity |
-| Email (mbox/Takeout) | `hearthloom ingest mbox <file> [--include-labels "Sent,Category Personal,Starred"]` | each kept message (streaming — any size; Gmail-label strata filter, Spam/Trash always dropped; filtered runs execute daemon-side in the background with progress in daemon.log) |
+| Email (mbox/Takeout) | `hearthloom ingest mbox <file> [--include-labels "Sent,Category Personal,Starred"]` | each kept message, stored as decoded readable text (streaming — any size; Gmail-label strata filter, Spam/Trash always dropped; runs daemon-side in the background with progress in daemon.log) |
 | Claude.ai / ChatGPT exports | `hearthloom ingest chatlog <conversations.json>` | each conversation (account owner auto-detected from users.json) |
 | Claude Code sessions | `hearthloom ingest claude-code` | each local session transcript |
 | iMessage | `hearthloom ingest imessage` | one per chat per day (needs Full Disk Access) |

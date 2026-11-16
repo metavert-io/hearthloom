@@ -97,7 +97,7 @@ pub use observations::{ObservationIn, StoredObservation};
 pub use opportunities::OpportunityRow;
 pub use photo::{keys_hash as photo_keys_hash, PhotoPointIn, StoredPhotoPoint};
 pub use plugins::PluginRow;
-pub use privacy::PrivacyRule;
+pub use privacy::{PrivacyRule, PrivateMemory};
 pub use provenance::{others_words, trust_for, Hop, Origin, OTHERS_WORDS_SOURCES};
 pub use quarantine::{outside_proposal, QuarantineEntry, PROPOSAL_KINDS};
 pub use recall::DayView;
