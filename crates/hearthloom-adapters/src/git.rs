@@ -23,6 +23,31 @@ const PRETTY: &str = "--pretty=format:%x1e%H%x1f%an%x1f%ae%x1f%aI%x1f%s%x1f%b%x1
 /// Walk a repository's history into episode drafts. `scope: None` lets the
 /// store infer each episode's scope (known project > identity > personal).
 pub fn ingest(repo_path: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
+    let read = ingest_new(repo_path, scope, None)?;
+    if read.drafts.is_empty() {
+        return Err(anyhow!("no commits found in {}", repo_path.display()));
+    }
+    Ok(read.drafts)
+}
+
+/// What [`ingest_new`] read.
+pub struct GitRead {
+    /// The commits not covered by the mark it was given.
+    pub drafts: Vec<EpisodeDraft>,
+    /// Where this read stopped (the commit it read up to, how much history
+    /// the clone held, and the repo identity the refs were made with):
+    /// give it to the next call.
+    pub mark: String,
+}
+
+/// The commits of HEAD's history that `mark` (from an earlier call) didn't
+/// cover. An unchanged HEAD reads nothing; a moved one reads `old..new`
+/// (commits reachable now and not then — rebased and newly merged ones
+/// included). With no mark, a mark this repo can't resolve (the old commit
+/// is gone), a changed identity (its refs would differ), or a shallow
+/// clone whose cut-off has moved since (history fetched deeper, or whole),
+/// it reads the whole history.
+pub fn ingest_new(repo_path: &Path, scope: Option<&str>, mark: Option<&str>) -> Result<GitRead> {
     let repo_path = repo_path
         .canonicalize()
         .with_context(|| format!("no such path: {}", repo_path.display()))?;
@@ -40,8 +65,50 @@ pub fn ingest(repo_path: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>
         _ => ("repo-path", repo_path.display().to_string()),
     };
 
-    let log = git(&repo_path, &["log", "--no-color", "--name-only", PRETTY])
-        .with_context(|| format!("git log failed in {}", repo_path.display()))?;
+    let head = git(&repo_path, &["rev-parse", "--verify", "HEAD^{commit}"])
+        .with_context(|| format!("no commits found in {}", repo_path.display()))?
+        .trim()
+        .to_string();
+    if !is_sha(&head) {
+        return Err(anyhow!("unexpected HEAD in {}", repo_path.display()));
+    }
+    let history = history_held(&repo_path);
+    let new_mark = format!("{head} {history} {repo_identity}");
+    if mark == Some(new_mark.as_str()) {
+        return Ok(GitRead {
+            drafts: Vec::new(),
+            mark: new_mark,
+        });
+    }
+    let since = mark
+        .and_then(|m| m.split_once(' '))
+        .filter(|(old, rest)| {
+            is_sha(old)
+                && match rest.split_once(' ') {
+                    Some((held, identity)) if *held == history && identity == repo_identity => true,
+                    // a mark from before marks said how much history the
+                    // clone held: good for a clone that holds all of it
+                    _ => *rest == repo_identity && history == "full",
+                }
+        })
+        .map(|(old, _)| old)
+        .filter(|old| {
+            git(
+                &repo_path,
+                &["cat-file", "-e", &format!("{old}^{{commit}}")],
+            )
+            .is_ok()
+        });
+    let range = match since {
+        Some(old) => format!("{old}..{head}"),
+        None => head.clone(),
+    };
+
+    let log = git(
+        &repo_path,
+        &["log", "--no-color", "--name-only", PRETTY, &range, "--"],
+    )
+    .with_context(|| format!("git log failed in {}", repo_path.display()))?;
 
     let mut drafts = Vec::new();
     for record in log.split('\x1e').skip(1) {
@@ -50,10 +117,33 @@ pub fn ingest(repo_path: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>
             Err(err) => tracing::warn!("skipping unparseable commit: {err}"),
         }
     }
-    if drafts.is_empty() {
-        return Err(anyhow!("no commits found in {}", repo_path.display()));
+    Ok(GitRead {
+        drafts,
+        mark: new_mark,
+    })
+}
+
+/// How much history the clone holds: `full`, or for a shallow clone
+/// `shallow:<digest of its cut-off commits>` — which changes whenever more
+/// history is fetched.
+fn history_held(repo_path: &Path) -> String {
+    let shallow = git(repo_path, &["rev-parse", "--git-path", "shallow"])
+        .ok()
+        .map(|p| repo_path.join(p.trim()))
+        .and_then(|p| std::fs::read(p).ok())
+        .filter(|cut| !cut.iter().all(u8::is_ascii_whitespace));
+    match shallow {
+        Some(cut) => format!(
+            "shallow:{}",
+            &hearthloom_core::ids::content_hash(&cut)[..16]
+        ),
+        None => "full".into(),
     }
-    Ok(drafts)
+}
+
+/// A full commit id (SHA-1 or SHA-256), lowercase hex.
+fn is_sha(s: &str) -> bool {
+    matches!(s.len(), 40 | 64) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// A remote URL without the credentials a URL can carry. A `scheme://` URL
@@ -304,6 +394,142 @@ mod tests {
                 "https://git.example.com/team/repo.git".to_string()
             )
         );
+    }
+
+    /// A read given the previous read's mark reads only the commits since;
+    /// an unchanged HEAD reads nothing, and a mark that can't be resolved
+    /// here (or was made under another identity) reads everything.
+    #[test]
+    fn test_a_read_covers_only_commits_past_its_mark() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        let run = |args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Test Author")
+                .env("GIT_AUTHOR_EMAIL", "author@example.com")
+                .env("GIT_COMMITTER_NAME", "Test Author")
+                .env("GIT_COMMITTER_EMAIL", "author@example.com")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {:?}: {:?}", args, output);
+        };
+        let commit = |file: &str, message: &str| {
+            fs::write(repo.join(file), message).unwrap();
+            run(&["add", "."]);
+            run(&["commit", "-q", "-m", message]);
+        };
+        let titles = |read: &GitRead| -> Vec<String> {
+            let mut t: Vec<String> = read.drafts.iter().map(|d| d.title.clone()).collect();
+            t.sort();
+            t
+        };
+        run(&["init", "-q"]);
+        commit("a.txt", "one");
+        commit("b.txt", "two");
+
+        let first = ingest_new(repo, None, None).unwrap();
+        assert_eq!(titles(&first), ["one", "two"]);
+        let same = ingest_new(repo, None, Some(&first.mark)).unwrap();
+        assert!(same.drafts.is_empty());
+        assert_eq!(same.mark, first.mark);
+
+        commit("c.txt", "three");
+        let next = ingest_new(repo, None, Some(&first.mark)).unwrap();
+        assert_eq!(titles(&next), ["three"]);
+        assert_ne!(next.mark, first.mark);
+
+        // a rewritten tip: the new commit is read, the kept ones aren't
+        run(&["commit", "-q", "--amend", "-m", "three, reworded"]);
+        let amended = ingest_new(repo, None, Some(&next.mark)).unwrap();
+        assert_eq!(titles(&amended), ["three, reworded"]);
+
+        // an old commit that isn't here, or another identity: everything
+        let gone = format!(
+            "{} {}",
+            "0".repeat(40),
+            first.mark.split_once(' ').unwrap().1
+        );
+        assert_eq!(ingest_new(repo, None, Some(&gone)).unwrap().drafts.len(), 3);
+        let elsewhere = format!(
+            "{} /some/other/path",
+            amended.mark.split_once(' ').unwrap().0
+        );
+        assert_eq!(
+            ingest_new(repo, None, Some(&elsewhere))
+                .unwrap()
+                .drafts
+                .len(),
+            3
+        );
+        assert_eq!(
+            ingest_new(repo, None, Some("junk")).unwrap().drafts.len(),
+            3
+        );
+        // a mark from before marks named the history held: still good
+        // for a clone that holds all of it
+        let (head, rest) = amended.mark.split_once(' ').unwrap();
+        let identity = rest.strip_prefix("full ").unwrap();
+        let older = format!("{head} {identity}");
+        let read = ingest_new(repo, None, Some(&older)).unwrap();
+        assert!(read.drafts.is_empty());
+        assert_eq!(read.mark, amended.mark);
+    }
+
+    /// Fetching more of a shallow clone's history, with HEAD where it was,
+    /// reads the commits that arrived.
+    #[test]
+    fn test_a_shallow_clone_fetched_deeper_reads_the_new_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let clone = tmp.path().join("clone");
+        let git_in = |dir: &Path, args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Test Author")
+                .env("GIT_AUTHOR_EMAIL", "author@example.com")
+                .env("GIT_COMMITTER_NAME", "Test Author")
+                .env("GIT_COMMITTER_EMAIL", "author@example.com")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {:?}: {:?}", args, output);
+        };
+        fs::create_dir_all(&source).unwrap();
+        git_in(&source, &["init", "-q"]);
+        for message in ["one", "two", "three"] {
+            fs::write(source.join(format!("{message}.txt")), message).unwrap();
+            git_in(&source, &["add", "."]);
+            git_in(&source, &["commit", "-q", "-m", message]);
+        }
+        let url = format!("file://{}", source.display());
+        git_in(
+            tmp.path(),
+            &["clone", "-q", "--depth", "1", &url, clone.to_str().unwrap()],
+        );
+
+        let shallow = ingest_new(&clone, None, None).unwrap();
+        assert_eq!(shallow.drafts.len(), 1);
+        assert!(ingest_new(&clone, None, Some(&shallow.mark))
+            .unwrap()
+            .drafts
+            .is_empty());
+
+        git_in(&clone, &["fetch", "-q", "--deepen=1"]);
+        let deeper = ingest_new(&clone, None, Some(&shallow.mark)).unwrap();
+        assert_eq!(deeper.drafts.len(), 2, "HEAD and the commit fetched");
+        assert_ne!(deeper.mark, shallow.mark);
+
+        git_in(&clone, &["fetch", "-q", "--unshallow"]);
+        let whole = ingest_new(&clone, None, Some(&deeper.mark)).unwrap();
+        assert_eq!(whole.drafts.len(), 3);
+        assert!(ingest_new(&clone, None, Some(&whole.mark))
+            .unwrap()
+            .drafts
+            .is_empty());
     }
 
     #[test]

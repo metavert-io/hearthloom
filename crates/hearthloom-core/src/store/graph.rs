@@ -1434,16 +1434,26 @@ impl Store {
         )?;
         let mut relabeled = 0;
         if cascade && entity.entity_type == "Project" {
-            relabeled = conn.execute(
-                &format!(
-                    "UPDATE episodes SET scope = ?1, scope_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id IN (
-                         SELECT episode_id FROM episode_entities
-                         WHERE role = 'repo' AND entity_id IN ({marks})){keep_vaulted}"
-                ),
-                rusqlite::params_from_iter(
-                    std::iter::once(scope.to_string()).chain(group.iter().cloned()),
-                ),
-            )?;
+            let mut stmt = conn.prepare(&format!(
+                "UPDATE episodes SET scope = ?1, scope_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id IN (
+                     SELECT episode_id FROM episode_entities
+                     WHERE role = 'repo' AND entity_id IN ({marks})){keep_vaulted}
+                 RETURNING id"
+            ))?;
+            let changed: Vec<String> = stmt
+                .query_map(
+                    rusqlite::params_from_iter(
+                        std::iter::once(scope.to_string()).chain(group.iter().cloned()),
+                    ),
+                    |r| r.get(0),
+                )?
+                .collect::<std::result::Result<_, _>>()?;
+            drop(stmt);
+            relabeled = changed.len();
+            // a session made private is private in every copy of it
+            if scope == "private" {
+                relabeled += super::growing::spread_private(&conn, actor, &changed)?;
+            }
             conn.execute(
                 &format!(
                     "UPDATE edges SET scope = ?1
@@ -1608,6 +1618,10 @@ impl Store {
                 &format!("scope_set_by_episode:{scope}:{}", crate::time::now_utc()),
                 &json!({"episodes": episode_ids, "scope": scope, "episodes_relabeled": relabeled}),
             )?;
+        }
+        // a day or session made private is private in every copy of it
+        if scope == "private" {
+            relabeled += super::growing::spread_private(&conn, actor, episode_ids)?;
         }
         Ok(relabeled)
     }

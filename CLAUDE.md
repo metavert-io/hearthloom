@@ -92,7 +92,24 @@ workspace with `npm i playwright`) — screenshot + pageerror check.
 ## Layout
 
 - `crates/hearthloom-core` — schema (migrations via `PRAGMA user_version`,
-  **currently v66**: v66 several mailboxes (`mail_drafts.account`,
+  **currently v67**: v67 `photo_replaced` (every key a photo point took
+  the place of: a Mac scan records the key an earlier scan gave each photo
+  — the library's file name — whether or not it is stored here, and moves
+  a point stored under it to its original-name key, the phone's identity;
+  each point's export carries all its replaced keys as `replaces`, so every
+  peer drops the old points, and a replaced key is never stored again, as
+  a point or a `photos` location observation. A point that moves or
+  arrives takes a position past every removed point's
+  (`photo_point.removed_position` in consolidation_state) — the photos leg
+  pages by rowid, and a reused rowid sits behind a peer's cursor. A
+  duplicate dropped from a day this node minted lowers that day's ledger
+  count only when the day was minted with it (the point stored no later
+  than the day's `minted_at`), and the point that takes a minted point's
+  place in that day is dated to the mint, so the photo's next merge still
+  finds it counted; a union that equals the minted set puts the
+  ledger count back to the union's in the finalize pass. An observation
+  under a replaced key moves with the photo even when its point never
+  arrived — store/photo.rs), v66 several mailboxes (`mail_drafts.account`,
   `mail_matches.account`: the mailbox a draft answers from and a match
   came in — see SEVERAL MAILBOXES), v65 reply drafts (`mail_drafts`
   mirrored + journaled — see DRAFTS NEVER SEND), v64 embers' mail watches (`mail_watches`,
@@ -1427,7 +1444,54 @@ the design log 2026-07-14.
   exactly (`base_or_revision_sql`), never with LIKE — the ember chooses
   the ref. ArrivalRules applies the same check. Never widen this to other
   writers: the owner, importers and other embers write under names an
-  ember can also use.
+  ember can also use. **And the growing sources** (`GROWING_SOURCES`:
+  chrome, imessage, claude-code — owner-only; core `store/growing.rs`):
+  every read of a day/session lands as `<base>#r<n>` — the first read
+  too, so two nodes' first reads holding different counts are different
+  episodes (one shared ref let each keep its own text forever); an
+  unversioned `<base>` is an earlier version's — `n` = items
+  held (`growing_items`: the TRUE count the adapter writes ahead of any
+  third-party text — `<n> visits` / `messages: <n>` / `turns: <n>` — so a
+  capped text still counts; a text from before is counted by its lines),
+  decided ONLY by daemon `local_import::prepare` on the paths that read
+  this machine's files (refresh, `/v1/ingest/local`, inbox, non-peer
+  `/v1/ingest`; always on a blocking thread) — never on a peer's batch. A
+  stored one lands again only when it holds more than the fullest copy.
+  On arrival (`Arriving`) the copy holding the most stays live: a
+  revision ranks by its `n`, the unversioned base by its text's count
+  (it can differ per node), a tie goes to the revision; it lands behind a
+  standing (live or retired) copy that outranks it, else puts every one
+  it outranks behind itself — a retired one via `retire::undo_behind`, so
+  an undo leaves one copy in view. A RECORD is all copies of a base plus
+  the copies `settle` put behind one another (a Chrome profile day and
+  the named day it replaced) — `growing::other_copies`, which also reads
+  a retired copy's saved mark. A new copy takes the record's label (the
+  latest stamped label on any copy, else the fullest copy's) and its
+  retirement (any retired copy). A PRIVATE LABEL HOLDS FOR THE RECORD:
+  a copy landing private is stamped (the record's stamp, else now), and
+  every path that labels an episode private — arrival, `set_episode_scopes`,
+  the scope leg (`apply_scope_changes`), privacy rules, a Project cascade,
+  `label_private_on_reimport` — calls `growing::spread_private`, which
+  gives the other copies the same stamp unless labelled since (LWW, a tie
+  to private) — copies already private under an older stamp take the
+  newer one (only a stored stamp spreads that way: a `now` fallback would
+  restamp them on every call). The scope leg takes a newer stamp even
+  when the label is the same; both statements keep `scope` in their SET
+  list, which the relay-stamp trigger follows. A label taken OUT of the
+  vault stays on the copy it was given to. Retiring one copy retires the
+  record (`covered_episodes`, also when the target arrived retired
+  first), and a copy arriving retired retires the record's other copies
+  (gathered BEFORE it is marked — the mark replaces its link) and, at the
+  end of the batch, what any episode retired on arrival or its copies
+  seeded (`ArrivalRules::retire_derived` — a cascade that came first).
+  A Chrome day keyed by profile
+  puts a day stored under the profile's shown name (`chrome_named_ref`)
+  behind it only when it holds it (`chrome_day_holds`: at least its visit
+  COUNT and every visit line it shows — lines collapse repeated titles and
+  stop at `[truncated]`), in either arrival order — a same-named profile's
+  day stays. Their adapters keep every base
+  ending in a part they write (`#<date>`, a session id with `#` escaped)
+  so no outside string reads as a revision.
 - **Source and kind names in prompts and BRAIN.md go through
   `printable_name`** (`[a-z0-9_.-]{1,40}`): whoever ingests chooses them,
   and Ask's inventory sits in the system prompt. `source_lines` counts an

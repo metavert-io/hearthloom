@@ -24,16 +24,21 @@ use crate::time::now_utc;
 /// pass (`trip:<day>:<idx>#r<fingerprint>`), never chosen by a sender.
 pub const REVISIONED_SOURCES: &[&str] = &["photos", "visits", "contacts", "trips"];
 
-/// The record's own sources: the revisioned ones (a `#r<n>` ref hides the
-/// real record), the consolidation passes (the digest, chapters), the
-/// owner's own writing (Desk, notes and the old Codi harvest — derivation
-/// `declared`), accepted proposals, and Facebook (its posts feed the
-/// location index). Only the owner's keys and peers may ingest under
-/// these names (http.rs `ingest`).
+pub use super::growing::GROWING_SOURCES;
+
+/// The record's own sources: the revisioned and growing ones (a `#r<n>`
+/// ref hides the real record), the consolidation passes (the digest,
+/// chapters), the owner's own writing (Desk, notes and the old Codi
+/// harvest — derivation `declared`), accepted proposals, and Facebook
+/// (its posts feed the location index). Only the owner's keys and peers
+/// may ingest under these names (http.rs `ingest`).
 pub const OWNER_ONLY_SOURCES: &[&str] = &[
     "photos",
     "visits",
     "contacts",
+    "chrome",
+    "imessage",
+    "claude-code",
     "consolidation",
     "desk",
     "notes",
@@ -107,16 +112,37 @@ impl Store {
         let conn = self.lock();
         let tx = conn.unchecked_transaction()?;
         let mut relabeled = Vec::new();
+        let mut private_ids = Vec::new();
         for (source, source_ref) in &refs {
-            let changed = tx.execute(
-                "UPDATE episodes SET scope = 'private', scope_changed_at = ?3
-                 WHERE source = ?1 AND source_ref = ?2 AND scope != 'private'",
-                rusqlite::params![source, source_ref, now],
-            )?;
-            if changed > 0 {
+            // a day or session of a growing source: whichever copies of it
+            // are stored (the draft's own ref, read before it was revised),
+            // and through them the rest of the record
+            let growing = super::growing::growing_copy(source, source_ref);
+            let (base, copies) = match growing {
+                Some((base, _)) => (base, super::growing::growing_revision_sql(2)),
+                None => (source_ref.as_str(), "0".to_string()),
+            };
+            let mut stmt = tx.prepare(&format!(
+                "UPDATE episodes SET scope = 'private', scope_changed_at = ?3 /* all-episodes: a private label holds on every copy */
+                 WHERE source = ?1 AND (source_ref = ?2 OR source_ref = ?4 OR {copies})
+                   AND scope != 'private'
+                 RETURNING id"
+            ))?;
+            let changed: Vec<String> = stmt
+                .query_map(rusqlite::params![source, base, now, source_ref], |r| {
+                    r.get(0)
+                })?
+                .collect::<std::result::Result<_, _>>()?;
+            if !changed.is_empty() {
                 relabeled.push(format!("{source}:{source_ref}"));
             }
+            if growing.is_some() {
+                private_ids.extend(changed);
+                // already private: its record still follows
+                private_ids.push(ids::episode_id(source, source_ref));
+            }
         }
+        super::growing::spread_private(&tx, actor, &private_ids)?;
         if !relabeled.is_empty() {
             record_mutation(
                 &tx,
@@ -155,6 +181,10 @@ impl Store {
         // D.12: what live retirements say about new arrivals (a retired
         // source keeps its late episodes retired; see store/retire.rs).
         let arrivals = super::retire::ArrivalRules::load(&tx)?;
+        // Per retirement: the episodes it took as they arrived here, with
+        // the copies of their records — what they seeded goes too.
+        let mut retired_here: std::collections::HashMap<String, std::collections::HashSet<String>> =
+            std::collections::HashMap::new();
 
         for draft in &batch.episodes {
             let episode_id = ids::episode_id(&draft.source, &draft.source_ref);
@@ -174,10 +204,26 @@ impl Store {
                 continue;
             }
 
-            // Scope resolution: explicit > known Project entity's scope >
-            // author/organizer identity scope > `personal`. This is how one
-            // human keeps personal projects and client/company work apart.
-            let mut scope = draft.scope.clone();
+            // A copy of a growing source's day or session: measured against
+            // the copies already here (see store/growing.rs).
+            let growing = super::growing::Arriving::read(
+                &tx,
+                home,
+                &draft.source,
+                &draft.source_ref,
+                &draft.body,
+            )?;
+
+            // Scope resolution: explicit > the label of the record this is
+            // a copy of > known Project entity's scope > author/organizer
+            // identity scope > `personal`. This is how one human keeps
+            // personal projects and client/company work apart.
+            let mut scope = draft.scope.clone().or_else(|| {
+                growing
+                    .as_ref()
+                    .and_then(|g| g.inherited_scope())
+                    .map(String::from)
+            });
             if scope.is_none() {
                 for entity_ref in &draft.entities {
                     if entity_ref.entity_type != "Project" {
@@ -215,6 +261,23 @@ impl Store {
             // adapter's explicit scope — a matching episode arrives private.
             if scope != "private" && super::privacy::draft_matches(&privacy_rules, draft) {
                 scope = "private".to_string();
+            }
+            // A copy of a private record is private, whatever its sender
+            // labelled it. A copy that lands private — for that reason, or
+            // its draft's, a rule's, the label it inherited — is stamped
+            // (when the record's label was given, else now), so the label
+            // travels on the scope leg to a node that minted this copy, or
+            // holds another copy of the record, under another label.
+            let mut private_since: Option<String> = None;
+            if let Some(g) = &growing {
+                let record = g.private();
+                if record.is_some() {
+                    scope = "private".to_string();
+                }
+                if scope == "private" {
+                    private_since =
+                        Some(record.flatten().map(String::from).unwrap_or_else(now_utc));
+                }
             }
 
             // Raw content file, dated by local event date (fallback: today,
@@ -288,9 +351,10 @@ impl Store {
             // lower revisions only where their recorded writer is the same.
             // Derived from the ref and the recorded origin, so every node
             // converges when the revision arrives by sync.
-            if let Some(base) = (!REVISIONED_SOURCES.contains(&draft.source.as_str()))
-                .then(|| super::provenance::plugin_revision(&draft.source_ref, writer.as_deref()))
-                .flatten()
+            if let Some(base) = (!REVISIONED_SOURCES.contains(&draft.source.as_str())
+                && !GROWING_SOURCES.contains(&draft.source.as_str()))
+            .then(|| super::provenance::plugin_revision(&draft.source_ref, writer.as_deref()))
+            .flatten()
             {
                 tx.execute(
                     &format!(
@@ -326,13 +390,37 @@ impl Store {
                     [&episode_id],
                 )?;
             }
-            let arrival = arrivals.covering(
+            if let Some(since) = &private_since {
+                tx.execute(
+                    "UPDATE episodes SET scope_changed_at = ?1 WHERE id = ?2",
+                    rusqlite::params![since, episode_id],
+                )?;
+            }
+            // A growing source keeps the copy holding the most live, and a
+            // copy that lands private makes the copies stored before private.
+            if let Some(g) = &growing {
+                g.settle(&tx, &episode_id)?;
+                if scope == "private" {
+                    super::growing::spread_private(&tx, &actor, std::slice::from_ref(&episode_id))?;
+                }
+            }
+            let mut arrival = arrivals.covering(
                 &tx,
                 &episode_id,
                 &draft.source,
                 &draft.source_ref,
                 writer.as_deref(),
             )?;
+            // ...and a copy of a retired day or session lands retired: the
+            // person retired the record, not one copy of it.
+            if matches!(arrival, super::retire::Arrival::Live) {
+                if let Some(rid) = growing
+                    .as_ref()
+                    .and_then(|g| g.retired_marks().find_map(|m| arrivals.live_retirement(m)))
+                {
+                    arrival = super::retire::Arrival::Retire(rid);
+                }
+            }
             record_mutation(
                 &tx,
                 &actor,
@@ -411,7 +499,24 @@ impl Store {
             }
             match arrival {
                 super::retire::Arrival::Live => {}
-                super::retire::Arrival::Retire(rid) => arrivals.retire(&tx, &rid, &episode_id)?,
+                super::retire::Arrival::Retire(rid) => {
+                    // the record is retired, not one copy of it: the
+                    // copies here that aren't retired yet go with it
+                    // (gathered first — retiring a copy replaces the mark
+                    // that says which copy it stands behind)
+                    let copies = match &growing {
+                        Some(_) => super::growing::other_copies(&tx, &episode_id)?,
+                        None => Vec::new(),
+                    };
+                    arrivals.retire(&tx, &rid, &episode_id)?;
+                    for copy in &copies {
+                        arrivals.retire(&tx, &rid, copy)?;
+                    }
+                    retired_here
+                        .entry(rid)
+                        .or_default()
+                        .extend(std::iter::once(episode_id.clone()).chain(copies));
+                }
                 super::retire::Arrival::Behind(original) => {
                     tx.execute(
                         "UPDATE episodes SET superseded_by = ?1 WHERE id = ?2",
@@ -419,6 +524,12 @@ impl Store {
                     )?;
                 }
             }
+        }
+        // What those episodes seeded here before they arrived — a cascade of
+        // a copy held already, one that came ahead of its seed — is retired
+        // with them (a cascade arriving after its seed already lands retired).
+        for (rid, seeds) in &retired_here {
+            arrivals.retire_derived(&tx, rid, seeds)?;
         }
 
         tx.commit()?;
@@ -428,6 +539,7 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
+    use super::super::growing::growing_copy;
     use super::*;
     use crate::ingest::{EdgeAssertion, EntityRef, EpisodeDraft};
     use crate::time::{EventTime, TimeUncertainty};
@@ -502,6 +614,387 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap()
+    }
+
+    /// A growing source keeps exactly one copy of a base live — the one
+    /// holding the most — whatever order the copies arrive in, and a
+    /// revision touches only its own base.
+    #[test]
+    fn test_a_growing_source_keeps_its_largest_copy_in_any_order() {
+        let day = |source_ref: &str| EpisodeDraft {
+            source: "imessage".into(),
+            kind: "messages".into(),
+            title: format!("day {source_ref}"),
+            body: format!("messages of {source_ref}"),
+            trust: "self".into(),
+            entities: vec![],
+            edges: vec![],
+            ..draft(source_ref)
+        };
+        let live = |store: &Store| -> Vec<String> {
+            let conn = store.lock();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT source_ref FROM episodes WHERE superseded_by IS NULL ORDER BY source_ref",
+                )
+                .unwrap();
+            let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+            rows.collect::<std::result::Result<_, _>>().unwrap()
+        };
+        let base = "+15551234567#2026-03-15";
+        let copies = [
+            base.to_string(),
+            format!("{base}#r3"),
+            format!("{base}#r12"),
+        ];
+        let orders: [[usize; 3]; 4] = [[0, 1, 2], [2, 1, 0], [1, 2, 0], [0, 2, 1]];
+        for order in orders {
+            let tmp = tempfile::tempdir().unwrap();
+            let home = Home::at(tmp.path());
+            home.init().unwrap();
+            let store = Store::open_in_memory().unwrap();
+            // a neighbour whose name extends this base, and one in a
+            // pattern's wildcard position, are other records
+            apply_as(
+                &store,
+                &home,
+                "adapter:imessage",
+                vec![
+                    day("+15551234567#2026-03-15x"),
+                    day("+1555123456_#2026-03-15"),
+                ],
+            );
+            for i in order {
+                apply_as(&store, &home, "adapter:imessage", vec![day(&copies[i])]);
+            }
+            let mut expected = vec![
+                "+1555123456_#2026-03-15".to_string(),
+                format!("{base}#r12"),
+                "+15551234567#2026-03-15x".to_string(),
+            ];
+            expected.sort();
+            assert_eq!(live(&store), expected, "{order:?}");
+            let latest = store
+                .growing_latest(&home, "imessage", base)
+                .unwrap()
+                .unwrap();
+            assert_eq!(latest.source_ref, format!("{base}#r12"));
+            assert_eq!(latest.items, 12);
+            assert_eq!(
+                latest.body(&home).as_deref(),
+                Some(&*format!("messages of {base}#r12"))
+            );
+        }
+        // the same suffix on a source that doesn't grow names another record
+        assert_eq!(growing_copy("mbox", "a@b#r2"), None);
+        assert_eq!(
+            growing_copy("chrome", "Work#2026-03-15"),
+            Some(("Work#2026-03-15", 0))
+        );
+        assert_eq!(
+            growing_copy("chrome", "Work#2026-03-15#r7"),
+            Some(("Work#2026-03-15", 7))
+        );
+        assert_eq!(
+            growing_copy("chrome", "Work#2026-03-15#rx"),
+            Some(("Work#2026-03-15#rx", 0))
+        );
+        // only the owner and peers write under a name whose refs supersede
+        for source in GROWING_SOURCES {
+            assert!(OWNER_ONLY_SOURCES.contains(source), "{source}");
+        }
+    }
+
+    /// A chat-day of `n` messages, as the iMessage adapter writes it.
+    fn chat_day(source_ref: &str, n: usize) -> EpisodeDraft {
+        let mut body = format!("messages: {n}\nchat: +15551234567\ndate: 2026-03-15\n\n");
+        for i in 0..n {
+            body.push_str(&format!("[10:{:02}] +15551234567: message {i}\n", i % 60));
+        }
+        EpisodeDraft {
+            source: "imessage".into(),
+            kind: "messages".into(),
+            title: "Messages with +15551234567".into(),
+            body,
+            trust: "self".into(),
+            scope: None,
+            entities: vec![],
+            edges: vec![],
+            ..draft(source_ref)
+        }
+    }
+
+    fn live_refs(store: &Store, source: &str) -> Vec<String> {
+        let conn = store.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT source_ref FROM episodes
+                 WHERE source = ?1 AND superseded_by IS NULL ORDER BY source_ref",
+            )
+            .unwrap();
+        let rows = stmt.query_map([source], |r| r.get(0)).unwrap();
+        rows.collect::<std::result::Result<_, _>>().unwrap()
+    }
+
+    /// The unversioned copy counts what its text holds: a smaller copy
+    /// another node read (its own base held less) never hides a fuller one
+    /// stored here, and a fuller one still replaces it.
+    #[test]
+    fn test_a_smaller_copy_from_a_peer_never_hides_a_fuller_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path());
+        home.init().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let base = "+15551234567#2026-03-15";
+        // this Mac read 100 messages of the day; the other Mac held 2 and
+        // then read 3
+        apply_as(&store, &home, "adapter:imessage", vec![chat_day(base, 100)]);
+        apply_as(
+            &store,
+            &home,
+            "peer:laptop",
+            vec![chat_day(&format!("{base}#r3"), 3)],
+        );
+        assert_eq!(live_refs(&store, "imessage"), [base]);
+        let latest = store
+            .growing_latest(&home, "imessage", base)
+            .unwrap()
+            .unwrap();
+        assert_eq!((latest.source_ref.as_str(), latest.items), (base, 100));
+        // a copy holding more than this one's 100 replaces it
+        apply_as(
+            &store,
+            &home,
+            "peer:laptop",
+            vec![chat_day(&format!("{base}#r101"), 101)],
+        );
+        assert_eq!(live_refs(&store, "imessage"), [format!("{base}#r101")]);
+    }
+
+    /// A fuller copy of a day the owner made private lands private — on
+    /// this node and, through the scope leg, on a node that holds it under
+    /// another label — and a day the owner later took out of the vault
+    /// stays out.
+    #[test]
+    fn test_a_fuller_copy_of_a_private_day_stays_private() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path());
+        home.init().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let base = "+15551234567#2026-03-15";
+        let scope_of = |source_ref: &str| -> (String, Option<String>) {
+            store
+                .lock()
+                .query_row(
+                    "SELECT scope, scope_changed_at FROM episodes WHERE source_ref = ?1",
+                    [source_ref],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        };
+        let actor = Actor::new("human:test");
+        apply_as(&store, &home, "adapter:imessage", vec![chat_day(base, 2)]);
+        let first = ids::episode_id("imessage", base);
+        store
+            .set_episode_scopes(&actor, std::slice::from_ref(&first), "private")
+            .unwrap();
+        // read again, fuller, with no label of its own
+        apply_as(
+            &store,
+            &home,
+            "adapter:imessage",
+            vec![chat_day(&format!("{base}#r5"), 5)],
+        );
+        assert_eq!(scope_of(&format!("{base}#r5")).0, "private");
+        // a copy a peer sent labelled personal is private here too, and
+        // stamped so the scope leg tells the peer
+        let mut sent = chat_day(&format!("{base}#r9"), 9);
+        sent.scope = Some("personal".into());
+        apply_as(&store, &home, "peer:laptop", vec![sent]);
+        let (scope, stamp) = scope_of(&format!("{base}#r9"));
+        assert_eq!(scope, "private");
+        assert!(stamp.is_some());
+        let r9 = ids::episode_id("imessage", &format!("{base}#r9"));
+        let changes = store.scope_changes_since("").unwrap();
+        assert!(changes
+            .iter()
+            .any(|(id, scope, _)| *id == r9 && scope == "private"));
+
+        // taken out of the vault since: the next copy follows
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        store.vault_unlock(10);
+        store
+            .set_episode_scopes(&actor, std::slice::from_ref(&r9), "work")
+            .unwrap();
+        apply_as(
+            &store,
+            &home,
+            "adapter:imessage",
+            vec![chat_day(&format!("{base}#r12"), 12)],
+        );
+        assert_eq!(scope_of(&format!("{base}#r12")).0, "work");
+    }
+
+    /// Scope changes one node sends, applied on another (the scope leg).
+    fn exchange_scopes(from: &Store, to: &Store) -> usize {
+        let changes = from.scope_changes_since("").unwrap();
+        to.apply_scope_changes(&Actor::new("peer:other"), &changes)
+            .unwrap()
+    }
+
+    fn scope_at(store: &Store, source_ref: &str) -> String {
+        store
+            .lock()
+            .query_row(
+                "SELECT scope FROM episodes WHERE source = 'imessage' AND source_ref = ?1",
+                [source_ref],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// Two nodes that each read the same fuller copy of a day — one holding
+    /// the day private, the other not — end with every copy private on both
+    /// once they exchange scope changes, also when the private label was
+    /// stored without a stamp (an earlier version's private import).
+    #[test]
+    fn test_copies_read_on_two_nodes_of_a_private_day_end_private_on_both() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a_home, b_home) = (
+            Home::at(tmp.path().join("a")),
+            Home::at(tmp.path().join("b")),
+        );
+        a_home.init().unwrap();
+        b_home.init().unwrap();
+        let a = Store::open_in_memory().unwrap();
+        let b = Store::open_in_memory().unwrap();
+        let base = "+15551234567#2026-03-15";
+        let fuller = format!("{base}#r5");
+        let mut first = chat_day(base, 2);
+        first.scope = Some("private".into());
+        apply_as(&a, &a_home, "adapter:imessage", vec![first]);
+        a.lock()
+            .execute("UPDATE episodes SET scope_changed_at = NULL", [])
+            .unwrap();
+        apply_as(&b, &b_home, "adapter:imessage", vec![chat_day(base, 2)]);
+        // each node reads the day again, fuller, itself
+        apply_as(&a, &a_home, "adapter:imessage", vec![chat_day(&fuller, 5)]);
+        apply_as(&b, &b_home, "adapter:imessage", vec![chat_day(&fuller, 5)]);
+        assert_eq!(scope_at(&a, &fuller), "private");
+        assert_eq!(scope_at(&b, &fuller), "personal");
+
+        exchange_scopes(&a, &b);
+        exchange_scopes(&b, &a);
+        for (store, node) in [(&a, "a"), (&b, "b")] {
+            for source_ref in [base, fuller.as_str()] {
+                assert_eq!(
+                    scope_at(store, source_ref),
+                    "private",
+                    "{node} {source_ref}"
+                );
+            }
+        }
+    }
+
+    /// The latest label given to a day holds on every copy: a private label
+    /// a peer sends with a newer stamp, for a copy private here already,
+    /// reaches the copy taken out of the vault in between; and a copy
+    /// private here under an older stamp takes the newer one, so an older
+    /// label sent for that copy alone leaves it in the vault.
+    #[test]
+    fn test_a_newer_private_label_holds_on_every_copy_already_private_or_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path());
+        home.init().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let base = "+15551234567#2026-03-15";
+        let (r2, r5) = (format!("{base}#r2"), format!("{base}#r5"));
+        apply_as(
+            &store,
+            &home,
+            "adapter:imessage",
+            vec![chat_day(&r2, 2), chat_day(&r5, 5)],
+        );
+        let label = |source_ref: &str, scope: &str, at: &str| {
+            store
+                .lock()
+                .execute(
+                    "UPDATE episodes SET scope = ?2, scope_changed_at = ?3 WHERE source_ref = ?1",
+                    [source_ref, scope, at],
+                )
+                .unwrap();
+        };
+        let sent = |source_ref: &str, scope: &str, at: &str| {
+            store
+                .apply_scope_changes(
+                    &Actor::new("peer:laptop"),
+                    &[(
+                        ids::episode_id("imessage", source_ref),
+                        scope.to_string(),
+                        at.to_string(),
+                    )],
+                )
+                .unwrap()
+        };
+
+        // r2 vaulted at 10:00, r5 taken out at 11:00; r2 vaulted at 12:00
+        // on the peer
+        label(&r2, "private", "2026-03-16T10:00:00Z");
+        label(&r5, "personal", "2026-03-16T11:00:00Z");
+        sent(&r2, "private", "2026-03-16T12:00:00Z");
+        assert_eq!(scope_at(&store, &r5), "private");
+
+        // both private, r5 under the older stamp: the record's 12:00 holds
+        // against r5's 11:00 label
+        label(&r2, "private", "2026-03-16T10:00:00Z");
+        label(&r5, "private", "2026-03-16T09:00:00Z");
+        sent(&r2, "private", "2026-03-16T12:00:00Z");
+        sent(&r5, "personal", "2026-03-16T11:00:00Z");
+        assert_eq!(scope_at(&store, &r5), "private");
+        // sent again, nothing changes
+        assert_eq!(sent(&r2, "private", "2026-03-16T12:00:00Z"), 0);
+    }
+
+    /// Vaulting a day on a node whose fullest copy is its first read
+    /// reaches the node that first read less: the later copy it shows, and
+    /// one only it holds, become private once the nodes exchange scope
+    /// changes — and exchanging again changes nothing.
+    #[test]
+    fn test_vaulting_a_day_reaches_the_copy_another_node_shows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a_home, b_home) = (
+            Home::at(tmp.path().join("a")),
+            Home::at(tmp.path().join("b")),
+        );
+        a_home.init().unwrap();
+        b_home.init().unwrap();
+        let a = Store::open_in_memory().unwrap();
+        let b = Store::open_in_memory().unwrap();
+        let base = "+15551234567#2026-03-15";
+        let (r5, r7) = (format!("{base}#r5"), format!("{base}#r7"));
+        // A read 100 messages first; B read 2, then 5, then 7
+        apply_as(&a, &a_home, "adapter:imessage", vec![chat_day(base, 100)]);
+        apply_as(&b, &b_home, "adapter:imessage", vec![chat_day(base, 2)]);
+        apply_as(&b, &b_home, "adapter:imessage", vec![chat_day(&r5, 5)]);
+        apply_as(&a, &a_home, "peer:b", vec![chat_day(&r5, 5)]);
+        apply_as(&b, &b_home, "adapter:imessage", vec![chat_day(&r7, 7)]);
+        assert_eq!(live_refs(&a, "imessage"), [base]);
+        assert_eq!(live_refs(&b, "imessage"), std::slice::from_ref(&r7));
+
+        a.set_episode_scopes(
+            &Actor::new("human:test"),
+            &[ids::episode_id("imessage", base)],
+            "private",
+        )
+        .unwrap();
+        assert_eq!(scope_at(&a, &r5), "private");
+        exchange_scopes(&a, &b);
+        for source_ref in [base, r5.as_str(), r7.as_str()] {
+            assert_eq!(scope_at(&b, source_ref), "private", "{source_ref}");
+        }
+        exchange_scopes(&b, &a);
+        assert_eq!(exchange_scopes(&a, &b), 0);
+        assert_eq!(exchange_scopes(&b, &a), 0);
     }
 
     #[test]

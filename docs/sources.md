@@ -83,8 +83,37 @@ General rules:
 ## iMessage / Photos / Chrome / Claude Code (local, TCC)
 `POST /v1/ingest/local {"adapter":"imessage"|"photos"|"chrome"|"claude-code"}`
 (defaults find the library paths). Re-run any time — only new
-messages/photos/visits/sessions land. Photos also feeds the location
-index (GPS lines parsed at consolidation).
+messages/photos/visits/sessions land. Each iMessage chat-day and Chrome
+day is one episode. Messages are imported only when you ask (here, the
+CLI, or a `chat.db` dropped in the inbox), so every import reads every
+day, today's included. A Chrome day is read once it has settled (a whole
+day after it ends, UTC), and a Claude Code session once its file has gone
+12 hours unchanged; today's browsing and a session still in use land on
+a later run (the idle refresh reads both). Each read is stored as
+`<ref>#r<n>` (`n` = messages, visits or turns it holds — every one, even
+when the text is too long to keep whole and shows only the first and
+latest); days stored by earlier versions keep their plain `<ref>`. A
+later read that finds more in a day or session already stored (messages
+sent since, late-syncing messages or visits, a session picked up again)
+stores the fuller copy, which replaces the earlier one and keeps its
+label (a private day stays private — marking any copy private marks them
+all, on every node); a read holding no more changes nothing. Two Macs
+that read one chat-day with different numbers of messages store
+different copies, and both show the fuller one once they sync. The idle
+refresh reads Chrome from where each profile's last run stopped (less a
+week, for late visits) and only the session files that changed since —
+or that sit in a project folder it hasn't seen before. Chrome days are
+keyed by profile (`profile:<creation time>#<date>`; a profile with no
+creation time by this machine and its folder's path); a day earlier
+versions stored under a profile's shown name is replaced by that
+profile's day only when the new day holds all of it (at least as many
+visits, and every visit line), so same-named profiles (on one Mac or
+two) keep their own days. Photos keys each photo by capture time and
+ORIGINAL file name, the identity the phone sends too; a photo an earlier
+scan stored under the library's file name moves to that key on the next
+scan, on every synced node — also a node that holds only the old key, and
+also when two Macs' libraries gave the photo different names. Photos also feeds the
+location index (GPS lines parsed at consolidation).
 
 ## Git / ICS / chatlog / Substack
 - `hearthloom ingest git <repo-path>` per repo (registered in sources;

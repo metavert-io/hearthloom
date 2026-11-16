@@ -24,6 +24,8 @@ const APPLE_EPOCH: i64 = 978_307_200;
 /// between the Mac Photos library and the phone, but capture time +
 /// original filename are visible to both, so the Mac scan and the iOS
 /// photo-location stream UNION on it instead of duplicating (v47).
+/// `filename` is therefore the ORIGINAL name (`IMG_1234.HEIC`); the Mac
+/// library keeps the file under a name of its own (`<uuid>.heic`).
 #[derive(Debug, Clone)]
 pub struct PhotoPoint {
     pub at_unix: i64,
@@ -32,11 +34,21 @@ pub struct PhotoPoint {
     pub longitude: Option<f64>,
     pub filename: String,
     pub place: Option<String>,
+    /// The library's own name for the file, when it differs from
+    /// `filename`: what earlier versions' Mac scans keyed the photo by.
+    pub stored_name: Option<String>,
 }
 
 impl PhotoPoint {
     pub fn key(&self) -> String {
         format!("{}|{}", self.at_unix, self.filename)
+    }
+    /// The key earlier versions' Mac scans gave this photo, when it
+    /// differs from [`key`](Self::key).
+    pub fn earlier_key(&self) -> Option<String> {
+        self.stored_name
+            .as_ref()
+            .map(|name| format!("{}|{name}", self.at_unix))
     }
     /// Local calendar day this photo buckets to.
     pub fn day(&self) -> Option<String> {
@@ -54,11 +66,37 @@ pub fn default_library() -> Result<std::path::PathBuf> {
 }
 
 pub fn ingest(library: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
-    let db_path = if library.extension().map(|e| e == "sqlite").unwrap_or(false) {
+    day_drafts(scan_points(library)?, scope)
+        .ok_or_else(|| anyhow!("no dated photos found in {}", db_path(library).display()))
+}
+
+/// The day episodes of points one [`scan_points`] read (what [`ingest`]
+/// returns), so a caller that also stores the points scans once. `None`
+/// when there are none.
+pub fn day_drafts(photos: Vec<PhotoPoint>, scope: Option<&str>) -> Option<Vec<EpisodeDraft>> {
+    if photos.is_empty() {
+        return None;
+    }
+    Some(
+        bucket_days(photos)
+            .into_iter()
+            .map(|(date, photos)| day_draft(&date, &photos, scope, 1))
+            .collect(),
+    )
+}
+
+fn db_path(library: &Path) -> std::path::PathBuf {
+    if library.extension().map(|e| e == "sqlite").unwrap_or(false) {
         library.to_path_buf()
     } else {
         library.join("database/Photos.sqlite")
-    };
+    }
+}
+
+/// All geotag points from a Photos.sqlite — the per-photo records the
+/// daemon stores durably (v47) so Mac and phone streams union.
+pub fn scan_points(library: &Path) -> Result<Vec<PhotoPoint>> {
+    let db_path = db_path(library);
     let conn = Connection::open_with_flags(
         &db_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -69,30 +107,6 @@ pub fn ingest(library: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> 
             db_path.display()
         )
     })?;
-
-    let photos = scan_points_from(&conn)?;
-    if photos.is_empty() {
-        return Err(anyhow!("no dated photos found in {}", db_path.display()));
-    }
-    Ok(bucket_days(photos)
-        .into_iter()
-        .map(|(date, photos)| day_draft(&date, &photos, scope, 1))
-        .collect())
-}
-
-/// All geotag points from a Photos.sqlite — the per-photo records the
-/// daemon stores durably (v47) so Mac and phone streams union.
-pub fn scan_points(library: &Path) -> Result<Vec<PhotoPoint>> {
-    let db_path = if library.extension().map(|e| e == "sqlite").unwrap_or(false) {
-        library.to_path_buf()
-    } else {
-        library.join("database/Photos.sqlite")
-    };
-    let conn = Connection::open_with_flags(
-        &db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .with_context(|| format!("opening {} read-only", db_path.display()))?;
     scan_points_from(&conn)
 }
 
@@ -217,33 +231,54 @@ pub fn day_draft(
 
 /// Query assets with graceful degradation: the moment join and the
 /// additional-attributes join exist on current macOS but not guaranteed
-/// everywhere; fall back to plainer queries rather than fail.
+/// everywhere; fall back to plainer queries rather than fail. The file
+/// name is the original one (`ZADDITIONALASSETATTRIBUTES.ZORIGINALFILENAME`,
+/// what the phone reports too) where the library records it, else the
+/// library's own (`ZASSET.ZFILENAME`).
 fn query_photos(conn: &Connection) -> Result<Vec<Photo>> {
-    const QUERIES: &[&str] = &[
+    let has_original: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('ZADDITIONALASSETATTRIBUTES')
+                           WHERE name = 'ZORIGINALFILENAME')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    let original = if has_original {
+        "aa.ZORIGINALFILENAME"
+    } else {
+        "NULL"
+    };
+    let queries = [
         // Full: timezone offsets + reverse-geocoded moment titles.
-        "SELECT a.ZDATECREATED, a.ZLATITUDE, a.ZLONGITUDE, a.ZFILENAME,
-                aa.ZTIMEZONEOFFSET, m.ZTITLE
-         FROM ZASSET a
-         LEFT JOIN ZADDITIONALASSETATTRIBUTES aa ON aa.Z_PK = a.ZADDITIONALATTRIBUTES
-         LEFT JOIN ZMOMENT m ON m.Z_PK = a.ZMOMENT
-         WHERE a.ZTRASHEDSTATE = 0 AND a.ZDATECREATED IS NOT NULL
-         ORDER BY a.ZDATECREATED",
+        format!(
+            "SELECT a.ZDATECREATED, a.ZLATITUDE, a.ZLONGITUDE, a.ZFILENAME,
+                    aa.ZTIMEZONEOFFSET, m.ZTITLE, {original}
+             FROM ZASSET a
+             LEFT JOIN ZADDITIONALASSETATTRIBUTES aa ON aa.Z_PK = a.ZADDITIONALATTRIBUTES
+             LEFT JOIN ZMOMENT m ON m.Z_PK = a.ZMOMENT
+             WHERE a.ZTRASHEDSTATE = 0 AND a.ZDATECREATED IS NOT NULL
+             ORDER BY a.ZDATECREATED"
+        ),
         // No ZMOMENT table.
-        "SELECT a.ZDATECREATED, a.ZLATITUDE, a.ZLONGITUDE, a.ZFILENAME,
-                aa.ZTIMEZONEOFFSET, NULL
-         FROM ZASSET a
-         LEFT JOIN ZADDITIONALASSETATTRIBUTES aa ON aa.Z_PK = a.ZADDITIONALATTRIBUTES
-         WHERE a.ZTRASHEDSTATE = 0 AND a.ZDATECREATED IS NOT NULL
-         ORDER BY a.ZDATECREATED",
+        format!(
+            "SELECT a.ZDATECREATED, a.ZLATITUDE, a.ZLONGITUDE, a.ZFILENAME,
+                    aa.ZTIMEZONEOFFSET, NULL, {original}
+             FROM ZASSET a
+             LEFT JOIN ZADDITIONALASSETATTRIBUTES aa ON aa.Z_PK = a.ZADDITIONALATTRIBUTES
+             WHERE a.ZTRASHEDSTATE = 0 AND a.ZDATECREATED IS NOT NULL
+             ORDER BY a.ZDATECREATED"
+        ),
         // Bare minimum.
-        "SELECT a.ZDATECREATED, a.ZLATITUDE, a.ZLONGITUDE, a.ZFILENAME, NULL, NULL
+        "SELECT a.ZDATECREATED, a.ZLATITUDE, a.ZLONGITUDE, a.ZFILENAME, NULL, NULL, NULL
          FROM ZASSET a
          WHERE a.ZTRASHEDSTATE = 0 AND a.ZDATECREATED IS NOT NULL
-         ORDER BY a.ZDATECREATED",
+         ORDER BY a.ZDATECREATED"
+            .to_string(),
     ];
 
     let mut last_err = None;
-    for sql in QUERIES {
+    for sql in &queries {
         match try_query(conn, sql) {
             Ok(photos) => return Ok(photos),
             Err(err) => last_err = Some(err),
@@ -258,9 +293,15 @@ fn try_query(conn: &Connection, sql: &str) -> Result<Vec<Photo>> {
         let created: f64 = row.get(0)?;
         let latitude: Option<f64> = row.get(1)?;
         let longitude: Option<f64> = row.get(2)?;
-        let filename: Option<String> = row.get(3)?;
+        let stored: Option<String> = row.get::<_, Option<String>>(3)?.filter(|n| !n.is_empty());
         let tz_seconds: Option<i64> = row.get(4)?;
         let place: Option<String> = row.get(5)?;
+        let original: Option<String> = row.get::<_, Option<String>>(6)?.filter(|n| !n.is_empty());
+        let (filename, stored_name) = match (original, stored) {
+            (Some(original), Some(stored)) if original != stored => (Some(original), Some(stored)),
+            (Some(original), _) => (Some(original), None),
+            (None, stored) => (stored, None),
+        };
         Ok(Photo {
             at_unix: created as i64 + APPLE_EPOCH,
             tz_offset_minutes: tz_seconds.map(|s| (s / 60) as i32),
@@ -275,6 +316,7 @@ fn try_query(conn: &Connection, sql: &str) -> Result<Vec<Photo>> {
                 }),
             filename: filename.unwrap_or_else(|| "(unnamed)".into()),
             place: place.filter(|p| !p.is_empty()),
+            stored_name,
         })
     })?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -332,5 +374,56 @@ mod tests {
         // Per-photo timezone honored.
         assert_eq!(first.event_time.tz_offset_minutes, Some(-240));
         assert_eq!(first.event_time.uncertainty, TimeUncertainty::Exact);
+    }
+
+    /// The library keeps a file under a name of its own; the phone knows
+    /// the photo by its original name. A point is keyed — and shown — by
+    /// the original, and remembers the library's name for the key earlier
+    /// scans used.
+    #[test]
+    fn test_points_are_keyed_by_the_original_file_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("Photos.sqlite");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ZASSET (Z_PK INTEGER PRIMARY KEY, ZDATECREATED REAL,
+                 ZLATITUDE REAL, ZLONGITUDE REAL, ZFILENAME TEXT,
+                 ZTRASHEDSTATE INTEGER, ZMOMENT INTEGER, ZADDITIONALATTRIBUTES INTEGER);
+             CREATE TABLE ZADDITIONALASSETATTRIBUTES (Z_PK INTEGER PRIMARY KEY,
+                 ZTIMEZONEOFFSET INTEGER, ZORIGINALFILENAME TEXT);
+             CREATE TABLE ZMOMENT (Z_PK INTEGER PRIMARY KEY, ZTITLE TEXT);
+             INSERT INTO ZADDITIONALASSETATTRIBUTES VALUES (1, -14400, 'IMG_1234.HEIC');
+             INSERT INTO ZADDITIONALASSETATTRIBUTES VALUES (2, -14400, NULL);
+             INSERT INTO ZADDITIONALASSETATTRIBUTES VALUES (3, -14400, 'IMG_9.JPG');
+             INSERT INTO ZASSET VALUES (1, 795362400.6, 42.3736, -71.1097,
+                 '4F2B1C3D-0000-4000-8000-00000000AAAA.heic', 0, NULL, 1);
+             INSERT INTO ZASSET VALUES (2, 795366000, 42.3736, -71.1097, 'IMG_2.HEIC', 0, NULL, 2);
+             INSERT INTO ZASSET VALUES (3, 795369600, 42.3736, -71.1097, 'IMG_9.JPG', 0, NULL, 3);",
+        )
+        .unwrap();
+        drop(conn);
+        let points = scan_points(&db).unwrap();
+        let keys: Vec<(String, Option<String>)> =
+            points.iter().map(|p| (p.key(), p.earlier_key())).collect();
+        let at = |apple: i64| apple + APPLE_EPOCH;
+        assert_eq!(
+            keys,
+            [
+                (
+                    format!("{}|IMG_1234.HEIC", at(795362400)),
+                    Some(format!(
+                        "{}|4F2B1C3D-0000-4000-8000-00000000AAAA.heic",
+                        at(795362400)
+                    ))
+                ),
+                // no original name recorded: the library's name, as before
+                (format!("{}|IMG_2.HEIC", at(795366000)), None),
+                // the same name both ways: one key
+                (format!("{}|IMG_9.JPG", at(795369600)), None),
+            ]
+        );
+        let drafts = day_drafts(points, None).unwrap();
+        assert!(drafts[0].body.contains("IMG_1234.HEIC"));
+        assert!(!drafts[0].body.contains("4F2B1C3D"));
     }
 }

@@ -23,7 +23,14 @@ pub(crate) fn store_scan_points(
     device: &str,
     points: &[photos_adapter::PhotoPoint],
 ) -> anyhow::Result<(usize, usize)> {
-    let rows: Vec<PhotoPointIn> = points
+    state.store.photos_add_points(device, &scan_rows(points))
+}
+
+/// A Mac scan's records as store rows: keyed by original file name, each
+/// carrying the key earlier scans gave it (so a photo they stored isn't
+/// stored again).
+pub(crate) fn scan_rows(points: &[photos_adapter::PhotoPoint]) -> Vec<PhotoPointIn> {
+    points
         .iter()
         .map(|p| PhotoPointIn {
             key: p.key(),
@@ -35,10 +42,10 @@ pub(crate) fn store_scan_points(
             lat: p.latitude,
             lon: p.longitude,
             place: p.place.clone(),
+            earlier_key: p.earlier_key(),
         })
         .filter(|p| !p.taken_at.is_empty())
-        .collect();
-    state.store.photos_add_points(device, &rows)
+        .collect()
 }
 
 fn stored_to_adapter(p: &StoredPhotoPoint) -> photos_adapter::PhotoPoint {
@@ -49,6 +56,7 @@ fn stored_to_adapter(p: &StoredPhotoPoint) -> photos_adapter::PhotoPoint {
         longitude: p.lon,
         filename: p.filename.clone(),
         place: p.place.clone(),
+        stored_name: None,
     }
 }
 
@@ -86,7 +94,17 @@ fn finalize_photo_days_inner(
                 // source's points yet sees a subset and does nothing.
                 match store.photo_day_state(&day)? {
                     Some((minted_count, minted_hash, _, rev)) => {
-                        if count <= minted_count || hash == minted_hash {
+                        if hash == minted_hash {
+                            // the union is the minted set: the day's count
+                            // is the union's (a count lowered for a point
+                            // the day wasn't minted with comes back up, so
+                            // the day stops being picked every cycle)
+                            if count != minted_count {
+                                store.set_photo_day_state(&day, count, &hash, None, rev)?;
+                            }
+                            continue;
+                        }
+                        if count <= minted_count {
                             continue;
                         }
                         ((rev + 1) as u32, true)
@@ -154,7 +172,139 @@ mod tests {
             lat: Some(42.0),
             lon: Some(-71.0),
             place: Some("Cambridge".into()),
+            earlier_key: None,
         }
+    }
+
+    /// One photo seen by the Mac library (stored under a name of its own)
+    /// and by the phone (its original name) is one point, one photo in the
+    /// day; a photo an earlier Mac scan stored under the library's name
+    /// stays one point too.
+    #[test]
+    fn test_mac_and_phone_points_of_one_photo_union() {
+        let (store, home, _tmp) = node();
+        let mac = |stored: &str, original: &str, hour: u32| photos_adapter::PhotoPoint {
+            at_unix: 1_752_988_800 + hour as i64 * 3600,
+            tz_offset_minutes: Some(0),
+            latitude: Some(42.0),
+            longitude: Some(-71.0),
+            filename: original.into(),
+            place: Some("Cambridge".into()),
+            stored_name: Some(stored.into()),
+        };
+        // an earlier version's Mac scan stored this one under the library's name
+        store
+            .photos_add_points("mac", &[pt("BBBB-UUID.heic", 11)])
+            .unwrap();
+        // the phone reports its photo by the original name
+        store
+            .photos_add_points("iPhone", &[pt("IMG_1.HEIC", 10)])
+            .unwrap();
+        let scan = [
+            mac("AAAA-UUID.heic", "IMG_1.HEIC", 10),
+            mac("BBBB-UUID.heic", "IMG_2.HEIC", 11),
+        ];
+        assert_eq!(
+            store.photos_add_points("mac", &scan_rows(&scan)).unwrap(),
+            (0, 2)
+        );
+        assert_eq!(store.photo_points_for_day("2026-07-20").unwrap().len(), 2);
+        let (minted, _) = finalize_photo_days_inner(&store, &home, "2026-07-28").unwrap();
+        assert_eq!(minted, 1);
+        let (_, _, count) = store
+            .current_photo_episode(&home, "2026-07-20")
+            .unwrap()
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    /// A day minted while each photo was stored twice — under an earlier
+    /// scan's key and the phone's — counted them twice: once the duplicates
+    /// go, the photos the day gains after re-mint it, holding each once.
+    #[test]
+    fn test_a_day_minted_with_duplicates_re_mints_when_it_grows() {
+        let (store, home, _tmp) = node();
+        for hour in 0..10 {
+            store
+                .photos_add_points("mac", &[pt(&format!("UUID-{hour}.heic"), hour)])
+                .unwrap();
+            store
+                .photos_add_points("iPhone", &[pt(&format!("IMG_{hour}.HEIC"), hour)])
+                .unwrap();
+        }
+        assert_eq!(
+            finalize_photo_days_inner(&store, &home, "2026-07-28").unwrap(),
+            (1, 0)
+        );
+        let count = |store: &hearthloom_core::store::Store| {
+            store
+                .current_photo_episode(&home, "2026-07-20")
+                .unwrap()
+                .unwrap()
+                .2
+        };
+        assert_eq!(count(&store), 20);
+        // this version's scan: each library name is the phone's photo
+        let scan: Vec<photos_adapter::PhotoPoint> = (0..10)
+            .map(|hour| photos_adapter::PhotoPoint {
+                at_unix: 1_752_988_800 + hour as i64 * 3600,
+                tz_offset_minutes: Some(0),
+                latitude: Some(42.0),
+                longitude: Some(-71.0),
+                filename: format!("IMG_{hour}.HEIC"),
+                place: Some("Cambridge".into()),
+                stored_name: Some(format!("UUID-{hour}.heic")),
+            })
+            .collect();
+        store.photos_add_points("mac", &scan_rows(&scan)).unwrap();
+        assert_eq!(store.photo_points_for_day("2026-07-20").unwrap().len(), 10);
+        assert_eq!(
+            finalize_photo_days_inner(&store, &home, "2026-07-28").unwrap(),
+            (0, 0)
+        );
+        // nine more photos from the phone
+        for hour in 10..19 {
+            store
+                .photos_add_points("iPhone", &[pt(&format!("IMG_{hour}.HEIC"), hour)])
+                .unwrap();
+        }
+        assert_eq!(
+            finalize_photo_days_inner(&store, &home, "2026-07-28").unwrap(),
+            (0, 1)
+        );
+        assert_eq!(count(&store), 19);
+    }
+
+    /// A day whose stored points are exactly the ones it was minted with
+    /// keeps their count in its ledger: a count left lower is put right, and
+    /// the day stops being picked to mint.
+    #[test]
+    fn test_a_day_holding_what_it_was_minted_with_keeps_that_count() {
+        let (store, home, _tmp) = node();
+        store
+            .photos_add_points("iPhone", &[pt("IMG_1.HEIC", 10), pt("IMG_2.HEIC", 11)])
+            .unwrap();
+        assert_eq!(
+            finalize_photo_days_inner(&store, &home, "2026-07-28").unwrap(),
+            (1, 0)
+        );
+        let (count, hash, _, rev) = store.photo_day_state("2026-07-20").unwrap().unwrap();
+        store
+            .set_photo_day_state("2026-07-20", count - 1, &hash, None, rev)
+            .unwrap();
+        assert_eq!(
+            store.photo_days_needing_mint("2026-07-28").unwrap(),
+            ["2026-07-20"]
+        );
+        assert_eq!(
+            finalize_photo_days_inner(&store, &home, "2026-07-28").unwrap(),
+            (0, 0)
+        );
+        assert_eq!(store.photo_day_state("2026-07-20").unwrap().unwrap().0, 2);
+        assert!(store
+            .photo_days_needing_mint("2026-07-28")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

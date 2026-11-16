@@ -2702,6 +2702,8 @@ async fn refresh_local_sources(state: &AppState, actor: &Actor) -> anyhow::Resul
                     return Ok(());
                 }
             };
+            // a day or session stored before lands again only when fuller
+            let drafts = crate::local_import::prepare(&store, &home, drafts)?;
             let mut new = 0usize;
             for chunk in drafts.chunks(200) {
                 let report = store.apply_batch(
@@ -2723,54 +2725,100 @@ async fn refresh_local_sources(state: &AppState, actor: &Actor) -> anyhow::Resul
             Ok(())
         };
 
+        // Each repo is read past the commit this node last read it to
+        // (node-local watermarks in consolidation_state, set only once the
+        // drafts landed); an unmoved HEAD costs one `git rev-parse`.
         for repo in &repos {
             let path = std::path::Path::new(repo);
             if path.join(".git").exists() {
-                apply("git", hearthloom_adapters::git::ingest(path, None))?;
+                let key = format!("refresh.git:{repo}");
+                let mark = store.consolidation_state(&key)?;
+                match hearthloom_adapters::git::ingest_new(path, None, mark.as_deref()) {
+                    Ok(read) => {
+                        apply("git", Ok(read.drafts))?;
+                        if mark.as_deref() != Some(read.mark.as_str()) {
+                            store.set_consolidation_state(&key, &read.mark)?;
+                        }
+                    }
+                    Err(err) => apply("git", Err(err))?,
+                }
             }
         }
         if let Ok(homedir) = std::env::var("HOME") {
             // An agent's sessions are not the owner's words: those in this
             // node's agent folders (and any opening with the agent preamble)
             // stay out — the agent_task episode records the outcome.
-            apply(
-                "claude-code",
-                hearthloom_adapters::claude_code::ingest_except(
-                    &std::path::Path::new(&homedir).join(".claude/projects"),
-                    None,
-                    &agent_dirs,
-                ),
-            )?;
+            // Only session files that settled since the last run are read
+            // (and every file of a project folder the last run didn't
+            // list); both marks move only once the drafts landed.
+            const SESSIONS_READ: &str = "refresh.claude_code.settled_before";
+            const SESSION_FOLDERS: &str = "refresh.claude_code.folders";
+            let since = store
+                .consolidation_state(SESSIONS_READ)?
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok())
+                .map(std::time::SystemTime::from);
+            let known: Option<Vec<String>> = store
+                .consolidation_state(SESSION_FOLDERS)?
+                .and_then(|folders| serde_json::from_str(&folders).ok());
+            let window =
+                hearthloom_adapters::claude_code::Window::at(std::time::SystemTime::now(), since);
+            match hearthloom_adapters::claude_code::ingest_window(
+                &std::path::Path::new(&homedir).join(".claude/projects"),
+                None,
+                &agent_dirs,
+                window,
+                known.as_deref(),
+            ) {
+                Ok(read) => {
+                    apply("claude-code", Ok(read.drafts))?;
+                    let through: chrono::DateTime<chrono::Utc> = read.read_through.into();
+                    store.set_consolidation_state(
+                        SESSIONS_READ,
+                        &through.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+                    )?;
+                    store.set_consolidation_state(
+                        SESSION_FOLDERS,
+                        &serde_json::to_string(&read.folders)?,
+                    )?;
+                }
+                Err(err) => apply("claude-code", Err(err))?,
+            }
         }
+        // Each Chrome profile is read from the first day its last run
+        // didn't read (less a lookback for visits that sync in late).
         if let Ok(dir) = hearthloom_adapters::chrome::default_data_dir() {
-            apply("chrome", hearthloom_adapters::chrome::ingest(&dir, None))?;
+            let mark_key = |profile: &str| format!("refresh.chrome:{profile}");
+            let mark = |profile: &str| {
+                store
+                    .consolidation_state(&mark_key(profile))
+                    .ok()
+                    .flatten()
+                    .and_then(|day| day.parse::<chrono::NaiveDate>().ok())
+            };
+            match hearthloom_adapters::chrome::ingest_new(&dir, None, chrono::Utc::now(), &mark) {
+                Ok(read) => {
+                    apply("chrome", Ok(read.drafts))?;
+                    for (profile, day) in read.marks {
+                        store.set_consolidation_state(&mark_key(&profile), &day.to_string())?;
+                    }
+                }
+                Err(err) => apply("chrome", Err(err))?,
+            }
         }
         // TCC-gated sources refresh too when the daemon has access.
         if let Ok(library) = hearthloom_adapters::photos::default_library() {
-            apply(
-                "photos",
-                hearthloom_adapters::photos::ingest(&library, None),
-            )?;
-            // v47: the same scan feeds the durable photo-point union so
-            // Mac and phone photos reconcile (idempotent by key).
-            if let Ok(points) = hearthloom_adapters::photos::scan_points(&library) {
-                let rows: Vec<hearthloom_core::store::PhotoPointIn> = points
-                    .iter()
-                    .filter_map(|p| {
-                        Some(hearthloom_core::store::PhotoPointIn {
-                            key: p.key(),
-                            filename: p.filename.clone(),
-                            taken_at: chrono::DateTime::from_timestamp(p.at_unix, 0)?
-                                .format("%Y-%m-%dT%H:%M:%SZ")
-                                .to_string(),
-                            tz_offset_minutes: p.tz_offset_minutes.unwrap_or(0),
-                            lat: p.latitude,
-                            lon: p.longitude,
-                            place: p.place.clone(),
-                        })
-                    })
-                    .collect();
-                let _ = store.photos_add_points("mac", &rows);
+            // One scan feeds both the day episodes and (v47) the durable
+            // photo-point union, so Mac and phone photos reconcile
+            // (idempotent by key).
+            match hearthloom_adapters::photos::scan_points(&library) {
+                Ok(points) => {
+                    let rows = crate::live_photos::scan_rows(&points);
+                    let drafts = hearthloom_adapters::photos::day_drafts(points, None)
+                        .ok_or_else(|| anyhow::anyhow!("no dated photos found"));
+                    apply("photos", drafts)?;
+                    let _ = store.photos_add_points("mac", &rows);
+                }
+                Err(err) => apply("photos", Err(err))?,
             }
         }
         Ok(Value::Object(per_source))
