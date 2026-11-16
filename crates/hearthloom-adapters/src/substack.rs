@@ -4,8 +4,6 @@
 //! which also works on custom domains backed by Substack. Posts land at
 //! trust `imported`: the URL can name any publication.
 
-use std::path::Path;
-
 use anyhow::{anyhow, Result};
 use chrono::DateTime;
 use hearthloom_core::{EpisodeDraft, EventTime, TimeUncertainty};
@@ -82,11 +80,6 @@ pub fn ingest(location: &str, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> 
     Ok(drafts)
 }
 
-/// Path-based entry point for API symmetry with other adapters (unused).
-pub fn ingest_path(_path: &Path) -> Result<Vec<EpisodeDraft>> {
-    Err(anyhow!("substack ingests from a URL, not a path"))
-}
-
 fn post_to_draft(
     client: &reqwest::blocking::Client,
     base: &str,
@@ -150,11 +143,7 @@ fn post_to_draft(
     body.push_str(&format!("url: {canonical}\n\n"));
     let mut text = text;
     if text.len() > BODY_CAP {
-        let mut cut = BODY_CAP;
-        while !text.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        text.truncate(cut);
+        text.truncate(text.floor_char_boundary(BODY_CAP));
         text.push_str("\n[truncated]");
     }
     body.push_str(text.trim());

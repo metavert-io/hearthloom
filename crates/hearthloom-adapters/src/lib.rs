@@ -30,6 +30,13 @@ pub fn first_unsettled_day(now: DateTime<Utc>) -> NaiveDate {
     (now - chrono::Duration::days(1)).date_naive()
 }
 
+/// `text` cut to at most `limit` bytes. The cut falls on a character
+/// boundary (a byte offset inside a multi-byte character would panic), so
+/// it can come out a few bytes short of `limit`.
+pub(crate) fn cap(text: &str, limit: usize) -> &str {
+    &text[..text.floor_char_boundary(limit)]
+}
+
 /// `head` followed by `entries`, within `cap` bytes: all of them when they
 /// fit; otherwise the first ones that fit in half the room and the last
 /// ones that fit in the rest, with the line `omitted(count)` between them —
@@ -86,6 +93,20 @@ mod tests {
             first_unsettled_day(at("2026-03-17T00:00:00Z")),
             day("2026-03-16")
         );
+    }
+
+    #[test]
+    fn test_a_cap_never_splits_a_character() {
+        for wide in ["é", "—", "🥰"] {
+            let text = format!("{}{wide}b", "a".repeat(2047));
+            assert_eq!(cap(&text, 2048), "a".repeat(2047), "{wide}");
+            assert_eq!(
+                cap(&text, 2047 + wide.len()),
+                format!("{}{wide}", "a".repeat(2047))
+            );
+        }
+        assert_eq!(cap("short", 2048), "short");
+        assert_eq!(cap("", 0), "");
     }
 
     #[test]

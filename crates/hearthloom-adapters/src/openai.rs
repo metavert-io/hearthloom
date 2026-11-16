@@ -22,6 +22,8 @@ use chrono::DateTime;
 use hearthloom_core::{EntityRef, EpisodeDraft, EventTime, TimeUncertainty};
 use serde_json::Value;
 
+use crate::cap;
+
 /// Per-message and per-episode text caps: the condensed transcript is the
 /// searchable body; the export directory itself remains the deep archive.
 const MESSAGE_CAP: usize = 2000;
@@ -85,17 +87,7 @@ pub fn read_export(
 
     // The multi-chunk export; fall back to a lone conversations.json so a
     // single-file export drag still works through this adapter.
-    let mut chunks: Vec<PathBuf> = std::fs::read_dir(dir)
-        .with_context(|| format!("reading {}", dir.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.starts_with("conversations-") && n.ends_with(".json"))
-                .unwrap_or(false)
-        })
-        .collect();
-    chunks.sort();
+    let mut chunks = chunk_files(dir).with_context(|| format!("reading {}", dir.display()))?;
     if chunks.is_empty() && dir.join("conversations.json").is_file() {
         chunks.push(dir.join("conversations.json"));
     }
@@ -145,15 +137,33 @@ pub fn read_export(
     Ok(ExportRead { drafts, flagged })
 }
 
-fn cap(text: &str, limit: usize) -> &str {
-    if text.len() <= limit {
-        return text;
-    }
-    let mut cut = limit;
-    while !text.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    &text[..cut]
+/// A chunk of the multi-chunk export (`conversations-000.json`, …).
+fn is_chunk_name(name: &str) -> bool {
+    name.starts_with("conversations-") && name.ends_with(".json")
+}
+
+/// The export's chunk files in `dir`, in order.
+fn chunk_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut chunks: Vec<PathBuf> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(is_chunk_name)
+        })
+        .collect();
+    chunks.sort();
+    Ok(chunks)
+}
+
+/// Whether `dir` is a ChatGPT data export this adapter reads: chunk files,
+/// or a single-file export's `conversations.json` beside its `chat.html`
+/// (a Claude export names its file `conversations.json` too, so that name
+/// alone doesn't say which).
+pub fn is_export_dir(dir: &Path) -> bool {
+    chunk_files(dir).is_ok_and(|chunks| !chunks.is_empty())
+        || (dir.join("conversations.json").is_file() && dir.join("chat.html").is_file())
 }
 
 /// `file-service://file-XYZ` (or a bare `file-XYZ`) → the on-disk id
@@ -783,5 +793,82 @@ mod tests {
             ingest(alone.path(), None, None).is_err(),
             "nothing to store"
         );
+    }
+
+    /// The transcript is the branch the conversation ended on: a prompt
+    /// the owner edited and the answers to it, and an answer they
+    /// regenerated, are left out.
+    #[test]
+    fn test_edited_prompts_and_regenerated_answers_stay_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(
+            tmp.path(),
+            "conversations-000.json",
+            r#"[{
+              "conversation_id":"c1","title":"Trip","create_time":1720992777.0,
+              "current_node":"a2b",
+              "mapping":{
+                "root":{"parent":null,"children":["u1"],"message":null},
+                "u1":{"parent":"root","children":["a1"],
+                      "message":{"author":{"role":"user"},"create_time":1720992778.0,
+                                 "content":{"parts":["Plan a trip"]}}},
+                "a1":{"parent":"u1","children":["u2","u2e"],
+                      "message":{"author":{"role":"assistant"},"create_time":1720992780.0,
+                                 "content":{"parts":["Where to?"]}}},
+                "u2":{"parent":"a1","children":["a2"],
+                      "message":{"author":{"role":"user"},"create_time":1720992790.0,
+                                 "content":{"parts":["The first wording"]}}},
+                "a2":{"parent":"u2","children":[],
+                      "message":{"author":{"role":"assistant"},"create_time":1720992791.0,
+                                 "content":{"parts":["An answer to the first wording"]}}},
+                "u2e":{"parent":"a1","children":["a2a","a2b"],
+                       "message":{"author":{"role":"user"},"create_time":1720992800.0,
+                                  "content":{"parts":["Lisbon in May"]}}},
+                "a2a":{"parent":"u2e","children":[],
+                       "message":{"author":{"role":"assistant"},"create_time":1720992801.0,
+                                  "content":{"parts":["A regenerated-away answer"]}}},
+                "a2b":{"parent":"u2e","children":[],
+                       "message":{"author":{"role":"assistant"},"create_time":1720992802.0,
+                                  "content":{"parts":["Lisbon it is"]}}}
+              }
+            }]"#,
+        );
+        let drafts = ingest(tmp.path(), None, None).unwrap();
+        let body = &drafts[0].body;
+        let order: Vec<usize> = [
+            "you: Plan a trip",
+            "chatgpt: Where to?",
+            "you: Lisbon in May",
+            "chatgpt: Lisbon it is",
+        ]
+        .iter()
+        .map(|turn| {
+            body.find(turn)
+                .unwrap_or_else(|| panic!("{turn} in {body}"))
+        })
+        .collect();
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{body}");
+        for left_out in ["first wording", "regenerated-away"] {
+            assert!(!body.contains(left_out), "{body}");
+        }
+    }
+
+    /// An export is recognised by its chunk files alone, or by a single
+    /// `conversations.json` with its `chat.html`.
+    #[test]
+    fn test_export_dirs_are_recognised() {
+        let tmp = tempfile::tempdir().unwrap();
+        let chunked = tmp.path().join("chunked");
+        std::fs::create_dir(&chunked).unwrap();
+        write(&chunked, "conversations-000.json", "[]");
+        write(&chunked, "conversations-001.json", "[]");
+        assert!(is_export_dir(&chunked));
+        let single = tmp.path().join("single");
+        std::fs::create_dir(&single).unwrap();
+        write(&single, "conversations.json", "[]");
+        assert!(!is_export_dir(&single), "a Claude export has the same name");
+        write(&single, "chat.html", "");
+        assert!(is_export_dir(&single));
+        assert!(!is_export_dir(&tmp.path().join("missing")));
     }
 }

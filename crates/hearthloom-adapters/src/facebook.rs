@@ -33,7 +33,9 @@ use chrono::DateTime;
 use hearthloom_core::{EntityRef, EpisodeDraft, EventTime, TimeUncertainty};
 use serde_json::Value;
 
+/// Text caps, in bytes; a cut always falls on a character boundary.
 const BODY_CAP: usize = 64 * 1024;
+const EVENT_DESCRIPTION_CAP: usize = 2048;
 const GROUP_MEMBER_MIN_MESSAGES: usize = 5;
 const MAX_ENTITIES_PER_EPISODE: usize = 8;
 
@@ -51,6 +53,19 @@ fn load_json(path: &Path) -> Result<Value> {
     let raw =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
+}
+
+/// A file's list of items: the file itself when it is an array, else the
+/// first array among an object's values (exports wrap lists either way).
+fn first_array(v: &Value) -> &[Value] {
+    match v {
+        Value::Array(a) => a,
+        Value::Object(o) => o
+            .values()
+            .find_map(Value::as_array)
+            .map_or(&[], Vec::as_slice),
+        _ => &[],
+    }
 }
 
 fn ts_to_event(ts: i64) -> EventTime {
@@ -210,15 +225,7 @@ fn posts(activity: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
     let mut drafts = Vec::new();
     for entry in glob_files(&activity.join("posts"), "your_posts__")? {
         let v = load_json(&entry)?;
-        let arr = match &v {
-            Value::Array(a) => a.clone(),
-            Value::Object(o) => o
-                .values()
-                .find_map(|x| x.as_array().cloned())
-                .unwrap_or_default(),
-            _ => vec![],
-        };
-        for post in &arr {
+        for post in first_array(&v) {
             let Some(ts) = post["timestamp"].as_i64().filter(|t| *t > 0) else {
                 continue;
             };
@@ -307,7 +314,7 @@ fn posts(activity: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
                         body.push('\n');
                     }
                 }
-                body.truncate(BODY_CAP);
+                body.truncate(body.floor_char_boundary(BODY_CAP));
                 body
             };
             let body = assemble(true);
@@ -602,7 +609,7 @@ fn events(activity: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
         let mut body = format!("event: {name}\nrole: {role}\n");
         if !description.is_empty() {
             let mut d = description;
-            d.truncate(2048);
+            d.truncate(d.floor_char_boundary(EVENT_DESCRIPTION_CAP));
             body.push_str(&format!("\n{d}\n"));
         }
         drafts.push(EpisodeDraft {
@@ -656,15 +663,7 @@ fn events(activity: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
     let hosted_path = activity.join("events/events_you_hosted.json");
     if hosted_path.is_file() {
         let v = load_json(&hosted_path)?;
-        let arr = match &v {
-            Value::Array(a) => a.clone(),
-            Value::Object(o) => o
-                .values()
-                .find_map(|x| x.as_array().cloned())
-                .unwrap_or_default(),
-            _ => vec![],
-        };
-        for e in &arr {
+        for e in first_array(&v) {
             push(
                 fix(e["title"].as_str().unwrap_or("")),
                 e["timestamp"].as_i64().unwrap_or(0),
@@ -697,15 +696,7 @@ fn groups(activity: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
             continue;
         }
         let v = load_json(&path)?;
-        let arr = match &v {
-            Value::Array(a) => a.clone(),
-            Value::Object(o) => o
-                .values()
-                .find_map(|x| x.as_array().cloned())
-                .unwrap_or_default(),
-            _ => vec![],
-        };
-        for it in &arr {
+        for it in first_array(&v) {
             let Some(ts) = it["timestamp"].as_i64().filter(|t| *t > 0) else {
                 continue;
             };
@@ -814,6 +805,67 @@ mod tests {
         // already-clean text is untouched
         assert_eq!(fix("plain ascii"), "plain ascii");
         assert_eq!(fix("real 🥰 emoji"), "real 🥰 emoji");
+    }
+
+    /// Text past a cap is cut on a character boundary, wherever the cap
+    /// falls: event descriptions and post bodies alike.
+    #[test]
+    fn test_long_text_is_cut_between_characters() {
+        let tmp = tempfile::tempdir().unwrap();
+        let act = tmp.path().join("your_facebook_activity");
+        std::fs::create_dir_all(act.join("posts")).unwrap();
+        std::fs::create_dir_all(act.join("events")).unwrap();
+        // the cap lands one byte into the wide character
+        let crossing = |cap: usize, wide: &str| format!("{}{wide}tail", "a".repeat(cap - 1));
+        let wides = ["é", "—", "🥰"];
+        let events: Vec<serde_json::Value> = wides
+            .iter()
+            .enumerate()
+            .map(|(i, wide)| {
+                serde_json::json!({
+                    "name": format!("Event {i}"),
+                    "start_timestamp": 1_500_000_000 + i as i64,
+                    "description": crossing(EVENT_DESCRIPTION_CAP, wide),
+                })
+            })
+            .collect();
+        std::fs::write(
+            act.join("events/your_event_responses.json"),
+            serde_json::json!({"event_responses_v2": {"events_joined": events}}).to_string(),
+        )
+        .unwrap();
+        // a post body is its text plus a newline before the cap applies
+        let posts: Vec<serde_json::Value> = wides
+            .iter()
+            .enumerate()
+            .map(|(i, wide)| {
+                serde_json::json!({
+                    "timestamp": 1_600_000_000 + i as i64,
+                    "data": [{"post": crossing(BODY_CAP, wide)}],
+                })
+            })
+            .collect();
+        std::fs::write(
+            act.join("posts/your_posts__1.json"),
+            serde_json::Value::Array(posts).to_string(),
+        )
+        .unwrap();
+
+        let drafts = ingest(tmp.path(), None).unwrap();
+        let events: Vec<&EpisodeDraft> = drafts.iter().filter(|d| d.kind == "fb_event").collect();
+        assert_eq!(events.len(), 3);
+        for event in events {
+            let description = event.body.split("\n\n").nth(1).unwrap();
+            assert_eq!(
+                description,
+                format!("{}\n", "a".repeat(EVENT_DESCRIPTION_CAP - 1))
+            );
+        }
+        let posts: Vec<&EpisodeDraft> = drafts.iter().filter(|d| d.kind == "fb_post").collect();
+        assert_eq!(posts.len(), 3);
+        for post in posts {
+            assert_eq!(post.body, "a".repeat(BODY_CAP - 1));
+        }
     }
 
     #[test]

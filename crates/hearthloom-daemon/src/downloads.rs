@@ -61,7 +61,8 @@ pub fn detect_file(path: &Path) -> Option<&'static str> {
 /// their run-now adapters read. Markers are each export's signature
 /// layout, so a random folder never matches.
 pub fn detect_dir(path: &Path) -> Option<&'static str> {
-    if path.join("conversations.json").is_file() && path.join("chat.html").is_file() {
+    // the adapter's own test: chunked or single-file
+    if hearthloom_adapters::openai::is_export_dir(path) {
         return Some("openai");
     }
     if path.join("Connections.csv").is_file() || path.join("Positions.csv").is_file() {
@@ -150,6 +151,7 @@ pub fn scan_downloads() -> Vec<Found> {
 /// arbitrary file, and refuses anything already inside `~/.hearthloom`.
 pub fn place(
     home: &hearthloom_core::Home,
+    running: &crate::Running,
     path: &str,
     key: &str,
     keep_copy: bool,
@@ -179,7 +181,7 @@ pub fn place(
         ));
     }
     if src.is_dir() {
-        let dest = install_archive_dir(home, &src, key, keep_copy)?;
+        let dest = install_archive_dir(home, running, &src, key, keep_copy)?;
         Ok((dest, "staged — press run now on its card to ingest".into()))
     } else {
         let inbox = home.inbox_dir();
@@ -204,15 +206,35 @@ pub fn place(
     }
 }
 
+/// The single-flight key of the run-now import that reads `archives/<key>`
+/// (http.rs `claim_import`: `import-<name>`).
+pub fn import_claim_key(key: &str) -> String {
+    let name = match key {
+        "apple-health" => "health",
+        other => other,
+    };
+    format!("import-{name}")
+}
+
 /// Install an extracted export dir as `archives/<key>`. An existing
 /// symlink there (hand-staging, the old way) is replaced; a real dir is
 /// never clobbered. Shared with the inbox zip path (item 17).
+/// Staging holds the claim of the import that reads the folder, so a
+/// folder is never replaced while that import reads it, and an import
+/// never starts on a half-staged one. Only plain files and folders are
+/// staged: a tree holding a link or a special file (a pipe, a device) is
+/// refused, since the import would follow or block on it.
 pub fn install_archive_dir(
     home: &hearthloom_core::Home,
+    running: &crate::Running,
     src: &Path,
     key: &str,
     keep_copy: bool,
 ) -> Result<PathBuf> {
+    let _claim = crate::try_claim(running, &import_claim_key(key)).ok_or_else(|| {
+        anyhow!("a {key} import is running — add this export again when it has finished")
+    })?;
+    only_plain_files(src)?;
     let archives = home.root().join("archives");
     std::fs::create_dir_all(&archives)?;
     let dest = archives.join(key);
@@ -226,6 +248,30 @@ pub fn install_archive_dir(
     }
     move_or_copy(src, &dest, keep_copy)?;
     Ok(dest)
+}
+
+/// Every entry under `root` (and `root` itself) is a plain folder or a
+/// regular file — nothing an import could follow out of the folder or
+/// block on. Links are not followed.
+pub fn only_plain_files(root: &Path) -> Result<()> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let kind = std::fs::symlink_metadata(&path)
+            .with_context(|| format!("reading {}", path.display()))?
+            .file_type();
+        if kind.is_dir() {
+            for entry in std::fs::read_dir(&path)? {
+                stack.push(entry?.path());
+            }
+        } else if !kind.is_file() {
+            let shown = path.strip_prefix(root).unwrap_or(&path);
+            return Err(anyhow!(
+                "{} is a link or a special file — an export holds only files and folders",
+                shown.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// rename when possible; a copy across devices or when the original
@@ -287,6 +333,12 @@ mod tests {
         std::fs::write(openai.join("conversations.json"), b"[]").unwrap();
         std::fs::write(openai.join("chat.html"), b"").unwrap();
         assert_eq!(detect_dir(&openai), Some("openai"));
+        // a chunked export has no single conversations.json
+        let chunked = root.join("chatgpt-chunked");
+        std::fs::create_dir(&chunked).unwrap();
+        std::fs::write(chunked.join("conversations-000.json"), b"[]").unwrap();
+        std::fs::write(chunked.join("conversations-001.json"), b"[]").unwrap();
+        assert_eq!(detect_dir(&chunked), Some("openai"));
         let li = root.join("linkedin-export");
         std::fs::create_dir(&li).unwrap();
         std::fs::write(li.join("Connections.csv"), b"").unwrap();
@@ -308,10 +360,11 @@ mod tests {
         let dl = tmp.path().join("Downloads");
         std::fs::create_dir(&dl).unwrap();
 
+        let running = crate::Running::default();
         // file → inbox (move: original gone)
         let ics = dl.join("cal.ics");
         std::fs::write(&ics, b"BEGIN:VCALENDAR").unwrap();
-        let (dest, _) = place(&home, ics.to_str().unwrap(), "ics", false).unwrap();
+        let (dest, _) = place(&home, &running, ics.to_str().unwrap(), "ics", false).unwrap();
         assert!(dest.starts_with(home.inbox_dir()) && dest.exists());
         assert!(!ics.exists());
 
@@ -319,16 +372,89 @@ mod tests {
         let li = dl.join("linkedin");
         std::fs::create_dir(&li).unwrap();
         std::fs::write(li.join("Connections.csv"), b"a,b").unwrap();
-        let (dest, _) = place(&home, li.to_str().unwrap(), "linkedin", true).unwrap();
+        let (dest, _) = place(&home, &running, li.to_str().unwrap(), "linkedin", true).unwrap();
         assert!(dest.join("Connections.csv").exists());
         assert!(li.exists(), "keep_copy must leave the original");
 
         // wrong key refused; real existing archive dir never clobbered
-        assert!(place(&home, li.to_str().unwrap(), "facebook", true).is_err());
-        assert!(place(&home, li.to_str().unwrap(), "linkedin", true)
+        assert!(place(&home, &running, li.to_str().unwrap(), "facebook", true).is_err());
+        assert!(
+            place(&home, &running, li.to_str().unwrap(), "linkedin", true)
+                .unwrap_err()
+                .to_string()
+                .contains("already exists")
+        );
+    }
+
+    /// No export is staged over a folder while the import that reads it
+    /// runs: the folder is left as it is, and the export staged later.
+    #[test]
+    fn test_staging_never_replaces_a_folder_its_import_is_reading() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::Home::at(tmp.path().join("hl"));
+        home.init().unwrap();
+        let running = crate::Running::default();
+        let (old, new) = (tmp.path().join("old"), tmp.path().join("new"));
+        for dir in [&old, &new] {
+            std::fs::create_dir(dir).unwrap();
+            std::fs::write(dir.join("conversations.json"), b"[]").unwrap();
+            std::fs::write(dir.join("chat.html"), b"").unwrap();
+        }
+        std::fs::write(old.join("user.json"), br#"{"email":"me@x"}"#).unwrap();
+        let archives = home.root().join("archives");
+        std::fs::create_dir_all(&archives).unwrap();
+        std::os::unix::fs::symlink(&old, archives.join("openai")).unwrap();
+
+        // the openai import is reading archives/openai
+        let import = crate::try_claim(&running, &import_claim_key("openai")).unwrap();
+        let err = install_archive_dir(&home, &running, &new, "openai", false)
             .unwrap_err()
-            .to_string()
-            .contains("already exists"));
+            .to_string();
+        assert!(err.contains("import is running"), "{err}");
+        assert!(archives.join("openai").is_symlink(), "left as it was");
+        assert!(new.exists(), "the new export is kept");
+        drop(import);
+
+        let dest = install_archive_dir(&home, &running, &new, "openai", false).unwrap();
+        assert!(!dest.is_symlink() && !dest.join("user.json").exists());
+        assert!(!running.lock().unwrap().contains("import-openai"));
+        assert_eq!(import_claim_key("apple-health"), "import-health");
+    }
+
+    /// An export folder holding a link or a special file is not staged.
+    #[test]
+    fn test_only_plain_files_and_folders_are_staged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::Home::at(tmp.path().join("hl"));
+        home.init().unwrap();
+        let running = crate::Running::default();
+        let export = tmp.path().join("export");
+        std::fs::create_dir_all(export.join("deep")).unwrap();
+        std::fs::write(export.join("conversations-000.json"), b"[]").unwrap();
+        std::os::unix::fs::symlink("/etc/hosts", export.join("deep/conversations-001.json"))
+            .unwrap();
+        let err = install_archive_dir(&home, &running, &export, "openai", false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("link or a special file"), "{err}");
+        assert!(!home.root().join("archives/openai").exists());
+
+        std::fs::remove_file(export.join("deep/conversations-001.json")).unwrap();
+        let fifo = std::ffi::CString::new(
+            export
+                .join("user.json")
+                .to_string_lossy()
+                .as_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        // SAFETY: a valid C path
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(install_archive_dir(&home, &running, &export, "openai", false).is_err());
+        assert!(!home.root().join("archives/openai").exists());
+
+        std::fs::remove_file(export.join("user.json")).unwrap();
+        assert!(install_archive_dir(&home, &running, &export, "openai", false).is_ok());
     }
 
     #[test]
@@ -343,7 +469,14 @@ mod tests {
         let archives = home.root().join("archives");
         std::fs::create_dir_all(&archives).unwrap();
         std::os::unix::fs::symlink(&export, archives.join("openai")).unwrap();
-        let (dest, _) = place(&home, export.to_str().unwrap(), "openai", false).unwrap();
+        let (dest, _) = place(
+            &home,
+            &crate::Running::default(),
+            export.to_str().unwrap(),
+            "openai",
+            false,
+        )
+        .unwrap();
         assert!(!dest.is_symlink() && dest.join("conversations.json").exists());
     }
 }

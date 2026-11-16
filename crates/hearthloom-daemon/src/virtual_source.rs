@@ -1221,8 +1221,9 @@ pub fn rlm_prompt_section(state: &AppState) -> Option<String> {
     if has_numeric {
         out.push_str(
             "- vquery {source, sql}              read-only SELECT/WITH over a numeric sidecar. \
-             apple-health tables: daily(day,metric,source,n,sum,min,max,avg) — one row per \
-             day/metric/source, PREFER this for trends/comparisons; \
+             apple-health tables: daily(day,metric,source,n,sum,min,max,avg,unit) — one row per \
+             day/metric/source, every row of a metric in the same unit, PREFER this for \
+             trends/comparisons; \
              samples(day,metric,source,value,unit,start) full resolution. Metrics include \
              StepCount, ActiveEnergyBurned, AppleExerciseTime, HeartRate, RestingHeartRate, \
              HeartRateVariabilitySDNN, RespiratoryRate, OxygenSaturation, VO2Max, BodyMass, \
@@ -1496,12 +1497,13 @@ mod tests {
             category: None,
             unit: Some("count/min".into()),
             source: "WHOOP".into(),
+            device: "WHOOP".into(),
             start: "2026-04-02 08:00:00 -0400".into(),
             day: "2026-04-02".into(),
         };
         writer.add_sample(&s).unwrap();
         table.add(&s);
-        writer.finish(&table.map).unwrap();
+        writer.finish(&table).unwrap();
 
         let home_tmp = tempfile::tempdir().unwrap();
         let home = Home::at(home_tmp.path().to_path_buf());

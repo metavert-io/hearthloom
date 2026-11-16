@@ -86,9 +86,44 @@ fn stored_to_sample(s: &StoredHealthSample) -> apple_health::Sample {
         category: s.category.clone(),
         unit: s.unit.clone(),
         source: apple_health::normalize_source(&s.source),
+        device: s.source.trim().to_string(),
         start: to_raw_local(&s.start_utc, s.tz_offset_minutes),
         day: s.day.clone(),
     }
+}
+
+/// One day's LIVE samples rolled up per (metric, tracker) — the "today so
+/// far" feed for Pulse — through the same `DayTable` as the export's
+/// sidecar, so the rows read like its `daily` table: one unit per metric,
+/// named in each row (sleep stages are hours and name none), sleep stages
+/// as `Sleep/<stage>` kept per device. `units` (metric → unit) are the
+/// units the reader's history is in: those metrics aggregate in them, and
+/// a reading that can't be converted is left out.
+pub(crate) fn today_rows(
+    store: &hearthloom_core::store::Store,
+    day: &str,
+    units: impl IntoIterator<Item = (String, String)>,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let mut table = apple_health::DayTable::with_units(units);
+    for s in &store.health_samples_for_day(day)? {
+        table.add(&stored_to_sample(s));
+    }
+    Ok(table
+        .map
+        .iter()
+        .map(|((_, metric, source), agg)| {
+            serde_json::json!({
+                "metric": metric,
+                "source": source,
+                "n": agg.n,
+                "sum": agg.sum,
+                "min": agg.min,
+                "max": agg.max,
+                "avg": agg.avg(),
+                "unit": table.unit(metric),
+            })
+        })
+        .collect())
 }
 
 /// Mint `health_day` episodes for every closed, grace-elapsed day that
@@ -235,6 +270,7 @@ mod tests {
             category: None,
             unit: Some("count".into()),
             source: "Apple Watch".into(),
+            device: "Ada’s Apple Watch".into(),
             start: "2026-07-24 08:00:00 -0400".into(),
             day: "2026-07-24".into(),
         });
@@ -244,6 +280,7 @@ mod tests {
             category: Some("AsleepDeep".into()),
             unit: None,
             source: "Apple Watch".into(),
+            device: "Ada’s Apple Watch".into(),
             start: "2026-07-24 01:00:00 -0400".into(),
             day: "2026-07-24".into(),
         });
@@ -301,6 +338,7 @@ mod tests {
             category: None,
             unit: Some("count".into()),
             source: "Apple Watch".into(),
+            device: "Apple Watch".into(),
             start: "2026-07-24 08:00:00 -0400".into(),
             day: "2026-07-24".into(),
         });
@@ -319,6 +357,52 @@ mod tests {
             "live-minted day must win over the later export"
         );
         assert_eq!(r.episodes_existing, 1);
+    }
+
+    /// Today's live readings in two units roll up in one, named in each
+    /// row; asked for the unit the history is in (lb), they come back in
+    /// it, so the chart's point and label agree.
+    #[test]
+    fn test_today_rows_name_and_take_the_history_unit() {
+        let store = hearthloom_core::store::Store::open_in_memory().unwrap();
+        let reading = |uuid: &str, value: f64, unit: &str, start: &str| HealthSampleRow {
+            uuid: uuid.into(),
+            metric: "BodyMass".into(),
+            value: Some(value),
+            unit: Some(unit.into()),
+            category: None,
+            source: "Withings".into(),
+            start: start.into(),
+            end: start.into(),
+            tz_offset_minutes: -240,
+        };
+        store
+            .health_add_samples(&[
+                reading("w1", 70.0, "kg", "2026-07-24T11:00:00Z"),
+                reading("w2", 154.0, "lb", "2026-07-24T23:00:00Z"),
+            ])
+            .unwrap();
+        let mass = |units: Vec<(String, String)>| {
+            let rows = today_rows(&store, "2026-07-24", units).unwrap();
+            assert_eq!(rows.len(), 1, "{rows:?}");
+            let row = &rows[0];
+            assert_eq!(row["n"], serde_json::json!(2));
+            (
+                (row["avg"].as_f64().unwrap() * 100.0).round() / 100.0,
+                row["unit"].as_str().unwrap().to_string(),
+            )
+        };
+        assert_eq!(mass(vec![]), (69.93, "kg".to_string()));
+        assert_eq!(
+            mass(vec![("BodyMass".into(), "lb".into())]),
+            (154.16, "lb".to_string())
+        );
+        // A unit that doesn't measure mass takes no reading.
+        assert!(
+            today_rows(&store, "2026-07-24", [("BodyMass".into(), "km".into())])
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

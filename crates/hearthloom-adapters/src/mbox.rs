@@ -370,11 +370,7 @@ fn message_to_draft(raw: &[u8], labels: &[String], scope: Option<&str>) -> Resul
         .map(|t| t.replace("\r\n", "\n"))
         .unwrap_or_default();
     if text.len() > BODY_CAP {
-        let mut cut = BODY_CAP;
-        while !text.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        text.truncate(cut);
+        text.truncate(text.floor_char_boundary(BODY_CAP));
         text.push_str("\n[truncated]");
     }
     let mut body = format!("subject: {subject}\n");

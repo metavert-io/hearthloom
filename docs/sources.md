@@ -15,9 +15,14 @@ General rules:
   `/v1/ingest/local` automatically.
 - Scope can be corrected later, in bulk:
   `hearthloom scope --by-source <source> <label>`.
-- The inbox drop folder `~/.hearthloom/inbox/` accepts zips, .mbox
+- The inbox drop folder `~/.hearthloom/inbox/` accepts zips, .tgz, .mbox
   (≤250MB), .ics, conversations.json, chat.db, Photos.sqlite — dragged
-  files ingest automatically.
+  files ingest automatically. Archives unpack only files and folders
+  (links and special files are left out) and only as far as the disk can
+  spare while keeping 1 GB free. A recognised export (ChatGPT, Facebook,
+  LinkedIn, Notion, Apple Health) is staged into `archives/<key>` for its
+  card's run-now — refused while that import is running; drop it again
+  when it has finished.
 - Importing a ChatGPT export again (either route) moves a conversation
   now flagged "do not remember" into the vault, even if it was stored
   before outside it — also when the branch it ended on has no turns left
@@ -79,6 +84,18 @@ General rules:
    behind the `apple-health` vquery handle.
 3. Re-import: newer export replaces the file, re-run — day aggregates
    and workouts dedupe by source_ref; the sidecar rebuilds.
+4. Units: each metric's day rollups are in one unit, named in
+   `daily.unit` (active energy kcal, exercise min, HRV ms; mass,
+   distance and glucose in the export's own unit). A sidecar an earlier
+   version built is brought up to date from its samples the first time
+   it's read (a minute's wait); a re-import rebuilds it whole, which
+   also re-reads device names (only "Apple Watch" names count as the
+   watch; an app like SleepWatch is a tracker of its own).
+5. Sleep: a night is one device's record — two trackers, or two
+   watches, on the same night never add up. The sidecar keeps sleep
+   stages per device (`daily.source` names the device for those rows).
+   Pulse's "today so far" point comes from the live device stream in
+   the unit the history is in (`/v1/health/today?unit.BodyMass=lb`).
 
 ## iMessage / Photos / Chrome / Claude Code (local, TCC)
 `POST /v1/ingest/local {"adapter":"imessage"|"photos"|"chrome"|"claude-code"}`
@@ -118,7 +135,20 @@ location index (GPS lines parsed at consolidation).
 ## Git / ICS / chatlog / Substack
 - `hearthloom ingest git <repo-path>` per repo (registered in sources;
   refreshed automatically ≤1/20h).
-- `.ics` files → drop folder, or `hearthloom ingest ics <file>`.
+- `.ics` files → drop folder, or `hearthloom ingest ics <file>`. A
+  recurring event becomes one episode per occurrence (RRULE/RDATE,
+  minus EXDATEs; an overridden occurrence comes from its override, and a
+  RANGE=THISANDFUTURE override carries on to the later ones), at most
+  3,660 per series. Only occurrences that have begun by the import are
+  made — a series' first one and an override's included (an event that
+  doesn't recur imports whatever its date): a stored episode keeps the
+  text it first landed with, so a later
+  move or cancellation of one still to come is picked up by importing
+  the file again later. Cancelled events and occurrences are left out.
+  Time zones: IANA names, Windows names (Outlook/Exchange) or the file's
+  own VTIMEZONE; a rule's start at a time a daylight-saving change skips
+  is no occurrence; an event that can't be read is skipped with a
+  warning and the rest of the file imports.
 - Claude/ChatGPT exports: `conversations.json` → drop folder
   (owner-aware via users.json).
 - Substack: `hearthloom ingest substack <publication-url>` (archive
