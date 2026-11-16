@@ -945,6 +945,9 @@ pub fn plugin_route_allowed(path: &str, method: &str, scopes: &[String]) -> bool
             // the owner's mail threads and rules (embers get mail through
             // their own `mail.watch` scope, never this)
             "/v1/mail",
+            // the sources the owner says are theirs, and the owner's
+            // addresses that decide them (the route checks the owner too)
+            "/v1/owned-sources",
         ];
         return path.starts_with("/v1/") && !DENIED.iter().any(|d| path.starts_with(d));
     }

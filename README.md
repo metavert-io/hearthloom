@@ -31,7 +31,7 @@ software.* (See `architecture.md` for how it is built.)
 ### Ingestion (14 adapters + importers, all idempotent)
 | Source | Command | What becomes an episode |
 |---|---|---|
-| Git repos | `hearthloom ingest git <path>` | each commit (author/repo/files as entities+edges) |
+| Git repos | `hearthloom ingest git <path>` | each commit (author/repo/files as entities+edges); outside text unless you mark the repository as yours (`hearthloom mine`) |
 | Calendars (.ics) | `hearthloom ingest ics <file>` | each event, and each occurrence of a recurring one that has begun by the import (import again later for the rest); cancelled ones are left out; attendee emails drive person identity |
 | Email (mbox/Takeout) | `hearthloom ingest mbox <file> [--include-labels "Sent,Category Personal,Starred"]` | each kept message, stored as decoded readable text (streaming — any size; Gmail-label strata filter, Spam/Trash always dropped; runs daemon-side in the background with progress in daemon.log) |
 | Claude.ai / ChatGPT exports | `hearthloom ingest chatlog <conversations.json>` | each conversation (account owner auto-detected from users.json) |
@@ -39,7 +39,7 @@ software.* (See `architecture.md` for how it is built.)
 | iMessage | `hearthloom ingest imessage` | one per chat per day (needs Full Disk Access) |
 | Apple Photos | `hearthloom ingest photos` | one per day: timestamps, GPS, reverse-geocoded places → a location trace (needs FDA) |
 | Chrome history | `hearthloom ingest chrome` | one per profile per day, with top-sites rollups |
-| Substack | `hearthloom ingest substack <url>` | each article, full text (public archive API; custom domains work) |
+| Substack | `hearthloom ingest substack <url>` | each article, full text (public archive API; custom domains work); outside text unless you mark the publication as yours |
 | Apple Health | `POST /v1/ingest/local` `{"adapter":"apple-health","path":…}` on an unzipped export | one `health_day` aggregate per day (activity/heart/sleep/body/glucose/mindfulness, source-priority deduped) + each workout/ECG/clinical record; raw samples go to the vquery sidecar, never the episode log |
 | ChatGPT full export | Integrations → ChatGPT (or the export zip in the inbox) | each conversation from the account export |
 | Facebook DYI dump | Integrations → Facebook (extracted archive) | posts (with place tags), albums, message thread-days, events, groups, profile identity attrs; the friends *list* goes to a connections registry, never straight to entities |
@@ -458,7 +458,20 @@ filtered fallback.
   browsing history, screen captures, chat assistants' replies, coding
   sessions, calendar invitations, scans and media titles are kept as
   *imported*, so reading them counts as reading something you didn't
-  write (Ask and agents then ask before acting).
+  write (Ask and agents then ask before acting). Git histories and
+  Substack publications are too — a repository holds every
+  contributor's commits — until you say which are yours: **This is mine**
+  on a repository or a post, Settings → *sources that are yours*, or
+  `hearthloom mine add git|substack <address>` (vault unlocked). In your
+  repository only commits by one of your own addresses count as yours —
+  not merges, commits co-written with anyone else (Claude Code's
+  `Co-authored-by` line included) or commits with one of your agents at
+  work anywhere between when they were first written and their last
+  rewrite; git doesn't check author addresses, so
+  mark only repositories whose history you control. Commits and posts
+  an earlier version imported stay outside text (their records can't
+  show what the check needs). Sources whose items mix authors can't be
+  marked.
 - Memories that reached a node from another one before 0.5.78 say only
   which node sent them.
 

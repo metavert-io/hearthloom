@@ -649,18 +649,11 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
             // v46: the profile card follows the record between peers
             // (LWW by its own stamp — edited on either node, wins by
             // recency on both).
-            if let (Ok(Some(card)), Ok(Some(stamp))) = (
-                state.store.consolidation_state("network.profile"),
-                state
-                    .store
-                    .consolidation_state("network.profile.updated_at"),
+            if let (Some(card), Some(obj)) = (
+                crate::http::profile_card_envelope(&state.store),
+                operational.as_object_mut(),
             ) {
-                if let Some(obj) = operational.as_object_mut() {
-                    obj.insert(
-                        "profile".into(),
-                        json!({"value": card, "updated_at": stamp}),
-                    );
-                }
+                obj.insert("profile".into(), card);
             }
             // The monthly spend budget rides along the same way; an empty
             // value is "no budget", and still wins if it is the newer word.
@@ -740,6 +733,13 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
                     if let Some(rule) = theirs.get("visit_rule") {
                         if let Err(err) = crate::visits::adopt_rule(&state.store, rule) {
                             tracing::warn!("visit rule from the peer not applied: {err:#}");
+                        }
+                    }
+                    // the profile card comes back too (its addresses decide
+                    // whose commits in an owned repository are the owner's)
+                    if let Some(card) = theirs.get("profile") {
+                        if let Err(err) = crate::http::adopt_profile_card(&state.store, card) {
+                            tracing::warn!("profile card from the peer not applied: {err:#}");
                         }
                     }
                     let (store, home) = (state.store.clone(), state.home.clone());

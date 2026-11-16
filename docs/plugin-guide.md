@@ -226,6 +226,9 @@ With `ingest`:
 | `POST /v1/sources/virtual` | register a virtual source (data stays at origin, queryable) |
 | `POST /v1/sources/virtual/{name}/promote` | materialize virtual items on demand |
 
+On all three the node records what you write under your ember's name
+(`plugin:<name>`), whatever `actor` the body gives.
+
 ### Secrets (always available)
 
 | route | purpose |

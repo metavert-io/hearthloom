@@ -28,7 +28,7 @@ function since(ts) {
   return `ran ${Math.round(hours / 24)}d ago`;
 }
 
-export async function mount(view, { api, apiPost }) {
+export async function mount(view, { api, apiPost, apiDelete, confirmDanger }) {
   const data = await api("/v1/settings/automations");
   const llmOk = data.llm_configured;
   const onboarding = await api("/v1/onboarding").catch(() => ({ state: "done" }));
@@ -78,6 +78,10 @@ export async function mount(view, { api, apiPost }) {
         <button class="btn" id="set-id-claim">claim it as mine</button>
       </div>
       <p class="meta" id="set-id-note" hidden></p>
+    </div>
+    <div class="card" id="set-owned-card">
+      <div class="section-title">sources that are yours</div>
+      <div id="set-owned"><div class="loading">…</div></div>
     </div>
     <p class="subhead">Each idle-time pass can be switched off, slowed down, or
       run on demand. Schedule changes apply from the next consolidation cycle
@@ -173,6 +177,12 @@ export async function mount(view, { api, apiPost }) {
     });
   };
   paintIdentities();
+  // "this source is mine" (owned.js): the repositories and publications
+  // whose text counts as your own words
+  import("/assets/owned.js")
+    .then(({ mountList }) => mountList(view.querySelector("#set-owned"),
+      { api, apiPost, apiDelete, confirmDanger }))
+    .catch(() => {});
   view.querySelector("#set-id-claim").onclick = async () => {
     const note = view.querySelector("#set-id-note");
     const name = view.querySelector("#set-id-name").value.trim();

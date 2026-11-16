@@ -92,7 +92,12 @@ workspace with `npm i playwright`) — screenshot + pageerror check.
 ## Layout
 
 - `crates/hearthloom-core` — schema (migrations via `PRAGMA user_version`,
-  **currently v67**: v67 `photo_replaced` (every key a photo point took
+  **currently v68**: v68 `owned_sources` ("this source is mine": the
+  repositories and publications the owner says are theirs, keyed per
+  source — git by remote host/path, substack by host; mirrored +
+  journaled like mail_rules, deterministic id from source + key; read
+  only when the taint checks run — see THIS SOURCE IS MINE), v67
+  `photo_replaced` (every key a photo point took
   the place of: a Mac scan records the key an earlier scan gave each photo
   — the library's file name — whether or not it is stored here, and moves
   a point stored under it to its original-name key, the phone's identity;
@@ -465,7 +470,8 @@ workspace with `npm i playwright`) — screenshot + pageerror check.
   held scopes and WITHHOLDS new ones unless granted — never grant what
   nobody named; exit codes 0/3/4/5/1 and the `--json` `status` strings
   are a contract scripts (minidash) depend on: don't renumber them),
-  `ember enable|disable|config`,
+  `ember enable|disable|config`, `mine list|add|remove` ("this source is
+  mine", v68 — `add` needs the vault unlocked),
   `notify`, `logs -f`, `completions`. **A command that talks to a node
   builds its client with `Client::with_url(home, url.clone())`** —
   `Client::new` ignores `--url` (query and a dozen others did until
@@ -795,6 +801,73 @@ the design log 2026-07-14.
   new such importer's source there, never trust its `self`. Owner-only
   views: the provenance names nodes and agents (`/v1/episode/{id}`'s
   owner branch, the CLI, Ask's `read_episode` line).
+- **THIS SOURCE IS MINE IS READ AT CHECK TIME, NEVER STORED (v68, core
+  `store/owned.rs`).** The owner's list (`owned_sources`) names parts of
+  sources in `OTHERS_WORDS_SOURCES` whose text is the owner's: a git
+  repository by its remote address (`git_repo_key`: host/path,
+  lowercased, no user name, no `.git`; a repo with no remote can't be
+  named), counting only commits whose author address (the body's
+  `author:` line, checked against the `commit`/`repo` lines and the ref —
+  `git_author`) is one of the owner's (`owner_emails`: every connected
+  mailbox on any node and its aliases from the synced node list, plus
+  the profile card's addresses — NEVER the owner Person's attributes,
+  which any commit naming the owner fills) and that carries no one
+  else's words (`git_commit_concern`: its record carries the adapter's
+  `committed:` and `parents:` head lines (`git_commit_head`) — a commit
+  an earlier version imported has neither, can't show whether it is a
+  merge or when it was made, and stays outside text (re-importing
+  doesn't replace it); not a merge — more than one parent, or a default
+  merge subject — no `Co-authored-by:` trailer naming another address
+  (Claude Code adds one), text read whole up to `COMMIT_TEXT_CHARS`) and
+  with no run of one of the owner's agent tasks anywhere from its author
+  date to its commit time (`agent_tasks` started_at → finished_at, open
+  while unfinished; an amend, rebase or cherry-pick keeps the author date
+  and sets the commit time, and the next one sets it again, so an agent's
+  rewrite in between leaves no time of its own — never go back to
+  checking the two times alone). Git doesn't check an author address, or either date —
+  anyone whose commit reaches a marked repository can write the owner's
+  — and the UI says so; never describe it as "commits by anyone else
+  stay outside". A substack publication by its host, every post counting
+  (guest posts too); the adapter keeps a post only under the host that
+  served the archive, after redirects, fetches its text there (a
+  `canonical_url` naming another host is left out) and writes that host
+  as the post's FIRST line (`served from: …`, `substack_served_from`) —
+  a post without it (an earlier version's, which filed posts under
+  whatever address the server's JSON gave) or naming another host stays
+  outside text.
+  `first_untrusted_episode` and `entity_names_unverified` (so
+  Ask's outbound gate, traverse names, and the agents' taint rule) judge
+  each candidate through `OwnedWords::covers`; stored trust never moves.
+  It fails closed: a writer other than the source's own importer
+  (`adapter:<source>` — only the owner may name an adapter, on
+  `/v1/ingest` AND the virtual-source register/promote routes an
+  ember's `ingest` key reaches; a peer's origin is believed only from a
+  peer key), an unknown writer, a trust other than `self`/`imported`, an
+  unreadable ref or author line, an unknown author or commit time, a
+  record without its parents or serving host, or no known owner address
+  all stay outside text. A new source joins only by
+  defining its key (and an author reader when items can have different
+  authors) in `OWNABLE_SOURCES`; one whose items mix authors or carry
+  fetched content goes in `NOT_OWNABLE` with its reason. Adding needs
+  `require_owner` AND an open vault (it relaxes the gate); removing needs
+  the owner. The owner's addresses are part of the gate: while a
+  repository is listed, adding one (profile card, a mailbox's aliases,
+  connecting a mailbox — its address and the aliases kept for it, which
+  a reconnect brings back; checked before the sign-in is tried and again
+  after it) needs the owner and an open vault too
+  (`http.rs::may_add_owner_addresses`), and every address change — a
+  disconnect too — is journaled into the list's history
+  (`owned_addresses_changed`, op `addresses`). These changes take turns
+  (`http.rs::owner_addresses_turn`, held from the last check until the
+  change is saved, published and journaled, never across an await): a
+  new route that changes the owner's addresses takes the turn too, or an
+  address taken off between a check and its save comes back. The list shows how many
+  stored memories each entry names (`owned_source_stored`), so an entry
+  that names none is visible. No MCP tool, ember route (it's on the ember
+  deny list) or scoped key reaches it (`test_no_key_but_the_owners_
+  reaches_the_list` runs requests through the router). A new taint check
+  must go through `OwnedWords` too, or it disagrees with Ask about whose
+  words a commit is.
 - **RETIREMENT IS SUPERSESSION BY NOTHING (v59, D.12 — design log
   2026-10-17).** A retired episode is marked `superseded_by =
   'retired:<retirement id>'` (core `store/retire.rs`), so EVERY reader that
@@ -1333,7 +1406,8 @@ the design log 2026-07-14.
   (`mail.draft`, plugin row only, like `mail.watch`) answers only a
   message its own queue holds, to the sender, ≤20 a day.
 - **THE SERVER NAMES EVERY WRITER THAT ISN'T THE OWNER (0.5.96).** On
-  `/v1/ingest` and every device feed, `http.rs::ingest_actor` decides the
+  `/v1/ingest`, every device feed and the virtual-source register and
+  promote routes (an ember's `ingest` key reaches both), `http.rs::ingest_actor` decides the
   actor: a peer by this node's name for it, an ember by its name, any
   other key via `write_actor` (`agent:key:<name>`, own-device keys
   `human:device:<name>`); only the owner names an adapter. MCP checks an
@@ -1571,9 +1645,11 @@ the design log 2026-07-14.
   sync.rs, the hub's GET /v1/sync/operational) — and the output must
   converge while the nodes still disagree: never let the setting shift
   refs that don't depend on it (the `c<n>` series), and sync any one-shot
-  decision it triggers (the cleanup start). Known gaps: `ingest.device.
-  scope` has no setter and doesn't sync; `profile` and `llm_budget` ride
-  the push leg only.
+  decision it triggers (the cleanup start). The profile card rides both
+  legs too (`http.rs::profile_card_envelope` / `adopt_profile_card`): its
+  addresses decide whose commits in an owned repository are the owner's.
+  Known gaps: `ingest.device.scope` has no setter and doesn't sync;
+  `llm_budget` rides the push leg only.
 - **PROPOSALS CAN'T CHOOSE HOW THEY LAND (0.5.71).** Outside proposals
   (MCP `propose_memory`, `/v1/propose`) pass `outside_proposal`: their
   words and a kind from `PROPOSAL_KINDS`; provenance fields are the

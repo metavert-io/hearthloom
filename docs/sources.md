@@ -152,7 +152,45 @@ location index (GPS lines parsed at consolidation).
 - Claude/ChatGPT exports: `conversations.json` → drop folder
   (owner-aware via users.json).
 - Substack: `hearthloom ingest substack <publication-url>` (archive
-  API; works on custom domains).
+  API; works on custom domains). A post is kept only under the host
+  that served the archive (after redirects); posts whose address names
+  another host are left out, and when all of them do the import says
+  which address to give instead.
+- Commits and posts are **outside text** (`imported`): a repository
+  holds every contributor's commits, and a publication address can name
+  anyone's newsletter. Reading outside text closes Ask's way to your
+  friends and makes agents ask before they act. Say which ones are yours
+  ("this source is mine"): Settings → *sources that are yours*, the
+  **This is mine** button on a repository's card or an opened commit or
+  post, or `hearthloom mine add git <remote address>` /
+  `hearthloom mine add substack <publication address>` (the vault must be
+  unlocked; `hearthloom mine` lists, `hearthloom mine remove` takes one
+  back). In a repository you mark, only commits whose author address is
+  one of yours count — a connected mailbox or its aliases, or an address
+  on your profile card (friends you share your profile with see the
+  card's addresses). Even then merges, commits co-written with anyone
+  else (a `Co-authored-by:` line, which Claude Code adds) and commits
+  written or rewritten (an amend, a rebase) while one of your agents was
+  at work stay outside text — and since a later rewrite hides when an
+  earlier one was made, so does any commit with an agent's run between
+  when it was first written and its last rewrite (a commit you rebase a
+  week after writing it stays out if an agent ran that week). Git
+  doesn't check author addresses: anyone
+  whose commit gets into the repository can put yours on it, so mark
+  only repositories whose history you control. While a repository is
+  marked, adding an address of yours (on the profile card, as an alias,
+  or by connecting a mailbox) needs the vault unlocked too, and address
+  changes show in the list's history. A repository with no remote
+  address can't be marked. Every post of a publication you mark counts,
+  guest posts included. Commits and posts imported by a version before
+  this setting existed stay outside text even when marked: their records
+  don't say a commit's parents or when it was made, or which host served
+  a post, and importing again doesn't replace a stored memory. The
+  list shows how many stored memories each entry names — none means the
+  entry changes nothing yet (a publication with its own domain files its
+  posts under that domain). Sources whose items mix authors (iMessage,
+  Chrome, Claude Code, chat exports, calendar invitations, scans, media)
+  can't be marked.
 
 ## What re-imports do NOT do
 - Never delete or rewrite existing episodes (append-only law).

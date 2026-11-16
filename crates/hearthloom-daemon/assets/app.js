@@ -258,6 +258,30 @@ function provenanceHtml(p) {
   return `<div class="episode-origin" aria-label="How it got here">${lines.join("")}</div>`;
 }
 
+/* ————— "this source is mine" (owned.js, v68): the inline control on a
+   repository's commit or a publication's post, and on a Project with a
+   remote address. Marking asks first and needs the vault open. ————— */
+const ownedHelpers = { api, apiPost, apiDelete, confirmDanger };
+function wireOwned(slot, id, ownable) {
+  if (!slot || !ownable) return;
+  import("/assets/owned.js").then(({ mountForEpisode }) =>
+    mountForEpisode(slot, ownable, ownedHelpers, async () => {
+      bodyCache.delete(id);
+      const fresh = await api(`/v1/episode/${id}`).catch(() => null);
+      if (fresh) bodyCache.set(id, fresh);
+      wireOwned(slot, id, fresh?.ownable);
+    })).catch(() => {});
+}
+function repoUrlsOf(attributes) {
+  return (attributes || []).filter(([k]) => k === "repo-url").map(([, v]) => v);
+}
+function wireOwnedRepos(container, urls) {
+  const slots = container.querySelectorAll(".owned-repo");
+  if (!slots.length) return;
+  import("/assets/owned.js").then(({ mountForAddress }) => slots.forEach((slot) =>
+    mountForAddress(slot, "git", urls[Number(slot.dataset.i)], ownedHelpers))).catch(() => {});
+}
+
 /* ————— expandable episode cards ————— */
 const bodyCache = new Map();
 async function toggleEpisode(card, id) {
@@ -279,8 +303,10 @@ async function toggleEpisode(card, id) {
         ${lifecycleControls(episode, id)}
       </div>
       ${provenanceHtml(episode.provenance)}
+      ${episode.ownable ? `<div class="owned-slot episode-origin"></div>` : ""}
       <div class="md">${md(episode.body || "(no content)")}</div>`;
     wireLifecycle(panel, episode, id, () => { bodyCache.delete(id); card.classList.add("retired-card"); });
+    wireOwned(panel.querySelector(".owned-slot"), id, episode.ownable);
   } catch (err) {
     panel.innerHTML = `<div class="meta">${esc(err.message)}</div>`;
   }
@@ -1255,7 +1281,7 @@ async function renderSettings() {
   view.innerHTML = `<div class="loading">finding the dials…</div>`;
   const { mount } = await import("/assets/settings.js");
   view.innerHTML = "";
-  await mount(view, { api, apiPost });
+  await mount(view, { api, apiPost, apiDelete, confirmDanger });
 }
 
 async function renderNetwork() {
@@ -1643,10 +1669,14 @@ async function renderEntity(name) {
       </div>
       <div>
         ${attrs ? `<div class="section-title">identities</div>${attrs}` : ""}
+        ${entity.entity_type === "Project" && repoUrlsOf(d.attributes).length ? `
+          <div class="section-title" style="margin-top:var(--s5)">is it yours?</div>
+          ${repoUrlsOf(d.attributes).map((_, i) => `<div class="owned-repo" data-i="${i}"></div>`).join("")}` : ""}
         <div class="section-title" style="margin-top:var(--s5)">relations</div>
         ${edges || `<div class="empty">none</div>`}
       </div>
     </div>`;
+  if (entity.entity_type === "Project") wireOwnedRepos(view, repoUrlsOf(d.attributes));
 
   // Relationships: chips (confirm/reject the predictions), declare,
   // and the idle-written brief.
@@ -1882,6 +1912,7 @@ async function openPersonModal(name) {
   }
   const entity = dossier.entity;
   const isProject = entity.entity_type === "Project";
+  const repoUrls = isProject ? repoUrlsOf(dossier.attributes) : [];
   // a Project's contained repos (its whole point) replace the
   // relationship section — projects have members, not relationships
   const projDetail = isProject
@@ -1932,6 +1963,11 @@ async function openPersonModal(name) {
       <button class="ask-close" id="pm-close">×</button>
     </div>
     ${isProject ? `
+    ${repoUrls.length ? `
+    <div class="pm-section">
+      <div class="pm-section-title">is it yours?</div>
+      ${repoUrls.map((_, i) => `<div class="owned-repo" data-i="${i}"></div>`).join("")}
+    </div>` : ""}
     <div class="pm-section">
       <div class="pm-section-title">description</div>
       ${projDetail?.primary_note
@@ -2002,6 +2038,7 @@ async function openPersonModal(name) {
     </div>`;
 
   overlay.querySelector("#pm-close").onclick = close;
+  wireOwnedRepos(overlay, repoUrls);
   // — sharing (v46): abbreviated two-way summary for a connected brain,
   // plus "share this relationship with…" for any person with confirmed
   // relationship rows (grants access to that row even when the
@@ -3674,8 +3711,10 @@ async function toggleBrowseEpisode(tr, id, colspan) {
         ${lifecycleControls(episode, id)}
       </div>
       ${provenanceHtml(episode.provenance)}
+      ${episode.ownable ? `<div class="owned-slot episode-origin"></div>` : ""}
       <div class="md">${md(episode.body || "(no content)")}</div>`;
     wireLifecycle(holder, episode, id, () => { bodyCache.delete(id); tr.classList.add("retired-row"); holder.remove(); });
+    wireOwned(holder.querySelector(".owned-slot"), id, episode.ownable);
   } catch (err) {
     holder.firstElementChild.innerHTML = `<div class="meta">${esc(err.message)}</div>`;
   }

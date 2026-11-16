@@ -132,6 +132,9 @@ const OPERATIONAL_TABLES: &[&str] = &[
     "mail_ember_views",
     // v65: reply drafts — asked for anywhere, written where Gmail is watched
     "mail_drafts",
+    // v68: the sources the owner says are theirs — the taint checks read
+    // them on every node, so every node must hold the same list
+    "owned_sources",
     // v46: item shares mirror between a user's own peers so a share
     // flagged on either node is served by the always-on one (shares
     // name the friend; they bite wherever a grant by that name lives).
@@ -193,6 +196,11 @@ const JOURNALED_KINDS: &[(&str, &str, &str)] = &[
         "COALESCE(updated_at, created_at, '')",
     ),
     ("privacy_rule", "privacy_rules", "COALESCE(created_at, '')"),
+    (
+        "owned_source",
+        "owned_sources",
+        "COALESCE(updated_at, created_at, '')",
+    ),
     (
         "self_model",
         "self_model",

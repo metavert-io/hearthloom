@@ -236,6 +236,8 @@ They are edited in place and cannot be rebuilt from episodes.
 - `self_model` (propositions about who the user is, each declared or
   inferred, gated by Tend)
 - `relationships`, `opportunities`, `privacy_rules`, `quarantine`
+- `owned_sources` (v68): the parts of sources others can write that the
+  user says are theirs (see "Trust in content")
 
 Because they are primary, every create, change and delete appends a
 full-content post-image to `op_journal`. That journal is what makes a
@@ -651,6 +653,44 @@ the user's words it read (`agent_tasks.inputs`) and everything it wrote
 (`outputs`); the first outside read taints it, and every later action
 waits for the user (the taint rule). A task on a harness Hearthloom can't
 see inside (Hermes, OpenClaw) is tainted from the moment it runs.
+
+What counts as the user's own words is decided when a check reads, not
+when the text lands: `trust = 'self'` from a source the user writes. A
+source others can write (`OTHERS_WORDS_SOURCES`: message threads, web
+titles, assistants' replies, invitations, scans, and also git histories
+and Substack publications) is outside text however it was stored — with
+one owner setting on top, "this source is mine" (v68,
+`store/owned.rs`). The user lists a repository (by its remote address)
+or a publication (by its host); within a listed repository, commits whose
+author address is one of the user's own (every connected mailbox and its
+aliases on any node, and the addresses on the user's profile card) count
+as the user's words — except merges, commits co-written with anyone else
+(a `Co-authored-by:` trailer, which Claude Code adds) and commits with
+a run of one of the user's agent tasks anywhere between their author
+date and their commit time (a rewrite keeps the author date and the
+last one sets the commit time, so an agent's rewrite in between leaves
+no time of its own).
+The git importer records each commit's parents and commit time for this;
+a commit an earlier version imported has neither and stays outside text.
+Git doesn't check an author address, so a listed repository is only as
+trustworthy as who can get commits into it. A listed publication counts
+whole, guest posts included; the Substack importer files a post only
+under the host that served it and records that host as the post's first
+line — a post an earlier version imported, without that line, stays
+outside text. The list is owner-only, needs the vault open to add to, is
+mirrored and journaled between the user's nodes, and is applied in
+`first_untrusted_episode` and `entity_names_unverified` — the two checks
+behind Ask's outbound gate, traverse names and the agents' taint rule.
+While a repository is listed, adding an address of the user's (on the
+profile card, as a mailbox's alias, or by connecting a mailbox) needs the
+vault open as well, and address changes appear in the list's history.
+Stored trust never changes, and every doubt (an unknown writer, a writer
+other than the source's own importer — an ember's write never passes for
+one —, an unreadable author line, no known address of the user's) keeps
+the text outside. Sources whose items mix authors or carry fetched
+content (iMessage, Chrome, Claude Code, chat exports, invitations, scans,
+media) can't be listed.
+
 Promoted content from untrusted origins is quarantined first.
 Credential-shaped tokens are redacted from everything Ask shows a model.
 Records keep every character as it arrived; text going to a model
@@ -796,6 +836,8 @@ history are in `CLAUDE.md` and the design log.
 
 **Privacy**
 - Every new read query carries the scope guard.
+- Whose words a text is gets decided at check time, through one judge
+  (`OwnedWords`) — never by rewriting stored trust.
 - Private never reaches a cloud pass or a persisted artifact.
 - Enforcement lives in the store and the tool layer, not in a prompt.
 

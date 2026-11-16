@@ -238,13 +238,26 @@ fn list_setting(raw: Option<String>) -> Vec<String> {
 }
 
 pub(crate) fn aliases(state: &AppState, mb: &Mailbox) -> Vec<String> {
+    aliases_of_id(state, &mb.id)
+}
+
+/// The aliases kept for a mailbox id — also while it isn't connected
+/// here: connecting the address again brings them back.
+pub(crate) fn aliases_of_id(state: &AppState, id: &str) -> Vec<String> {
     list_setting(
         state
             .store
-            .consolidation_state(&mb.id_key(KEY_ALIASES))
+            .consolidation_state(&format!("{KEY_ALIASES}.{id}"))
             .ok()
             .flatten(),
     )
+}
+
+/// Every address a mailbox gives the owner: its own and its aliases.
+pub(crate) fn addresses_of(state: &AppState, mb: &Mailbox) -> BTreeSet<String> {
+    let mut out: BTreeSet<String> = aliases(state, mb).into_iter().collect();
+    out.insert(mb.account());
+    out
 }
 
 /// Check and tidy a list of aliases: addresses, lowercased, each once, not
@@ -414,25 +427,16 @@ pub(crate) fn published(state: &AppState) -> Value {
 }
 
 /// Every address the owner's mail comes from: the mailboxes here and on the
-/// owner's other nodes, and the aliases listed on them.
+/// owner's other nodes, and the aliases listed on them. The node-list half
+/// is core's (`Store::owner_mailbox_addresses`), which the "this source is
+/// mine" check reads too: one list of the owner's addresses.
 pub(crate) fn owner_addresses(state: &AppState) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for mb in all() {
         out.insert(mb.account());
         out.extend(aliases(state, &mb));
     }
-    for node in state.store.nodes().unwrap_or_default() {
-        for m in node["roles"]["mailboxes"].as_array().into_iter().flatten() {
-            if let Some(a) = m["address"].as_str() {
-                out.insert(a.to_lowercase());
-            }
-            for a in m["aliases"].as_array().into_iter().flatten() {
-                if let Some(a) = a.as_str() {
-                    out.insert(a.to_lowercase());
-                }
-            }
-        }
-    }
+    out.extend(state.store.owner_mailbox_addresses().unwrap_or_default());
     out
 }
 

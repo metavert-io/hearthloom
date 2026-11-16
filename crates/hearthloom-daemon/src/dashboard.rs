@@ -199,6 +199,7 @@ pub async fn asset(Path(name): Path<String>) -> Response {
         "monitor.js" => (include_bytes!("../assets/monitor.js"), "text/javascript"),
         "agents.js" => (include_bytes!("../assets/agents.js"), "text/javascript"),
         "retire.js" => (include_bytes!("../assets/retire.js"), "text/javascript"),
+        "owned.js" => (include_bytes!("../assets/owned.js"), "text/javascript"),
         "spend.js" => (include_bytes!("../assets/spend.js"), "text/javascript"),
         "keys.js" => (include_bytes!("../assets/keys.js"), "text/javascript"),
         "about.js" => (include_bytes!("../assets/about.js"), "text/javascript"),

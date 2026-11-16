@@ -38,6 +38,7 @@ mod notes;
 mod notifications;
 mod observations;
 mod opportunities;
+mod owned;
 mod photo;
 mod plugins;
 mod privacy;
@@ -99,6 +100,12 @@ pub use notes::{NoteImport, NoteWriter, AGENT_ORIGIN, NATIVE_ORIGIN, RECIPE_KIND
 pub use notifications::{validate_link, NotificationRow};
 pub use observations::{ObservationIn, StoredObservation};
 pub use opportunities::OpportunityRow;
+pub use owned::{
+    git_author, git_commit_concern, git_commit_head, git_repo_key, key_of_ref, not_ownable_reason,
+    ownable, owned_id, owned_key, substack_host_key, substack_served_from, GitCommitHead,
+    Judgement as OwnedJudgement, OwnableSource, OwnedSourceChange, OwnedSourceRow, NOT_OWNABLE,
+    OWNABLE_SOURCES,
+};
 pub use photo::{keys_hash as photo_keys_hash, PhotoPointIn, StoredPhotoPoint};
 pub use plugins::PluginRow;
 pub use privacy::{PrivacyRule, PrivateMemory};
@@ -318,7 +325,7 @@ impl Drop for ReadScopeGuard {
     }
 }
 
-const SCHEMA_VERSION: i64 = 67;
+const SCHEMA_VERSION: i64 = 68;
 
 const SCHEMA_V1: &str = "
     -- L2: append-only ground truth. Raw content lives on disk at
@@ -2300,6 +2307,24 @@ impl Store {
                      by_key TEXT NOT NULL
                  );
                  CREATE INDEX idx_photo_replaced_by ON photo_replaced(by_key);",
+            )?;
+        }
+        if version < 68 {
+            // v68: "this source is mine" (store/owned.rs) — the parts of
+            // sources others can write (a repository, a publication) the
+            // owner says are theirs. Read when the taint checks run; stored
+            // trust never changes. Owner-only; mirrored + journaled like
+            // mail_rules. The id hashes (source, key), so every node that
+            // adds the same entry makes the same row.
+            conn.execute_batch(
+                "CREATE TABLE owned_sources (
+                     id TEXT PRIMARY KEY,
+                     source TEXT NOT NULL,
+                     key TEXT NOT NULL,
+                     set_by TEXT NOT NULL,
+                     created_at TEXT NOT NULL,
+                     updated_at TEXT NOT NULL
+                 );",
             )?;
         }
         if version < SCHEMA_VERSION {
