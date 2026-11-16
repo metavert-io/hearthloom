@@ -1086,7 +1086,7 @@ impl Store {
             let mut stmt = conn.prepare(&format!(
                 "SELECT * FROM {table} WHERE synced_at > ?1 ORDER BY synced_at LIMIT 500"
             ))?;
-            let cols: Vec<String> = stmt.column_names().into_iter().map(String::from).collect();
+            let cols: Vec<String> = stmt.column_names().map(String::from).collect();
             let rows = stmt.query_map([since], |row| {
                 let mut obj = serde_json::Map::new();
                 for (i, c) in cols.iter().enumerate() {

@@ -281,7 +281,7 @@ pub fn query(sidecar: &Path, sql: &str, max_rows: usize) -> Result<(Vec<String>,
         return Err(not_yet_current(sidecar));
     }
     let mut stmt = conn.prepare(trimmed)?;
-    let columns: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
+    let columns: Vec<String> = stmt.column_names().map(|c| c.to_string()).collect();
     let n = columns.len();
     let mut rows_out = Vec::new();
     let mut rows = stmt.query([])?;

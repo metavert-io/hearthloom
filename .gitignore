@@ -1,7 +1,6 @@
 /target
 node_modules/
 .env
-VIBECTL.md
 /inbox
 
 audit.md

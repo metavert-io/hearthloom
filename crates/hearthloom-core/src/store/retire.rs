@@ -190,7 +190,7 @@ fn sql_value(v: &Value) -> rusqlite::types::Value {
 /// Every row a one-parameter statement returns, as JSON objects.
 fn rows_json(conn: &Connection, sql: &str, param: &str) -> Result<Vec<Value>> {
     let mut stmt = conn.prepare(sql)?;
-    let cols: Vec<String> = stmt.column_names().into_iter().map(String::from).collect();
+    let cols: Vec<String> = stmt.column_names().map(String::from).collect();
     let rows = stmt.query_map([param], |row| {
         let mut obj = serde_json::Map::new();
         for (i, c) in cols.iter().enumerate() {
@@ -2443,7 +2443,7 @@ mod tests {
             }
             let r = store.retire(&actor, "source", "facebook", &[], "").unwrap();
             store.retirement_apply(&r.id).unwrap();
-            let saved: usize = store
+            let saved: i64 = store
                 .lock()
                 .query_row(
                     "SELECT COUNT(*) FROM retirement_rows
@@ -2452,7 +2452,7 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert_eq!(saved, stored);
+            assert_eq!(saved, stored as i64);
             let late = vec![draft("facebook", "late", "a late post", vec![], vec![])];
             let work = super::super::trace::work_of(&store, || ingest(&store, &home, late));
             assert_eq!(

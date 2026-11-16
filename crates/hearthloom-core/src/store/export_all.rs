@@ -222,7 +222,7 @@ impl Store {
     pub fn dump_table_page(&self, table: &str, offset: i64, limit: i64) -> Result<Vec<Value>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(&format!("SELECT * FROM \"{table}\" LIMIT ?1 OFFSET ?2"))?;
-        let cols: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
+        let cols: Vec<String> = stmt.column_names().map(|c| c.to_string()).collect();
         let rows = stmt.query_map(rusqlite::params![limit, offset], |row| {
             let mut obj = Map::new();
             for (i, col) in cols.iter().enumerate() {

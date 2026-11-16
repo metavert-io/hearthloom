@@ -448,7 +448,7 @@ impl Store {
         let mut out = serde_json::Map::new();
         for table in OPERATIONAL_TABLES {
             let mut stmt = conn.prepare(&format!("SELECT * FROM {table}"))?;
-            let cols: Vec<String> = stmt.column_names().into_iter().map(String::from).collect();
+            let cols: Vec<String> = stmt.column_names().map(String::from).collect();
             let rows = stmt.query_map([], |row| {
                 let mut obj = serde_json::Map::new();
                 for (i, col) in cols.iter().enumerate() {
