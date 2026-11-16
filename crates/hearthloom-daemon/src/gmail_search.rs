@@ -50,32 +50,56 @@ static SESSIONS: Mutex<BTreeMap<String, GmailSearch>> = Mutex::new(BTreeMap::new
 
 fn with_session<T>(mb: &Mailbox, f: impl Fn(&mut GmailSearch) -> Result<T>) -> Result<T> {
     mailboxes::check_refused(mb)?;
-    let mut guard = SESSIONS.lock().unwrap_or_else(|p| p.into_inner());
-    // a warm session first; on any error, one fresh session
-    if let Some(session) = guard.get_mut(&mb.id) {
+    let connect = || {
+        GmailSearch::connect(&mb.address, mb.password()).map_err(|e| {
+            if is_auth_failure(&e) {
+                // stop trying it; its watch tells the owner (mailboxes.rs)
+                mailboxes::refuse(None, mb, &e);
+                anyhow!(
+                    "Gmail refused the sign-in for {} (reconnect it on the Integrations page)",
+                    mb.address
+                )
+            } else {
+                e
+            }
+        })
+    };
+    warm_call(&SESSIONS, &mb.id, connect, f)
+}
+
+/// A session kept warm per mailbox.
+trait Warm {
+    /// Close it with a LOGOUT — only one that is working.
+    fn logout(self);
+}
+
+impl Warm for GmailSearch {
+    fn logout(self) {
+        GmailSearch::logout(self)
+    }
+}
+
+/// `f` on the warm session of `id`; on any error, once on a fresh one
+/// (`connect`), which stays warm. A session that failed is dropped, never
+/// logged out: it may be the one that stalled, and a LOGOUT on it would wait
+/// out its deadline again — with `sessions` held, which every mailbox's
+/// lookups wait on.
+fn warm_call<S: Warm, T>(
+    sessions: &Mutex<BTreeMap<String, S>>,
+    id: &str,
+    connect: impl FnOnce() -> Result<S>,
+    f: impl Fn(&mut S) -> Result<T>,
+) -> Result<T> {
+    let mut guard = sessions.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(session) = guard.get_mut(id) {
         match f(session) {
             Ok(v) => return Ok(v),
-            Err(_) => {
-                if let Some(old) = guard.remove(&mb.id) {
-                    old.logout();
-                }
-            }
+            Err(_) => drop(guard.remove(id)),
         }
     }
-    let mut session = GmailSearch::connect(&mb.address, mb.password()).map_err(|e| {
-        if is_auth_failure(&e) {
-            // stop trying it; its watch tells the owner (mailboxes.rs)
-            mailboxes::refuse(None, mb, &e);
-            anyhow!(
-                "Gmail refused the sign-in for {} (reconnect it on the Integrations page)",
-                mb.address
-            )
-        } else {
-            e
-        }
-    })?;
+    let mut session = connect()?;
     let out = f(&mut session);
-    guard.insert(mb.id.clone(), session);
+    guard.insert(id.to_string(), session);
     out
 }
 
@@ -89,7 +113,7 @@ pub fn reset(id: Option<&str>) {
     };
     drop(guard);
     for old in gone {
-        old.logout();
+        Warm::logout(old);
     }
 }
 
@@ -437,6 +461,64 @@ pub fn accounts() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A warm session whose call fails is dropped, not logged out, and the
+    /// call is made once on a fresh session, which stays warm.
+    #[test]
+    fn test_a_failed_warm_session_is_dropped_not_logged_out() {
+        type Log = std::sync::Arc<Mutex<Vec<String>>>;
+        struct Fake {
+            name: &'static str,
+            works: bool,
+            log: Log,
+        }
+        impl Fake {
+            fn note(&self, what: &str) {
+                if let Ok(mut log) = self.log.lock() {
+                    log.push(format!("{what} {}", self.name));
+                }
+            }
+        }
+        impl Warm for Fake {
+            fn logout(self) {
+                self.note("logout");
+            }
+        }
+        impl Drop for Fake {
+            fn drop(&mut self) {
+                self.note("drop");
+            }
+        }
+        let log: Log = Default::default();
+        let sessions = Mutex::new(BTreeMap::from([(
+            "box".to_string(),
+            Fake {
+                name: "stalled",
+                works: false,
+                log: log.clone(),
+            },
+        )]));
+        let call = |s: &mut Fake| {
+            if s.works {
+                Ok(s.name)
+            } else {
+                Err(anyhow!("timed out"))
+            }
+        };
+        let fresh = || {
+            Ok(Fake {
+                name: "fresh",
+                works: true,
+                log: log.clone(),
+            })
+        };
+        assert_eq!(warm_call(&sessions, "box", fresh, call).unwrap(), "fresh");
+        let happened = log.lock().unwrap().clone();
+        assert_eq!(happened, vec!["drop stalled".to_string()]);
+        // the fresh one is warm now: no new connection
+        let never = || -> Result<Fake> { panic!("connected again") };
+        assert_eq!(warm_call(&sessions, "box", never, call).unwrap(), "fresh");
+    }
 
     #[test]
     fn test_a_uid_path_names_its_mailbox() {

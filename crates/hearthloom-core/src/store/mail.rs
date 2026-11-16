@@ -228,6 +228,19 @@ pub fn thread_id_for(root: &str) -> String {
     )
 }
 
+/// Whether a message dated `date` was written before a thread's latest
+/// (`last_at`). A date either side can't read says no: the message is
+/// taken as the latest, as on arrival. So does a latest dated after now: a
+/// Date header is its sender's choice, and one set in the future would
+/// otherwise keep every message after it from becoming the thread's latest.
+fn written_before(date: Option<&str>, last_at: Option<&str>) -> bool {
+    let read = |d: Option<&str>| d.and_then(|d| chrono::DateTime::parse_from_rfc3339(d).ok());
+    matches!(
+        (read(date), read(last_at)),
+        (Some(d), Some(last)) if d < last && last.with_timezone(&chrono::Utc) <= chrono::Utc::now()
+    )
+}
+
 fn rule_matches(rule: &MailRule, seen: &MailSeen) -> bool {
     let p = rule.pattern.to_lowercase();
     match rule.kind.as_str() {
@@ -326,11 +339,11 @@ impl Store {
             .unwrap_or(&seen.message_id)
             .clone();
         let id = thread.unwrap_or_else(|| thread_id_for(&root));
-        let existing: Option<(String, String)> = conn
+        let existing: Option<(String, String, Option<String>)> = conn
             .query_row(
-                "SELECT state, scope FROM mail_threads WHERE id = ?1",
+                "SELECT state, scope, last_at FROM mail_threads WHERE id = ?1",
                 [&id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
         let rule_state = rule
@@ -369,7 +382,25 @@ impl Store {
                     ],
                 )?;
             }
-            Some((state, old_scope)) => {
+            Some((_, old_scope, last_at))
+                if written_before(seen.date.as_deref(), last_at.as_deref()) =>
+            {
+                // An earlier message seen only now (its labels changed, so
+                // it is observed again): it joins the thread, and the
+                // thread's latest message — what triage reads — stays.
+                let scope = if old_scope == "private" {
+                    "private"
+                } else {
+                    scope
+                };
+                conn.execute(
+                    "UPDATE mail_threads SET message_count = message_count + 1, scope = ?2,
+                         updated_at = ?3
+                     WHERE id = ?1",
+                    rusqlite::params![id, scope, now],
+                )?;
+            }
+            Some((state, old_scope, _)) => {
                 let next = if seen.from_me {
                     if OPEN_STATES.contains(&state.as_str()) || state == "new" {
                         "replied".to_string()
@@ -815,6 +846,85 @@ mod tests {
         assert_eq!((th.state.as_str(), th.message_count), ("new", 3));
         // the id is the same on every node: a hash of the root
         assert_eq!(t, thread_id_for("m1@x"));
+    }
+
+    /// A message that becomes a thread's member only later (it gained a
+    /// label, so it was observed again) joins and counts, but an earlier
+    /// one leaves the thread's latest message, its text and its state.
+    #[test]
+    fn test_an_earlier_message_observed_later_keeps_the_threads_latest() {
+        let (s, _t) = store();
+        let a = Actor::new("adapter:test");
+        // the original isn't Primary: no thread yet
+        let mut original = msg("o1@x", "Ann", false);
+        original.date = Some("2026-11-01T09:00:00-04:00".into());
+        original.snippet = "the first draft of the lease".into();
+        assert!(s.mail_observe(&a, &original).unwrap().is_none());
+        // a Primary reply to it makes the thread (rooted at the original)
+        let mut reply = msg("r1@x", "Ann", true);
+        reply.date = Some("2026-11-05T10:00:00Z".into());
+        reply.references = vec!["o1@x".into()];
+        let t = s.mail_observe(&a, &reply).unwrap().unwrap();
+        assert_eq!(t, thread_id_for("o1@x"));
+        // the original, starred now, is observed again
+        original.primary = true;
+        assert_eq!(
+            s.mail_observe(&a, &original).unwrap().as_deref(),
+            Some(t.as_str())
+        );
+        let th = s.mail_thread(&t).unwrap().unwrap();
+        assert_eq!(th.last_message_id.as_deref(), Some("r1@x"));
+        assert_eq!(th.last_at.as_deref(), Some("2026-11-05T10:00:00Z"));
+        assert_eq!(th.snippet, "Can you send it by Friday?");
+        assert_eq!((th.state.as_str(), th.message_count), ("new", 2));
+        // an earlier message of the owner's doesn't mark it replied
+        let mut sent = msg("s1@x", "Me", false);
+        sent.from_me = true;
+        sent.date = Some("2026-11-02T09:00:00Z".into());
+        sent.references = vec!["o1@x".into()];
+        s.mail_observe(&a, &sent).unwrap();
+        let th = s.mail_thread(&t).unwrap().unwrap();
+        assert_eq!(th.last_message_id.as_deref(), Some("r1@x"));
+        assert_eq!((th.state.as_str(), th.message_count), ("new", 3));
+        // a later one does
+        sent.message_id = "s2@x".into();
+        sent.date = Some("2026-11-06T09:00:00Z".into());
+        s.mail_observe(&a, &sent).unwrap();
+        let th = s.mail_thread(&t).unwrap().unwrap();
+        assert_eq!(th.last_message_id.as_deref(), Some("s2@x"));
+        assert_eq!(th.state, "replied");
+    }
+
+    /// A message its sender dated in the future doesn't hold its thread
+    /// back: the messages after it, dated now, still become the latest —
+    /// the owner's answer marks it replied, a new one asks for a look again.
+    #[test]
+    fn test_a_future_dated_message_does_not_hold_its_thread_back() {
+        let (s, _t) = store();
+        let a = Actor::new("adapter:test");
+        let hours_ago = |h: i64| (chrono::Utc::now() - chrono::Duration::hours(h)).to_rfc3339();
+        let mut first = msg("f1@x", "Ann", true);
+        first.date = Some("2099-01-01T00:00:00Z".into());
+        let t = s.mail_observe(&a, &first).unwrap().unwrap();
+        // the owner answers
+        let mut sent = msg("s1@x", "Me", false);
+        sent.from_me = true;
+        sent.date = Some(hours_ago(2));
+        sent.references = vec!["f1@x".into()];
+        s.mail_observe(&a, &sent).unwrap();
+        let th = s.mail_thread(&t).unwrap().unwrap();
+        assert_eq!(th.last_message_id.as_deref(), Some("s1@x"));
+        assert_eq!(th.state, "replied");
+        // Ann writes again
+        let mut again = msg("r1@x", "Ann", true);
+        again.date = Some(hours_ago(1));
+        again.references = vec!["f1@x".into(), "s1@x".into()];
+        again.snippet = "Thanks, see you then".into();
+        s.mail_observe(&a, &again).unwrap();
+        let th = s.mail_thread(&t).unwrap().unwrap();
+        assert_eq!(th.last_message_id.as_deref(), Some("r1@x"));
+        assert_eq!(th.snippet, "Thanks, see you then");
+        assert_eq!((th.state.as_str(), th.message_count), ("new", 3));
     }
 
     /// Several mailboxes (0.5.98): a node sorts only the threads of the

@@ -1406,6 +1406,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "hearthloom-core",
+ "icu_normalizer",
  "imap",
  "imap-proto",
  "mail-parser",

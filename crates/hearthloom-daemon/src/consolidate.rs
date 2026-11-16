@@ -2671,6 +2671,58 @@ fn first_trkpt(gpx: &str) -> Option<(f64, f64)> {
     ((-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon)).then_some((lat, lon))
 }
 
+/// How the idle refresh lands one source's drafts (or logs its error).
+type ApplyDrafts<'a> =
+    dyn FnMut(&str, anyhow::Result<Vec<EpisodeDraft>>) -> anyhow::Result<()> + 'a;
+
+/// The idle refresh's git leg. Each repo is read past the commit this node
+/// last read it to (node-local watermarks in consolidation_state, set only
+/// once the drafts landed); an unmoved HEAD costs one `git rev-parse`. A
+/// checkout one of this node's agents works in — its folder inside the
+/// checkout, or the checkout inside its folder — is left out: the agent
+/// commits there under the owner's git identity, and an agent's work is
+/// never the owner's words (a commit in a repository the owner marked as
+/// theirs would count as theirs).
+fn refresh_git_repos(
+    store: &Store,
+    repos: &[String],
+    agent_dirs: &[std::path::PathBuf],
+    apply: &mut ApplyDrafts,
+) -> anyhow::Result<()> {
+    for repo in repos {
+        let path = std::path::Path::new(repo);
+        if !path.join(".git").exists() {
+            continue;
+        }
+        if agent_may_work_in(path, agent_dirs) {
+            tracing::debug!("refresh git: {repo} is an agent's working folder — left out");
+            continue;
+        }
+        let key = format!("refresh.git:{repo}");
+        let mark = store.consolidation_state(&key)?;
+        match hearthloom_adapters::git::ingest_new(path, None, mark.as_deref()) {
+            Ok(read) => {
+                apply("git", Ok(read.drafts))?;
+                if mark.as_deref() != Some(read.mark.as_str()) {
+                    store.set_consolidation_state(&key, &read.mark)?;
+                }
+            }
+            Err(err) => apply("git", Err(err))?,
+        }
+    }
+    Ok(())
+}
+
+/// Does a checkout overlap one of the agents' working folders (either
+/// inside the other), as written or as the OS resolves it?
+fn agent_may_work_in(repo: &std::path::Path, agent_dirs: &[std::path::PathBuf]) -> bool {
+    let real = repo.canonicalize().ok();
+    let forms = std::iter::once(repo).chain(real.as_deref());
+    forms
+        .flat_map(|r| agent_dirs.iter().map(move |d| (r, d)))
+        .any(|(r, d)| r.starts_with(d) || d.starts_with(r))
+}
+
 /// Re-run the local adapters over known sources. Returns per-source new
 /// episode counts (Null when skipped because a refresh ran recently).
 async fn refresh_local_sources(state: &AppState, actor: &Actor) -> anyhow::Result<Value> {
@@ -2727,25 +2779,7 @@ async fn refresh_local_sources(state: &AppState, actor: &Actor) -> anyhow::Resul
             Ok(())
         };
 
-        // Each repo is read past the commit this node last read it to
-        // (node-local watermarks in consolidation_state, set only once the
-        // drafts landed); an unmoved HEAD costs one `git rev-parse`.
-        for repo in &repos {
-            let path = std::path::Path::new(repo);
-            if path.join(".git").exists() {
-                let key = format!("refresh.git:{repo}");
-                let mark = store.consolidation_state(&key)?;
-                match hearthloom_adapters::git::ingest_new(path, None, mark.as_deref()) {
-                    Ok(read) => {
-                        apply("git", Ok(read.drafts))?;
-                        if mark.as_deref() != Some(read.mark.as_str()) {
-                            store.set_consolidation_state(&key, &read.mark)?;
-                        }
-                    }
-                    Err(err) => apply("git", Err(err))?,
-                }
-            }
-        }
+        refresh_git_repos(&store, &repos, &agent_dirs, &mut apply)?;
         if let Ok(homedir) = std::env::var("HOME") {
             // An agent's sessions are not the owner's words: those in this
             // node's agent folders (and any opening with the agent preamble)
@@ -3814,6 +3848,54 @@ mod tests {
             );
         }
         assert!(state.store.episode(&poison).unwrap().is_some());
+    }
+
+    /// The idle refresh leaves out a checkout one of this node's agents
+    /// works in — the folder itself, one inside the checkout, or one that
+    /// holds it — and reads every other.
+    #[test]
+    fn test_the_idle_refresh_leaves_out_an_agents_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let repo = root.join("work");
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Owner Name")
+                .env("GIT_AUTHOR_EMAIL", "me@own.example")
+                .env("GIT_COMMITTER_NAME", "Owner Name")
+                .env("GIT_COMMITTER_EMAIL", "me@own.example")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(repo.join("sub/a.txt"), "a").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "a change"]);
+        let home = Home::at(root.join("home"));
+        home.init().unwrap();
+        let store = Store::open(&home.db_path()).unwrap();
+        let repos = vec![repo.display().to_string()];
+        let read = |agent_dirs: &[std::path::PathBuf]| -> usize {
+            let mut drafts = 0;
+            refresh_git_repos(&store, &repos, agent_dirs, &mut |_, read| {
+                drafts += read?.len();
+                Ok(())
+            })
+            .unwrap();
+            drafts
+        };
+        for dir in [repo.clone(), repo.join("sub"), root.clone()] {
+            assert_eq!(read(std::slice::from_ref(&dir)), 0, "{}", dir.display());
+        }
+        let mark = format!("refresh.git:{}", repos[0]);
+        assert!(store.consolidation_state(&mark).unwrap().is_none());
+        assert_eq!(read(&[root.join("elsewhere"), root.join("work2")]), 1);
+        assert!(store.consolidation_state(&mark).unwrap().is_some());
     }
 
     #[test]

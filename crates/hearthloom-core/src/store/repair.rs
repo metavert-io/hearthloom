@@ -202,13 +202,23 @@ struct Copy {
     /// Who wrote it: its recorded origin's writer, else (stored before
     /// origins were recorded) the batch actor, unless that was a peer.
     writer: Option<String>,
-    /// A replacement: when it was written (its origin's `at`) and the run
+    /// A replacement: when it was asked for (see `COPY_COLUMNS`) and the run
     /// that made it. None for the base.
     replacement: Option<(String, Option<String>)>,
 }
 
+/// A copy's columns. A replacement's time is when the newest run that made
+/// it began (`repairs.created_at` over `repair_copies` — rows and sets every
+/// node converges on), else when it was written here (its origin's `at`,
+/// which is the first arrival's and differs per node): two nodes that make
+/// the same correction under runs of their own rank it alike once the runs
+/// have synced.
 const COPY_COLUMNS: &str = "e.id, e.source_ref, e.title, e.content_ref, e.superseded_by, e.scope,
-     e.scope_changed_at, e.trust, o.writer, o.session, o.at, e.event_time, e.actor";
+     e.scope_changed_at, e.trust, o.writer, o.session,
+     COALESCE(CASE WHEN o.writer = 'repair:owner' THEN (
+         SELECT MAX(r.created_at) FROM repair_copies c JOIN repairs r ON r.id = c.run
+         WHERE c.episode_id = e.id) END, o.at),
+     e.event_time, e.actor";
 
 type CopyRow = (Copy, Option<String>, Option<String>, Option<String>);
 
@@ -265,12 +275,35 @@ fn record(conn: &Connection, source: &str, base: &str) -> Result<Vec<Copy>> {
 /// Record that the run `run` made the copy `episode_id` (`repair_copies`,
 /// v71). Every copy the owner repair writes lands through `apply_batch_as`,
 /// which records it under the run its origin names; the runs' rows carry
-/// the set to every node, which unions it.
+/// the set to every node, which unions it. Stamped when it was recorded
+/// here (`recorded_at`, the relay stamp's clock): the leg sends with a run
+/// only the copies recorded since the peer's cursor, so whoever records a
+/// copy of a run stored here stamps the run again in the same transaction
+/// ([`restamp_runs`]).
 pub(crate) fn record_copy(conn: &Connection, run: &str, episode_id: &str) -> Result<bool> {
     Ok(conn.execute(
-        "INSERT OR IGNORE INTO repair_copies (run, episode_id) VALUES (?1, ?2)",
+        &format!(
+            "INSERT OR IGNORE INTO repair_copies (run, episode_id, recorded_at)
+             VALUES (?1, ?2, {})",
+            super::RELAY_NOW
+        ),
         params![run, episode_id],
     )? > 0)
+}
+
+/// Stamp these runs again (their relay stamp moves), so the repairs leg
+/// carries the copies just recorded under them. A run not stored here yet
+/// is stamped when its row arrives (`upsert_run`).
+pub(crate) fn restamp_runs<'a>(
+    conn: &Connection,
+    runs: impl IntoIterator<Item = &'a String>,
+) -> Result<()> {
+    let mut bump =
+        conn.prepare_cached("UPDATE repairs SET updated_at = updated_at WHERE id = ?1")?;
+    for run in runs {
+        bump.execute([run])?;
+    }
+    Ok(())
 }
 
 /// Did a run that was undone make the copy `episode_id` — on this node or
@@ -338,9 +371,9 @@ fn undone_copies(conn: &Connection, copies: &[Copy]) -> Result<HashSet<String>> 
     Ok(out)
 }
 
-/// The copy that stands for the record: the newest replacement (by when it
-/// was written, then by ref, so every node picks the same) whose run isn't
-/// undone, else the base.
+/// The copy that stands for the record: the newest replacement (by when the
+/// newest run that made it began, then by ref, so every node picks the
+/// same) whose run isn't undone, else the base.
 fn standing<'a>(copies: &'a [Copy], undone: &HashSet<String>) -> Option<&'a Copy> {
     copies
         .iter()
@@ -516,6 +549,21 @@ fn record_of(conn: &Connection, episode_id: &str) -> Result<Option<(String, Stri
     Ok(Some((source, base)))
 }
 
+/// The ids of the corrected copies the owner repair stored of the record
+/// whose base ref is `base` (none for a source no repair reaches). A label
+/// asked for the record by its ref reaches them also where the base itself
+/// isn't stored (`label_private_on_reimport`).
+pub(crate) fn replacement_ids(conn: &Connection, source: &str, base: &str) -> Result<Vec<String>> {
+    if !REPAIRABLE_SOURCES.contains(&source) {
+        return Ok(Vec::new());
+    }
+    Ok(record(conn, source, base)?
+        .into_iter()
+        .filter(|c| c.replacement.is_some())
+        .map(|c| c.id)
+        .collect())
+}
+
 /// The other stored copies of the repaired record `episode_id` belongs to
 /// (empty when it has none); None for an episode of a source no repair
 /// reaches. What retiring it retires with it, and what a private label on
@@ -534,7 +582,9 @@ pub(crate) fn other_copies(conn: &Connection, episode_id: &str) -> Result<Option
 }
 
 /// A label the owner took a copy of a repaired record out of the vault
-/// with — given with the vault open (`set_episode_scopes`) — holds for the
+/// with — given with the vault open (`set_episode_scopes`, which passes
+/// only the copies that relabel took out: one outside already, or left as
+/// it was, takes nothing out with it) — holds for the
 /// record: its other copies still private under an older (or no) stamp take
 /// it, with the same stamp, so the scope leg carries it to every node. The
 /// copies are one item (one message, event, conversation or day, read
@@ -753,7 +803,8 @@ pub struct RepairApplied {
     /// Photo-day ledgers set.
     pub ledgers: usize,
     /// Records the caller put into the vault alongside the run (a ChatGPT
-    /// conversation flagged "do not remember").
+    /// conversation flagged "do not remember"), with the other copies of
+    /// them the label reached.
     pub made_private: usize,
     /// Corrected copies, re-mints and additions stored already.
     pub existing: usize,
@@ -788,6 +839,18 @@ fn run_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RepairRun> {
         undone_at: r.get(7)?,
         updated_at: r.get(8)?,
     })
+}
+
+/// The runs with a copy recorded here after the stamp `?1` and up to `?2`
+/// (`repairs_sync_export`, on every poll): found by
+/// `idx_repair_copies_recorded`, never by reading every copy recorded.
+fn runs_recorded_between_sql() -> String {
+    format!(
+        "SELECT {RUN_COLUMNS} FROM repairs
+         WHERE id IN (SELECT run FROM repair_copies
+                      WHERE recorded_at > ?1 AND recorded_at <= ?2)
+         ORDER BY synced_at"
+    )
 }
 
 fn state_key(run: &str) -> String {
@@ -890,7 +953,6 @@ fn prior_of_retired(conn: &Connection, episode_id: &str, mark: &str) -> Result<O
 struct Revised {
     id: String,
     source_ref: String,
-    content_ref: Option<String>,
     superseded_by: Option<String>,
     undone: bool,
 }
@@ -907,31 +969,34 @@ struct Revised {
 /// Chrome day behind the profile day that holds it) stays there. A retired
 /// copy keeps its retirement; what its undo restores is set the same way.
 /// With no undone copy, a photo day's correction this node couldn't check
-/// when it arrived is checked again (`photo::settle_repair_copy`). Returns
-/// the copies whose state changed.
+/// when it arrived is checked again (`photo::settle_repair_copy`). `texts`:
+/// the texts of a growing source's copies whose refs don't say what they
+/// hold, read before the store was taken (`growing::settle_texts`) — a copy
+/// that wasn't read (it arrived since) fails the settling, which the run's
+/// next catch-up does again. Returns the copies whose state changed.
 pub(crate) fn settle_revisions(
     conn: &Connection,
     home: &Home,
     source: &str,
     base: &str,
+    texts: &super::growing::ReadTexts,
 ) -> Result<usize> {
     let mut stmt = conn.prepare_cached(&format!(
-        "SELECT id, source_ref, content_ref, superseded_by FROM episodes /* all-episodes: every copy of a re-minted record, in any state */
+        "SELECT id, source_ref, superseded_by FROM episodes /* all-episodes: every copy of a re-minted record, in any state */
          WHERE source = ?1 AND (source_ref = ?2 OR {})",
         growing_revision_sql(2)
     ))?;
-    let rows: Vec<(String, String, Option<String>, Option<String>)> = stmt
+    let rows: Vec<(String, String, Option<String>)> = stmt
         .query_map(params![source, base], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })?
         .collect::<std::result::Result<_, _>>()?;
     let mut copies = Vec::with_capacity(rows.len());
-    for (id, source_ref, content_ref, superseded_by) in rows {
+    for (id, source_ref, superseded_by) in rows {
         let undone = undone_copy(conn, &id)?;
         copies.push(Revised {
             id,
             source_ref,
-            content_ref,
             superseded_by,
             undone,
         });
@@ -961,17 +1026,25 @@ pub(crate) fn settle_revisions(
         .filter(|c| c.undone)
         .map(|c| c.id.as_str())
         .collect();
+    if source != "photos" {
+        let counted = |r: &str| matches!(growing_copy(source, r), Some((_, n)) if n > 0);
+        if let Some(c) = copies
+            .iter()
+            .find(|c| !counted(&c.source_ref) && !texts.contains_key(&c.id))
+        {
+            bail!("{}: its text wasn't read before settling", c.id);
+        }
+    }
     let rank = |c: &Revised| -> (u64, bool, String) {
         let n = if source == "photos" {
             revision_of(source, &c.source_ref).map_or(1, |(_, n)| n)
         } else {
             match growing_copy(source, &c.source_ref) {
                 Some((_, n)) if n > 0 => return (n, true, c.source_ref.clone()),
-                _ => c
-                    .content_ref
-                    .as_deref()
-                    .and_then(|rel| std::fs::read_to_string(home.root().join(rel)).ok())
-                    .and_then(|body| growing_items(source, &body))
+                _ => texts
+                    .get(&c.id)
+                    .and_then(Option::as_deref)
+                    .and_then(|body| growing_items(source, body))
                     .unwrap_or(0),
             }
         };
@@ -1474,61 +1547,70 @@ impl Store {
                 params![run, kind, actor.actor, node, now],
             )?;
         }
-        // a batch per transaction, a pause between (the store-lock rule)
-        let mut replaced = 0;
-        for (i, chunk) in drafts.chunks(SETTLE_BATCH).enumerate() {
-            if i > 0 {
+        // a batch per transaction, a pause between (the store-lock rule);
+        // each batch commits on its own, so what landed is counted as it
+        // lands
+        let (mut replaced, mut revised, mut added) = (0, 0, 0);
+        let landed = (|| -> Result<()> {
+            for (i, chunk) in drafts.chunks(SETTLE_BATCH).enumerate() {
+                if i > 0 {
+                    pause();
+                }
+                replaced += self
+                    .apply_batch_as(
+                        home,
+                        &IngestBatch {
+                            actor: REPAIR_WRITER.into(),
+                            session_id: Some(run.clone()),
+                            episodes: chunk.to_vec(),
+                        },
+                        &[],
+                        true,
+                    )?
+                    .episodes_new;
+            }
+            if !drafts.is_empty() && !revisions.is_empty() {
                 pause();
             }
-            replaced += self
-                .apply_batch_as(
-                    home,
-                    &IngestBatch {
-                        actor: REPAIR_WRITER.into(),
-                        session_id: Some(run.clone()),
-                        episodes: chunk.to_vec(),
-                    },
-                    &[],
-                    true,
-                )?
-                .episodes_new;
-        }
-        if !drafts.is_empty() && !revisions.is_empty() {
-            pause();
-        }
-        let revised = self.land_revisions(home, &run, &revisions)?;
-        if !ledgers.is_empty() {
-            // what the undo puts back, kept before anything changes
-            self.set_consolidation_state(&ledgers_key(&run), &serde_json::to_string(&ledgers)?)?;
-            let conn = self.lock();
-            for change in &ledgers {
-                let l = &change.after;
-                conn.execute(
-                    "INSERT INTO photo_day (day, count, keys_hash, episode_id, revision, minted_at)
-                     VALUES (?1, ?2, ?3, NULL, ?4, ?5)
-                     ON CONFLICT(day) DO UPDATE SET count = excluded.count,
-                         keys_hash = excluded.keys_hash, episode_id = excluded.episode_id,
-                         revision = excluded.revision, minted_at = excluded.minted_at",
-                    params![l.day, l.count, l.keys_hash, l.revision, now_utc()],
+            self.land_revisions(home, &run, &revisions, &mut revised)?;
+            if !ledgers.is_empty() {
+                // what the undo puts back, kept before anything changes
+                self.set_consolidation_state(
+                    &ledgers_key(&run),
+                    &serde_json::to_string(&ledgers)?,
                 )?;
+                let conn = self.lock();
+                for change in &ledgers {
+                    let l = &change.after;
+                    conn.execute(
+                        "INSERT INTO photo_day (day, count, keys_hash, episode_id, revision, minted_at)
+                         VALUES (?1, ?2, ?3, NULL, ?4, ?5)
+                         ON CONFLICT(day) DO UPDATE SET count = excluded.count,
+                             keys_hash = excluded.keys_hash, episode_id = excluded.episode_id,
+                             revision = excluded.revision, minted_at = excluded.minted_at",
+                        params![l.day, l.count, l.keys_hash, l.revision, now_utc()],
+                    )?;
+                }
             }
-        }
-        let mut added = 0;
-        for (i, chunk) in additions.chunks(SETTLE_BATCH).enumerate() {
-            if i > 0 || !drafts.is_empty() {
-                pause();
+            for (i, chunk) in additions.chunks(SETTLE_BATCH).enumerate() {
+                if i > 0 || !drafts.is_empty() {
+                    pause();
+                }
+                added += self
+                    .apply_batch(
+                        home,
+                        &IngestBatch {
+                            actor: addition_actor.into(),
+                            session_id: Some(run.clone()),
+                            episodes: chunk.to_vec(),
+                        },
+                    )?
+                    .episodes_new;
             }
-            added += self
-                .apply_batch(
-                    home,
-                    &IngestBatch {
-                        actor: addition_actor.into(),
-                        session_id: Some(run.clone()),
-                        episodes: chunk.to_vec(),
-                    },
-                )?
-                .episodes_new;
-        }
+            Ok(())
+        })();
+        // the counts of what landed, whether the run finished or stopped
+        // part way (the batches before stay; the catch-up settles them)
         {
             let conn = self.lock();
             // a re-minted copy counts as one the run replaced
@@ -1547,9 +1629,11 @@ impl Store {
                 "repair_applied",
                 &format!("repair_applied:{run}"),
                 &json!({"run": run, "kind": kind, "replaced": replaced, "revised": revised,
-                        "added": added, "ledgers": ledgers.len()}),
+                        "added": added, "ledgers": ledgers.len(),
+                        "stopped": landed.is_err()}),
             )?;
         }
+        landed?;
         self.set_consolidation_state(&state_key(&run), "applied")?;
         Ok(RepairApplied {
             run: Some(run),
@@ -1566,10 +1650,16 @@ impl Store {
     /// owner repair, under the run `run` (the rule places each: a growing
     /// source keeps its fullest copy in view, a photo day its newest
     /// revision). A growing source's copy re-minted from its stored text
-    /// keeps the links that text had (its draft names none). Returns the
-    /// copies that landed new.
-    fn land_revisions(&self, home: &Home, run: &str, drafts: &[EpisodeDraft]) -> Result<usize> {
-        let mut landed = 0;
+    /// keeps the links that text had (its draft names none). Counts the
+    /// copies that landed new in `landed`, batch by batch — also those of
+    /// the batches before one that fails.
+    fn land_revisions(
+        &self,
+        home: &Home,
+        run: &str,
+        drafts: &[EpisodeDraft],
+        landed: &mut usize,
+    ) -> Result<()> {
         for (i, chunk) in drafts.chunks(SETTLE_BATCH).enumerate() {
             if i > 0 {
                 std::thread::sleep(std::time::Duration::from_millis(40));
@@ -1581,7 +1671,7 @@ impl Store {
                     .map(|d| exists(&conn, &ids::episode_id(&d.source, &d.source_ref)).map(|e| !e))
                     .collect::<Result<_>>()?
             };
-            landed += self
+            *landed += self
                 .apply_batch_as(
                     home,
                     &IngestBatch {
@@ -1612,7 +1702,7 @@ impl Store {
                 )?;
             }
         }
-        Ok(landed)
+        Ok(())
     }
 
     /// Every day or session of a growing source stored under an unversioned
@@ -1781,7 +1871,9 @@ impl Store {
             .into_iter()
             .filter_map(|f| f.draft)
             .collect();
-        self.land_revisions(home, run, &drafts)
+        let mut landed = 0;
+        self.land_revisions(home, run, &drafts, &mut landed)?;
+        Ok(landed)
     }
 
     /// Put back the photo-day ledgers the run `run` set on this node — each
@@ -1963,6 +2055,20 @@ impl Store {
             if i > 0 {
                 std::thread::sleep(std::time::Duration::from_millis(40));
             }
+            // the texts settling a growing source's records ranks and places
+            // copies by, read before the batch takes the store
+            let growing: Vec<(String, String)> = chunk
+                .iter()
+                .filter(|(replaced, source, _)| {
+                    !replaced && GROWING_SOURCES.contains(&source.as_str())
+                })
+                .map(|(_, source, base)| (source.clone(), base.clone()))
+                .collect();
+            let texts = if growing.is_empty() {
+                Default::default()
+            } else {
+                super::growing::settle_texts(self, home, &growing)?
+            };
             let mut conn = self.lock();
             let tx = conn.transaction()?;
             let rules = super::retire::ArrivalRules::load(&tx)?;
@@ -1970,8 +2076,8 @@ impl Store {
                 changed += if *replaced {
                     settle(&tx, source, base)? + retire_with_record(&tx, &rules, source, base)?
                 } else {
-                    settle_revisions(&tx, home, source, base)?
-                        + super::growing::restore_revived(&tx, home, source, base)?
+                    settle_revisions(&tx, home, source, base, &texts)?
+                        + super::growing::restore_revived(&tx, source, base, &texts)?
                 };
             }
             tx.commit()?;
@@ -2009,19 +2115,43 @@ impl Store {
     }
 
     /// Runs newer than the watermark, for the peer leg (paged by the local
-    /// `synced_at` relay stamp), each with the copies it made (`copies`)
-    /// and those of them a later read put back in view (`revived`).
+    /// `synced_at` relay stamp), each with the copies it made that were
+    /// recorded here since the watermark (`copies` — the peer had the rest
+    /// with earlier pages: whoever records a copy stamps its run in the same
+    /// transaction, `restamp_runs`, and a run's row arriving stamps the
+    /// copies recorded before it) and those of them a later read put back in
+    /// view (`revived`). A copy goes out on the page its own stamp falls in:
+    /// a run stamped again past the page's end rides it too when a copy of it
+    /// was recorded within the page — else the peer's cursor would pass that
+    /// copy before the run reached it, and the run's later page would leave
+    /// it out.
     pub fn repairs_sync_export(&self, since: &str) -> Result<Value> {
         let conn = self.lock();
         let mut stmt = conn.prepare(&format!(
             "SELECT {RUN_COLUMNS} FROM repairs WHERE synced_at > ?1 ORDER BY synced_at LIMIT 500"
         ))?;
-        let rows: Vec<RepairRun> = stmt
+        let mut rows: Vec<RepairRun> = stmt
             .query_map([since], run_row)?
             .collect::<std::result::Result<_, _>>()?;
         drop(stmt);
+        let next = super::page_cursor(
+            &conn,
+            "synced_at",
+            "FROM repairs WHERE synced_at > ?1",
+            since,
+            500,
+        )?;
+        let mut later = conn.prepare(&runs_recorded_between_sql())?;
+        let on_page: HashSet<String> = rows.iter().map(|r| r.id.clone()).collect();
+        let later_rows: Vec<RepairRun> = later
+            .query_map([since, next.as_str()], run_row)?
+            .collect::<std::result::Result<_, _>>()?;
+        drop(later);
+        rows.extend(later_rows.into_iter().filter(|r| !on_page.contains(&r.id)));
         let mut made = conn.prepare_cached(
-            "SELECT episode_id FROM repair_copies WHERE run = ?1 ORDER BY episode_id",
+            "SELECT episode_id FROM repair_copies
+             WHERE run = ?1 AND (recorded_at IS NULL OR recorded_at > ?2)
+             ORDER BY episode_id",
         )?;
         let mut put_back = conn.prepare_cached(
             "SELECT c.episode_id FROM repair_copies c
@@ -2031,7 +2161,7 @@ impl Store {
         let mut runs = Vec::with_capacity(rows.len());
         for run in rows {
             let copies: Vec<String> = made
-                .query_map([&run.id], |r| r.get(0))?
+                .query_map([run.id.as_str(), since], |r| r.get(0))?
                 .collect::<std::result::Result<_, _>>()?;
             let revived: Vec<String> = put_back
                 .query_map([&run.id], |r| r.get(0))?
@@ -2046,31 +2176,34 @@ impl Store {
         }
         drop(made);
         drop(put_back);
-        let next = super::page_cursor(
-            &conn,
-            "synced_at",
-            "FROM repairs WHERE synced_at > ?1",
-            since,
-            500,
-        )?;
         Ok(json!({"repairs": runs, "next": next}))
     }
 
     /// Apply a peer's page: last writer wins by `updated_at`, and an undo
     /// stays undone; the copies each run made, and those a read put back in
     /// view, are unioned, whatever the row. Returns the runs to settle again
-    /// here — a row that changed, an undone run that made copies this node
-    /// didn't know of, or one whose copy a read put back.
+    /// here — a row that changed, a run that made copies this node didn't
+    /// know of (undone or not), or one whose copy a read put back. Each run in a
+    /// transaction of its own, with a pause for whoever waits on the store
+    /// once `SYNC_APPLY_ROWS` copies have been written (the store-lock rule):
+    /// a page applied part way is asked for again, and applies again the
+    /// same (call it from a blocking thread).
     pub fn repairs_sync_apply(&self, batch: &Value) -> Result<Vec<String>> {
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
         let mut changed = Vec::new();
+        let mut since_pause = 0usize;
         for r in batch
             .get("repairs")
             .and_then(|v| v.as_array())
             .into_iter()
             .flatten()
         {
+            if since_pause >= SYNC_APPLY_ROWS {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                since_pause = 0;
+            }
+            since_pause += 1 + r["copies"].as_array().map_or(0, Vec::len);
+            let mut conn = self.lock();
+            let tx = conn.transaction()?;
             let (Some(id), Some(kind), Some(updated)) = (
                 r["id"].as_str(),
                 r["kind"].as_str(),
@@ -2099,6 +2232,17 @@ impl Store {
             let newer = !local
                 .as_ref()
                 .is_some_and(|(l, undone)| l.as_str() >= updated && !brings_undo(undone));
+            if local.is_none() {
+                // copies recorded here before the run's row arrived (their
+                // episodes came first) go out with it from now on
+                tx.execute(
+                    &format!(
+                        "UPDATE repair_copies SET recorded_at = {} WHERE run = ?1",
+                        super::RELAY_NOW
+                    ),
+                    [id],
+                )?;
+            }
             if newer {
                 upsert_run(&tx, r, id, kind, updated)?;
             }
@@ -2157,11 +2301,6 @@ impl Store {
                     }
                 }
             }
-            let undone: bool = tx.query_row(
-                "SELECT undone_at IS NOT NULL FROM repairs WHERE id = ?1",
-                [id],
-                |row| row.get(0),
-            )?;
             if (grew > 0 || put_back > 0) && !newer {
                 // passed on to the other nodes
                 tx.execute(
@@ -2169,22 +2308,27 @@ impl Store {
                     [id],
                 )?;
             }
-            // an undone run that made more copies than this node knew of is
-            // settled here again
-            if grew > 0 && undone {
+            // a run that made more copies than this node knew of is settled
+            // here again: undone, its undo reaches them; in force, the
+            // corrections it made rank by when it began
+            // (`COPY_COLUMNS`)
+            if grew > 0 {
                 tx.execute(
                     "DELETE FROM consolidation_state WHERE key = ?1",
                     [state_key(id)],
                 )?;
             }
-            if (newer || (grew > 0 && undone)) && !changed.iter().any(|c| c == id) {
+            if (newer || grew > 0) && !changed.iter().any(|c| c == id) {
                 changed.push(id.to_string());
             }
+            tx.commit()?;
         }
-        tx.commit()?;
         Ok(changed)
     }
 }
+
+/// Copies written per hold of the store when a peer's runs are applied.
+const SYNC_APPLY_ROWS: usize = 1000;
 
 /// An episode id as `ids::episode_id` makes one.
 fn is_episode_id(s: &str) -> bool {
@@ -2533,6 +2677,48 @@ mod tests {
         assert!(!private_now(&store));
     }
 
+    /// A relabel that takes nothing out of the vault — the copy was outside
+    /// already — leaves the record's private copies as they are, whatever
+    /// their stamps.
+    #[test]
+    fn test_a_relabel_that_changes_nothing_takes_nothing_out_of_the_vault() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (home, store) = node(&tmp, "mini");
+        let actor = Actor::new("human:test");
+        apply(&store, &home, "adapter:mbox", vec![encoded()]);
+        repair(&store, &home);
+        let fixed = fixed_ref();
+        let fixed_id = ids::episode_id("mbox", &fixed);
+        // copies labelled apart, as another node or an earlier build can
+        // leave them: the original private under an older stamp
+        {
+            let conn = store.lock();
+            conn.execute(
+                "UPDATE episodes SET scope = 'private', scope_changed_at = '2026-01-01T00:00:00Z'
+                 WHERE source_ref = ?1",
+                [BASE],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE episodes SET scope = 'personal', scope_changed_at = '2026-01-02T00:00:00Z'
+                 WHERE source_ref = ?1",
+                [&fixed],
+            )
+            .unwrap();
+        }
+        store.vault_unlock(5);
+        let moved = store
+            .set_episode_scopes(&actor, std::slice::from_ref(&fixed_id), "personal")
+            .unwrap();
+        assert_eq!(moved, 0);
+        assert_eq!(state(&store, BASE).1, "private");
+        // and one outside already, moved to another area: still nothing
+        store
+            .set_episode_scopes(&actor, std::slice::from_ref(&fixed_id), "work")
+            .unwrap();
+        assert_eq!(state(&store, BASE).1, "private");
+    }
+
     /// A node that holds only a corrected copy (the original never reached
     /// it) can correct the record again: the new copy stands, the earlier
     /// one behind it, with the record's label and trust — the run isn't
@@ -2596,6 +2782,466 @@ mod tests {
             )
             .unwrap();
         assert_eq!(trust, "imported");
+    }
+
+    /// An import that reads a record as private (a ChatGPT conversation
+    /// flagged "do not remember", mail a rule matches) puts its corrected
+    /// copies into the vault also on a node the original never reached.
+    #[test]
+    fn test_a_private_reading_reaches_a_correction_whose_original_is_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mini_home, mini) = node(&tmp, "mini");
+        let (late_home, late) = node(&tmp, "late");
+        apply(&mini, &mini_home, "adapter:mbox", vec![encoded()]);
+        repair(&mini, &mini_home);
+        let fixed = fixed_ref();
+        let page = mini
+            .sync_export_for(&mini_home, 0, 100, Some("late"))
+            .unwrap();
+        let only_fixed: Vec<EpisodeDraft> = page
+            .episodes
+            .into_iter()
+            .filter(|d| d.source_ref == fixed)
+            .collect();
+        late.apply_batch_from(
+            &late_home,
+            &IngestBatch {
+                actor: "peer:mini".into(),
+                session_id: None,
+                episodes: only_fixed,
+            },
+            &page.origins,
+        )
+        .unwrap();
+        assert_eq!(state(&late, &fixed).1, "personal");
+
+        let moved = late
+            .label_private_on_reimport(
+                &Actor::new("human:owner"),
+                &[],
+                &[("mbox".to_string(), BASE.to_string())],
+            )
+            .unwrap();
+        assert_eq!(moved, 1);
+        assert_eq!(state(&late, &fixed).1, "private");
+        assert!(stamp(&late, &ids::episode_id("mbox", &fixed)).is_some());
+        // a look-alike ref another writer chose is no copy of the record
+        let mut other = decoded();
+        other.source_ref = replacement_ref("other@x", "t", "b");
+        apply(&late, &late_home, "adapter:mbox", vec![other.clone()]);
+        late.label_private_on_reimport(
+            &Actor::new("human:owner"),
+            &[],
+            &[("mbox".to_string(), "other@x".to_string())],
+        )
+        .unwrap();
+        assert_eq!(state(&late, &other.source_ref).1, "personal");
+    }
+
+    /// A private draft of a repaired message reaches its record through the
+    /// corrected copy, whose text it holds (the original, stored encoded,
+    /// reads otherwise); a draft with other text under the same Message-ID,
+    /// date and sender reaches nothing.
+    #[test]
+    fn test_a_private_draft_of_a_repaired_message_reaches_its_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (home, store) = node(&tmp, "mini");
+        apply(&store, &home, "adapter:mbox", vec![encoded()]);
+        repair(&store, &home);
+        let fixed = fixed_ref();
+        let owner = Actor::new("human:owner");
+        let private = |mut draft: EpisodeDraft| {
+            draft.scope = Some("private".into());
+            draft
+        };
+
+        let mut other = decoded();
+        other.body.push_str(" and bring the papers");
+        let moved = store
+            .label_private_on_reimport(&owner, &[private(other)], &[])
+            .unwrap();
+        assert_eq!(moved, 0);
+        assert_eq!(state(&store, BASE).1, "personal");
+        assert_eq!(state(&store, &fixed).1, "personal");
+
+        store
+            .label_private_on_reimport(&owner, &[private(decoded())], &[])
+            .unwrap();
+        assert_eq!(state(&store, BASE).1, "private");
+        assert_eq!(state(&store, &fixed).1, "private");
+    }
+
+    /// Two nodes that make the same correction under runs of their own, one
+    /// of them a later correction too, keep the same copy in view once they
+    /// have synced: corrections rank by when the runs that made them began,
+    /// never by when a copy first reached each node.
+    #[test]
+    fn test_the_same_correction_made_on_two_nodes_ranks_alike_on_both() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mini_home, mini) = node(&tmp, "mini");
+        let (late_home, late) = node(&tmp, "late");
+        apply(&mini, &mini_home, "adapter:mbox", vec![encoded()]);
+        apply(&late, &late_home, "adapter:mbox", vec![encoded()]);
+        let mut again = decoded();
+        again.body.push_str(" (read again)");
+        let second = replacement_ref(BASE, &again.title, &again.body);
+        let fixed = fixed_ref();
+        // the times the runs began and the copies were written, as they
+        // would be with a pause between: mini corrects at :01 and again at
+        // :02, late makes the first correction at :03
+        let at = |store: &Store, run: &str, copy: &str, t: &str| {
+            let conn = store.lock();
+            conn.execute(
+                "UPDATE repairs SET created_at = ?2 WHERE id = ?1",
+                params![run, t],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE episode_origin SET at = ?2 WHERE episode_id = ?1",
+                params![ids::episode_id("mbox", copy), t],
+            )
+            .unwrap();
+        };
+        let first = repair(&mini, &mini_home).run.unwrap();
+        at(&mini, &first, &fixed, "2026-01-01T00:00:01Z");
+        let later = mini
+            .repair_apply(
+                &mini_home,
+                &Actor::new("human:owner"),
+                "mail",
+                &[RepairItem {
+                    base_ref: BASE.into(),
+                    draft: again,
+                }],
+                &[],
+                "adapter:ics",
+            )
+            .unwrap()
+            .run
+            .unwrap();
+        at(&mini, &later, &second, "2026-01-01T00:00:02Z");
+        let own = repair(&late, &late_home).run.unwrap();
+        at(&late, &own, &fixed, "2026-01-01T00:00:03Z");
+
+        sync(&mini, &mini_home, &late, &late_home, 0);
+        sync(&late, &late_home, &mini, &mini_home, 0);
+        sync_runs(&mini, &late, &late_home);
+        sync_runs(&late, &mini, &mini_home);
+        assert_eq!(live(&mini), live(&late));
+        assert_eq!(live(&mini), std::slice::from_ref(&fixed));
+    }
+
+    /// The same, when the other node's run reaches a node first as a row
+    /// without its copies, and is settled there, before the copies it made
+    /// arrive: a run in force whose copies grow is settled again by the
+    /// catch-up (only runs `repairs_pending_here` names are settled), so the
+    /// correction it made ranks by when it began on both nodes.
+    #[test]
+    fn test_a_run_whose_copies_arrive_after_its_row_is_settled_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mini_home, mini) = node(&tmp, "mini");
+        let (late_home, late) = node(&tmp, "late");
+        apply(&mini, &mini_home, "adapter:mbox", vec![encoded()]);
+        apply(&late, &late_home, "adapter:mbox", vec![encoded()]);
+        let mut again = decoded();
+        again.body.push_str(" (read again)");
+        let second = replacement_ref(BASE, &again.title, &again.body);
+        let fixed = fixed_ref();
+        let at = |store: &Store, run: &str, copy: &str, t: &str| {
+            let conn = store.lock();
+            conn.execute(
+                "UPDATE repairs SET created_at = ?2 WHERE id = ?1",
+                params![run, t],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE episode_origin SET at = ?2 WHERE episode_id = ?1",
+                params![ids::episode_id("mbox", copy), t],
+            )
+            .unwrap();
+        };
+        let first = repair(&mini, &mini_home).run.unwrap();
+        at(&mini, &first, &fixed, "2026-01-01T00:00:01Z");
+        let later = mini
+            .repair_apply(
+                &mini_home,
+                &Actor::new("human:owner"),
+                "mail",
+                &[RepairItem {
+                    base_ref: BASE.into(),
+                    draft: again,
+                }],
+                &[],
+                "adapter:ics",
+            )
+            .unwrap()
+            .run
+            .unwrap();
+        at(&mini, &later, &second, "2026-01-01T00:00:02Z");
+        let own = repair(&late, &late_home).run.unwrap();
+        at(&late, &own, &fixed, "2026-01-01T00:00:03Z");
+        sync(&mini, &mini_home, &late, &late_home, 0);
+        sync(&late, &late_home, &mini, &mini_home, 0);
+
+        // the catch-up: every run this node hasn't settled in its state
+        let catch_up = |store: &Store, home: &Home| {
+            for run in store.repairs_pending_here().unwrap() {
+                store.repair_settle_run(home, &run).unwrap();
+            }
+        };
+        // late's run reaches mini as a row alone, and is settled there
+        let mut bare = late.repairs_sync_export("").unwrap();
+        for row in bare["repairs"].as_array_mut().unwrap() {
+            row["copies"] = json!([]);
+        }
+        mini.repairs_sync_apply(&bare).unwrap();
+        catch_up(&mini, &mini_home);
+        assert_eq!(live(&mini), std::slice::from_ref(&second));
+
+        // then the copies it made
+        let changed = mini
+            .repairs_sync_apply(&late.repairs_sync_export("").unwrap())
+            .unwrap();
+        assert_eq!(changed, std::slice::from_ref(&own));
+        catch_up(&mini, &mini_home);
+        sync_runs(&mini, &late, &late_home);
+        assert_eq!(live(&mini), live(&late));
+        assert_eq!(live(&mini), std::slice::from_ref(&fixed));
+    }
+
+    /// A run stopped part way (a batch the store refused) records what
+    /// landed before it stopped: the run's counts say what is in view.
+    #[test]
+    fn test_a_run_that_stops_part_way_counts_what_landed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (home, store) = node(&tmp, "mini");
+        apply(&store, &home, "adapter:mbox", vec![encoded()]);
+        let mut missing = encoded();
+        missing.source_ref = "blocked@x".into();
+        store
+            .lock()
+            .execute_batch(
+                "CREATE TRIGGER blocked BEFORE INSERT ON episodes
+                 WHEN NEW.source_ref = 'blocked@x'
+                 BEGIN SELECT RAISE(ABORT, 'disk trouble'); END;",
+            )
+            .unwrap();
+        let err = store.repair_apply(
+            &home,
+            &Actor::new("human:owner"),
+            "mail",
+            &[RepairItem {
+                base_ref: BASE.into(),
+                draft: decoded(),
+            }],
+            &[missing],
+            "adapter:mbox",
+        );
+        assert!(err.is_err());
+        assert_eq!(live(&store), [fixed_ref()]);
+        let runs = store.repair_runs(10).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!((runs[0].replaced, runs[0].added), (1, 0));
+        assert!(runs[0].updated_at > runs[0].created_at, "passed on");
+        assert_eq!(store.repairs_pending_here().unwrap(), [runs[0].id.clone()]);
+    }
+
+    /// The copies of the run named `run` in a page of the repairs leg (None:
+    /// the run isn't in it).
+    fn page_copies(page: &Value, run: &str) -> Option<Vec<String>> {
+        page["repairs"].as_array().unwrap().iter().find_map(|r| {
+            (r["id"] == run).then(|| {
+                r["copies"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|c| c.as_str().unwrap().to_string())
+                    .collect()
+            })
+        })
+    }
+
+    fn tick() {
+        // relay stamps have milliseconds
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    /// A run sent again (it was stamped again) carries only the copies
+    /// recorded since the peer's cursor: the peer had the others.
+    #[test]
+    fn test_a_run_sent_again_carries_only_the_copies_recorded_since() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (home, store) = node(&tmp, "mini");
+        apply(&store, &home, "adapter:mbox", vec![encoded()]);
+        let run = repair(&store, &home).run.unwrap();
+        let fixed_id = ids::episode_id("mbox", &fixed_ref());
+        let first = store.repairs_sync_export("").unwrap();
+        assert_eq!(page_copies(&first, &run), Some(vec![fixed_id]));
+        let cursor = first["next"].as_str().unwrap().to_string();
+        assert!(page_copies(&store.repairs_sync_export(&cursor).unwrap(), &run).is_none());
+
+        // stamped again with nothing new: the row alone
+        tick();
+        restamp_runs(&store.lock(), [&run]).unwrap();
+        let again = store.repairs_sync_export(&cursor).unwrap();
+        assert_eq!(page_copies(&again, &run), Some(vec![]));
+        let cursor = again["next"].as_str().unwrap().to_string();
+
+        // a copy another node made under it: that copy alone
+        tick();
+        let mut row = again["repairs"][0].clone();
+        let other = "ep_0123456789abcdef".to_string();
+        row["copies"] = json!([other]);
+        store
+            .repairs_sync_apply(&json!({"repairs": [row]}))
+            .unwrap();
+        let grown = store.repairs_sync_export(&cursor).unwrap();
+        assert_eq!(page_copies(&grown, &run), Some(vec![other]));
+    }
+
+    /// Copies recorded under a run before its row reached the node (their
+    /// episodes came first) go out with the row when it comes, whatever
+    /// the peer's cursor passed meanwhile.
+    #[test]
+    fn test_copies_recorded_before_their_runs_row_go_out_with_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mini_home, mini) = node(&tmp, "mini");
+        let (hub_home, hub) = node(&tmp, "hub");
+        apply(&mini, &mini_home, "adapter:mbox", vec![encoded()]);
+        let run = repair(&mini, &mini_home).run.unwrap();
+        let fixed_id = ids::episode_id("mbox", &fixed_ref());
+        // the episodes leg first: the copy's origin names the run
+        sync(&mini, &mini_home, &hub, &hub_home, 0);
+        tick();
+        // a third node's cursor passes the moment the copy was recorded
+        let cursor = now_utc_ms(&hub);
+        tick();
+        hub.repairs_sync_apply(&mini.repairs_sync_export("").unwrap())
+            .unwrap();
+        let page = hub.repairs_sync_export(&cursor).unwrap();
+        assert_eq!(page_copies(&page, &run), Some(vec![fixed_id]));
+    }
+
+    /// A copy recorded under a run whose row is here already (its episode
+    /// arrived after the row) stamps the run again, so it goes out.
+    #[test]
+    fn test_a_copy_arriving_after_its_runs_row_goes_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mini_home, mini) = node(&tmp, "mini");
+        let (hub_home, hub) = node(&tmp, "hub");
+        apply(&mini, &mini_home, "adapter:mbox", vec![encoded()]);
+        let run = repair(&mini, &mini_home).run.unwrap();
+        let fixed_id = ids::episode_id("mbox", &fixed_ref());
+        // the row first, without the copy (a sender that hadn't recorded it)
+        let mut page = mini.repairs_sync_export("").unwrap();
+        page["repairs"][0]["copies"] = json!([]);
+        hub.repairs_sync_apply(&page).unwrap();
+        let cursor = hub.repairs_sync_export("").unwrap()["next"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        tick();
+        sync(&mini, &mini_home, &hub, &hub_home, 0);
+        let page = hub.repairs_sync_export(&cursor).unwrap();
+        assert_eq!(page_copies(&page, &run), Some(vec![fixed_id]));
+    }
+
+    /// A run stamped again after a full page of other runs still carries
+    /// the copies recorded under it before them — its own, and one another
+    /// node made under it — to a peer that pages through them all.
+    #[test]
+    fn test_copies_reach_a_peer_paging_past_a_run_stamped_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mini_home, mini) = node(&tmp, "mini");
+        let (_, hub) = node(&tmp, "hub");
+        apply(&mini, &mini_home, "adapter:mbox", vec![encoded()]);
+        let run = repair(&mini, &mini_home).run.unwrap();
+        let fixed_id = ids::episode_id("mbox", &fixed_ref());
+        // a copy another node made under the run, recorded here
+        tick();
+        let mut row = mini.repairs_sync_export("").unwrap()["repairs"][0].clone();
+        let other = "ep_0123456789abcdef".to_string();
+        row["copies"] = json!([other]);
+        mini.repairs_sync_apply(&json!({"repairs": [row]})).unwrap();
+        // a full page of other runs, then the run stamped again
+        tick();
+        {
+            let mut conn = mini.lock();
+            let tx = conn.transaction().unwrap();
+            for i in 0..500 {
+                tx.execute(
+                    "INSERT INTO repairs (id, kind, replaced, added, actor, node, created_at,
+                         undone_at, updated_at)
+                     VALUES (?1, 'mail', 0, 0, 'human:owner', 'n-peer', ?2, NULL, ?2)",
+                    params![format!("rp_other_{i}"), "2026-01-01T00:00:00Z"],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        tick();
+        restamp_runs(&mini.lock(), [&run]).unwrap();
+
+        let mut cursor = String::new();
+        let mut pages = 0;
+        loop {
+            let page = mini.repairs_sync_export(&cursor).unwrap();
+            if page["repairs"].as_array().unwrap().is_empty() {
+                break;
+            }
+            hub.repairs_sync_apply(&page).unwrap();
+            cursor = page["next"].as_str().unwrap().to_string();
+            pages += 1;
+        }
+        assert!(pages >= 2, "{pages}");
+        let mut held: Vec<String> = {
+            let conn = hub.lock();
+            let mut stmt = conn
+                .prepare("SELECT episode_id FROM repair_copies WHERE run = ?1")
+                .unwrap();
+            let rows = stmt.query_map([&run], |r| r.get(0)).unwrap();
+            rows.collect::<std::result::Result<_, _>>().unwrap()
+        };
+        held.sort();
+        let mut want = vec![fixed_id, other];
+        want.sort();
+        assert_eq!(held, want);
+    }
+
+    /// The relay stamp's clock, read on a node.
+    fn now_utc_ms(store: &Store) -> String {
+        store
+            .lock()
+            .query_row(&format!("SELECT {}", super::super::RELAY_NOW), [], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    }
+
+    /// A page of runs is applied a run at a time: a run the store refuses
+    /// leaves those before it applied (the page is asked for again).
+    #[test]
+    fn test_a_page_of_runs_applies_a_run_at_a_time() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (home, store) = node(&tmp, "mini");
+        apply(&store, &home, "adapter:mbox", vec![encoded()]);
+        let run = repair(&store, &home).run.unwrap();
+        let mut page = store.repairs_sync_export("").unwrap();
+        let mut stuck = page["repairs"][0].clone();
+        stuck["id"] = json!("rp_stuck");
+        page["repairs"].as_array_mut().unwrap().push(stuck);
+
+        let (_, other) = node(&tmp, "other");
+        other
+            .lock()
+            .execute_batch(
+                "CREATE TRIGGER stuck BEFORE INSERT ON repairs WHEN NEW.id = 'rp_stuck'
+                 BEGIN SELECT RAISE(ABORT, 'disk trouble'); END;",
+            )
+            .unwrap();
+        assert!(other.repairs_sync_apply(&page).is_err());
+        assert!(other.repair_run(&run).unwrap().is_some());
+        assert!(other.repair_run("rp_stuck").unwrap().is_none());
     }
 
     /// Asking again for the same correction changes nothing: no second
@@ -3323,6 +3969,123 @@ mod tests {
         assert_eq!(texts(&late, &late_home), [(format!("{DAY}#r3"), long.body)]);
     }
 
+    /// Run `act` with the raw file of `episode_id` swapped for a pipe whose
+    /// writer serves `text` to each read and notes whether the store was
+    /// held as the read began. Returns (reads, reads with the store held);
+    /// the file is plain again afterwards.
+    #[cfg(unix)]
+    fn pipe_reads(
+        store: &Store,
+        home: &Home,
+        episode_id: &str,
+        text: &str,
+        act: impl FnOnce(),
+    ) -> (usize, usize) {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let rel: String = store
+            .lock()
+            .query_row(
+                "SELECT content_ref FROM episodes WHERE id = ?1",
+                [episode_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let path = home.root().join(rel);
+        // a new pipe in the file's place
+        let fresh_pipe = || {
+            std::fs::remove_file(&path).unwrap();
+            let made = std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap();
+            assert!(made.success());
+        };
+        fresh_pipe();
+        let done = AtomicBool::new(false);
+        let (reads, held) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let outcome = std::thread::scope(|s| {
+            s.spawn(|| loop {
+                // opens once a reader has
+                let mut pipe = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+                if done.load(Ordering::SeqCst) {
+                    break;
+                }
+                reads.fetch_add(1, Ordering::SeqCst);
+                if store.conn.is_locked() {
+                    held.fetch_add(1, Ordering::SeqCst);
+                }
+                // the next read opens a pipe of its own: this reader, waiting
+                // for the text, keeps the one it opened until it has read it
+                fresh_pipe();
+                pipe.write_all(text.as_bytes()).unwrap();
+            });
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(act));
+            done.store(true, Ordering::SeqCst);
+            drop(std::fs::File::open(&path).unwrap());
+            outcome
+        });
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, text).unwrap();
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+        (reads.into_inner(), held.into_inner())
+    }
+
+    /// Placing a copy by the growing rule reads no raw file with the store
+    /// held — neither the copy's own text nor those of the copies it is
+    /// measured against (an earlier version's unversioned memory, ranked by
+    /// its text): the read that puts an undone copy back, and the settling
+    /// that carries it to another node, read them before taking the store.
+    #[cfg(unix)]
+    #[test]
+    fn test_placing_a_copy_reads_no_file_with_the_store_held() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mini_home, mini) = node(&tmp, "mini");
+        let (laptop_home, laptop) = node(&tmp, "laptop");
+        let (hub_home, hub) = node(&tmp, "hub");
+        let short = chat_day(&["lunch?", "noon"]);
+        let long = chat_day(&["lunch?", "noon", "see you there"]);
+        apply(&mini, &mini_home, "adapter:imessage", vec![short.clone()]);
+        apply(
+            &laptop,
+            &laptop_home,
+            "adapter:imessage",
+            vec![long.clone()],
+        );
+        let run = copies_run(&mini, &mini_home).run.expect("a run");
+        sync_runs(&mini, &laptop, &laptop_home);
+        sync(&mini, &mini_home, &hub, &hub_home, 0);
+        sync(&laptop, &laptop_home, &hub, &hub_home, 0);
+        sync(&laptop, &laptop_home, &mini, &mini_home, 0);
+        sync_runs(&mini, &hub, &hub_home);
+        mini.repair_undo(&mini_home, &Actor::new("human:owner"), &run)
+            .unwrap();
+        sync_runs(&mini, &hub, &hub_home);
+        let memory = ids::episode_id("imessage", DAY);
+        let three = format!("{DAY}#r3");
+
+        // mini reads three messages: the read's ref is the undone copy's
+        let mut read = long.clone();
+        read.source_ref = three.clone();
+        let (reads, held) = pipe_reads(&mini, &mini_home, &memory, &short.body, || {
+            apply(&mini, &mini_home, "adapter:imessage", vec![read]);
+        });
+        assert_eq!((reads, held), (1, 0));
+        assert_eq!(chat_days_live(&mini, &mini_home)[0].0, three);
+
+        // the run carries the read to the hub, which settles it
+        let (reads, held) = pipe_reads(&hub, &hub_home, &memory, &short.body, || {
+            sync_runs(&mini, &hub, &hub_home);
+        });
+        assert_eq!((reads, held), (1, 0));
+        assert_eq!(
+            chat_days_live(&hub, &hub_home),
+            [(three, long.body.clone())]
+        );
+    }
+
     /// A node holding an undone copy without the memory it was made from
     /// (the copy came first, and waits behind the memory's id) puts it back
     /// in view when a read on another node does, and the memory arriving
@@ -3367,6 +4130,70 @@ mod tests {
 
         // the two-message memory arrives last
         send(&mini, &mini_home, &late, &late_home, &[DAY]);
+        assert_eq!(chat_days_live(&late, &late_home), [(three, long.body)]);
+    }
+
+    /// The same, with the memory arriving after the settling has read the
+    /// texts it places the copy by and before it takes the store: the
+    /// settling fails, so the run stays to settle, and the next catch-up
+    /// puts the copy back in view.
+    #[test]
+    fn test_a_copy_arriving_after_the_texts_were_read_fails_the_settling() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mini_home, mini) = node(&tmp, "mini");
+        let (laptop_home, laptop) = node(&tmp, "laptop");
+        let short = chat_day(&["lunch?", "noon"]);
+        let long = chat_day(&["lunch?", "noon", "see you there"]);
+        apply(&mini, &mini_home, "adapter:imessage", vec![short.clone()]);
+        apply(
+            &laptop,
+            &laptop_home,
+            "adapter:imessage",
+            vec![long.clone()],
+        );
+        let run = copies_run(&mini, &mini_home).run.expect("a run");
+        sync_runs(&mini, &laptop, &laptop_home);
+        sync(&laptop, &laptop_home, &mini, &mini_home, 0);
+        mini.repair_undo(&mini_home, &Actor::new("human:owner"), &run)
+            .unwrap();
+        let three = format!("{DAY}#r3");
+        let (late_home, late) = node(&tmp, "late");
+        sync_runs(&mini, &late, &late_home);
+        send(&mini, &mini_home, &late, &late_home, &[&three]);
+
+        // mini reads three messages; the run reaches that node, and its
+        // settling reads the texts
+        let mut read = long.clone();
+        read.source_ref = three.clone();
+        apply(&mini, &mini_home, "adapter:imessage", vec![read]);
+        late.repairs_sync_apply(&mini.repairs_sync_export("").unwrap())
+            .unwrap();
+        assert_eq!(
+            late.repairs_pending_here().unwrap(),
+            std::slice::from_ref(&run)
+        );
+        let texts = crate::store::growing::settle_texts(
+            &late,
+            &late_home,
+            &[("imessage".to_string(), DAY.to_string())],
+        )
+        .unwrap();
+
+        // the two-message memory arrives before the settling takes the store
+        send(&mini, &mini_home, &late, &late_home, &[DAY]);
+        {
+            let mut conn = late.lock();
+            let tx = conn.transaction().unwrap();
+            assert!(crate::store::growing::restore_revived(&tx, "imessage", DAY, &texts).is_err());
+        }
+        assert_eq!(
+            late.repairs_pending_here().unwrap(),
+            std::slice::from_ref(&run)
+        );
+
+        // the next catch-up
+        late.repair_settle_run(&late_home, &run).unwrap();
+        assert!(late.repairs_pending_here().unwrap().is_empty());
         assert_eq!(chat_days_live(&late, &late_home), [(three, long.body)]);
     }
 
@@ -3939,6 +4766,8 @@ mod tests {
                  WHERE e.source = ?1 AND (e.source_ref = ?2
                     OR (e.source_ref >= ?2 || '{REPAIR_MARK}' AND e.source_ref < ?2 || '#repair;'))"
             ),
+            // the repairs leg's export, on every poll
+            runs_recorded_between_sql(),
         ] {
             let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
             let args = vec!["x"; stmt.parameter_count()];

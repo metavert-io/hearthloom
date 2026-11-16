@@ -339,8 +339,10 @@ pub(super) fn cases() -> Vec<Case> {
                 "c11#20260316T090000 -> 2026-03-16T13:00:00Z",
             ],
         },
-        // Basis: RFC 5545 §3.8.4.4. The override of the first occurrence
-        // takes the series' bare UID as its ref.
+        // Basis: RFC 5545 §3.8.4.4. Hearthloom policy: the override of the
+        // first occurrence takes its RECURRENCE-ID as written for its ref,
+        // as every override does — the ref earlier versions stored it under
+        // and the phone's calendar feed sends.
         Case {
             id: "C12",
             what: "Override of the first occurrence",
@@ -361,13 +363,15 @@ pub(super) fn cases() -> Vec<Case> {
                 "2026-03-16T13:00:00Z | Weekly",
             ],
             refs: &[
-                "c12 -> 2026-03-02T15:00:00Z",
+                "c12#20260302T090000 -> 2026-03-02T15:00:00Z",
                 "c12#20260309T090000 -> 2026-03-09T13:00:00Z",
                 "c12#20260316T090000 -> 2026-03-16T13:00:00Z",
             ],
         },
         // Basis: RFC 5545 §3.8.4.4 — RECURRENCE-ID 13:00Z is the 09:00 EDT
-        // occurrence, whatever form it is written in.
+        // occurrence, whatever form it is written in. Hearthloom policy:
+        // the override's ref is its RECURRENCE-ID as written, the ref
+        // earlier versions stored overrides under.
         Case {
             id: "C13",
             what: "Override whose RECURRENCE-ID and DTSTART are in other zones",
@@ -389,7 +393,7 @@ pub(super) fn cases() -> Vec<Case> {
             ],
             refs: &[
                 "c13 -> 2026-03-02T14:00:00Z",
-                "c13#20260309T090000 -> 2026-03-09T15:00:00Z",
+                "c13#20260309T130000Z -> 2026-03-09T15:00:00Z",
                 "c13#20260316T090000 -> 2026-03-16T13:00:00Z",
             ],
         },
@@ -446,7 +450,7 @@ pub(super) fn cases() -> Vec<Case> {
             ],
             refs: &[
                 "c15 -> 2026-03-02T14:00:00Z",
-                "c15#20260309T090000 -> 2026-03-09T14:00:00Z",
+                "c15#20260309T130000Z -> 2026-03-09T14:00:00Z",
                 "c15#20260316T090000 -> 2026-03-16T14:00:00Z",
                 "c15#20260323T090000 -> 2026-03-23T14:00:00Z",
             ],

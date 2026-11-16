@@ -52,6 +52,10 @@ pub const OWNER_ONLY_SOURCES: &[&str] = &[
 /// single `conversations.json` (`chatlog-chatgpt`).
 const SAME_RECORD_SOURCES: &[&[&str]] = &[&["openai", "chatlog-chatgpt"]];
 
+/// Records `Store::label_private_on_reimport` relabels per hold of the
+/// store (and per mutation).
+const REIMPORT_RELABEL_BATCH: usize = 200;
+
 /// This record, and the copies other sources keep of it under the same id
 /// (`SAME_RECORD_SOURCES`), as (source, source ref).
 pub fn same_record(source: &str, source_ref: &str) -> Vec<(String, String)> {
@@ -65,6 +69,40 @@ pub fn same_record(source: &str, source_ref: &str) -> Vec<(String, String)> {
             .collect(),
         None => vec![(source.to_string(), source_ref.to_string())],
     }
+}
+
+/// The sender's address on a mail memory's `from:` line (lowercase), the
+/// part every version of the mail reader wrote the same way.
+pub fn mail_sender(body: &str) -> Option<String> {
+    let head = body.split("\n\n").next().unwrap_or("");
+    let line = head.lines().find_map(|l| l.strip_prefix("from: "))?;
+    let (_, address) = line.trim_end().rsplit_once('<')?;
+    Some(address.strip_suffix('>')?.trim().to_lowercase())
+}
+
+/// Whether a stored mail memory holds what an arriving draft of the message
+/// holds: the same header lines and text, apart from the `labels:` line (a
+/// message's labels change, and each import path writes its own) and the
+/// `links:` block after the text, which a copy an earlier reader stored
+/// lacks. Evidence only for a label the import chose itself: the drafts
+/// compared are cut and leave parts and headers out, so a label read from
+/// the arriving message's content can rest on what this doesn't compare
+/// (`Store::label_private_on_reimport`).
+fn same_mail_text(stored: &str, arriving: &str) -> bool {
+    fn parts(body: &str) -> (Vec<&str>, &str) {
+        let (head, text) = body.split_once("\n\n").unwrap_or((body, ""));
+        let head = head
+            .lines()
+            .filter(|l| !l.starts_with("labels: "))
+            .collect();
+        (head, text)
+    }
+    let ((stored_head, stored_text), (head, text)) = (parts(stored), parts(arriving));
+    stored_head == head
+        && (stored_text == text
+            || text
+                .rsplit_once("\n\nlinks:\n")
+                .is_some_and(|(text, _)| text == stored_text))
 }
 
 impl Store {
@@ -84,42 +122,127 @@ impl Store {
     /// stamped, so the scope leg carries it to the owner's other nodes.
     /// For the owner's own import paths only — never a peer's batch (the
     /// scope leg settles labels between nodes) or another key's. Returns
-    /// the records relabelled.
+    /// the records relabelled, plus the other copies of their records the
+    /// label reached.
     /// `flagged`: (source, source ref) of records the import reads as
     /// private whether or not it made a draft of them — a ChatGPT
     /// conversation flagged "do not remember" whose kept branch holds no
     /// turns gets no draft, yet a copy an earlier reader stored of it goes
-    /// into the vault all the same.
+    /// into the vault all the same. Runs `REIMPORT_RELABEL_BATCH` records
+    /// per transaction, pausing between them — call it from a blocking
+    /// thread.
+    /// A mail draft's label reaches the stored copy only when that copy is
+    /// the same message — its date, sender and text
+    /// ([`Store::same_mail_stored`]): a Message-ID is the sender's choice,
+    /// and other mail written under a known one must not take that message
+    /// into the vault. Pass only mail drafts the import itself labels
+    /// private (an import asked to be private): the stored text is cut and
+    /// leaves parts and headers out, so a label read from the message's own
+    /// content (a privacy rule over the whole message, more hosts than the
+    /// stored text holds) can come from where the comparison doesn't reach,
+    /// and other mail under that Message-ID compares the same.
     pub fn label_private_on_reimport(
         &self,
         actor: &Actor,
         drafts: &[crate::ingest::EpisodeDraft],
         flagged: &[(String, String)],
     ) -> Result<usize> {
-        let mut refs: Vec<(String, String)> = drafts
+        let mut refs: Vec<(String, String)> = Vec::new();
+        for draft in drafts
             .iter()
             .filter(|d| d.scope.as_deref() == Some("private"))
-            .map(|d| (d.source.as_str(), d.source_ref.as_str()))
-            .chain(flagged.iter().map(|(s, r)| (s.as_str(), r.as_str())))
-            .flat_map(|(source, source_ref)| same_record(source, source_ref))
-            .collect();
+        {
+            if draft.source == "mbox" && !self.same_mail_stored(draft)? {
+                continue;
+            }
+            refs.extend(same_record(&draft.source, &draft.source_ref));
+        }
+        refs.extend(
+            flagged
+                .iter()
+                .flat_map(|(source, source_ref)| same_record(source, source_ref)),
+        );
         refs.sort_unstable();
         refs.dedup();
-        if refs.is_empty() {
-            return Ok(0);
-        }
         let now = now_utc();
+        let mut total = 0;
+        // a whole export can read as private: a few hundred records per
+        // hold of the store, with a pause between, so the requests waiting
+        // on it are served in between
+        for (i, chunk) in refs.chunks(REIMPORT_RELABEL_BATCH).enumerate() {
+            if i > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+            total += self.label_private_records(actor, chunk, &now)?;
+        }
+        Ok(total)
+    }
+
+    /// Whether the mail memory stored under this draft's Message-ID is the
+    /// message the draft was read from: the same date, sender address and
+    /// text ([`same_mail_text`]) — a Message-ID, a date and a sender are all
+    /// the sender's choice. A copy an earlier version left encoded reads
+    /// otherwise; the corrected copy the owner's mail repair made of it
+    /// counts in its place. Nothing stored: false.
+    fn same_mail_stored(&self, draft: &crate::ingest::EpisodeDraft) -> Result<bool> {
+        let conn = self.lock();
+        let mut copies = vec![ids::episode_id(&draft.source, &draft.source_ref)];
+        copies.extend(super::repair::replacement_ids(
+            &conn,
+            &draft.source,
+            &draft.source_ref,
+        )?);
+        let mut stmt = conn.prepare_cached(
+            "SELECT e.event_time, f.body FROM episodes e /* all-episodes: the copy the label would reach, in any state */
+             LEFT JOIN episode_fts f ON f.rowid = e.fts_rowid
+             WHERE e.id = ?1",
+        )?;
+        for id in copies {
+            let stored: Option<(Option<String>, Option<String>)> = stmt
+                .query_row([&id], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?;
+            if stored.is_some_and(|(at, body)| {
+                at == draft.event_time.utc
+                    && body.is_some_and(|body| {
+                        mail_sender(&body) == mail_sender(&draft.body)
+                            && same_mail_text(&body, &draft.body)
+                    })
+            }) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// One batch of `label_private_on_reimport`, in one transaction with
+    /// one mutation. Returns the records relabelled, plus the other copies
+    /// of their records the label reached (`growing::spread_private`).
+    fn label_private_records(
+        &self,
+        actor: &Actor,
+        refs: &[(String, String)],
+        now: &str,
+    ) -> Result<usize> {
         let conn = self.lock();
         let tx = conn.unchecked_transaction()?;
         let mut relabeled = Vec::new();
         let mut private_ids = Vec::new();
-        for (source, source_ref) in &refs {
-            // a day or session of a growing source: whichever copies of it
-            // are stored (the draft's own ref, read before it was revised),
-            // and through them the rest of the record
-            let growing = super::growing::growing_copy(source, source_ref);
-            let (base, copies) = match growing {
-                Some((base, _)) => (base, super::growing::growing_revision_sql(2)),
+        let mut copies_moved = 0;
+        for (source, source_ref) in refs {
+            // a day or session of a growing source, or a photo day: whichever
+            // copies of it are stored (the draft's own ref, read before it
+            // was revised) go into the vault now, however recently one was
+            // taken out — the import's label is the latest decision; through
+            // them the rest of the record
+            let day = super::growing::growing_copy(source, source_ref)
+                .map(|(base, _)| base)
+                .or_else(|| {
+                    (source == "photos")
+                        .then(|| super::photo::day_base(source_ref))
+                        .flatten()
+                });
+            let (base, copies) = match day {
+                Some(base) => (base, super::growing::growing_revision_sql(2)),
                 None => (source_ref.as_str(), "0".to_string()),
             };
             let mut stmt = tx.prepare(&format!(
@@ -128,34 +251,61 @@ impl Store {
                    AND scope != 'private'
                  RETURNING id"
             ))?;
-            let changed: Vec<String> = stmt
+            let mut changed: Vec<String> = stmt
                 .query_map(rusqlite::params![source, base, now, source_ref], |r| {
                     r.get(0)
                 })?
                 .collect::<std::result::Result<_, _>>()?;
+            // a repaired record's corrected copies, also where the memory
+            // they replaced never reached this node (nothing above matched);
+            // each counts as a copy the label reached, the record once
+            if day.is_none() {
+                let mut one = tx.prepare_cached(
+                    "UPDATE episodes SET scope = 'private', scope_changed_at = ?2 /* all-episodes: a private label holds on every copy */
+                     WHERE id = ?1 AND scope != 'private'",
+                )?;
+                let record_moved = !changed.is_empty();
+                let mut copies: usize = 0;
+                for id in super::repair::replacement_ids(&tx, source, source_ref)? {
+                    if one.execute(rusqlite::params![id, now])? > 0 {
+                        changed.push(id);
+                        copies += 1;
+                    }
+                }
+                copies_moved += if record_moved {
+                    copies
+                } else {
+                    copies.saturating_sub(1)
+                };
+            }
             if !changed.is_empty() {
                 relabeled.push(format!("{source}:{source_ref}"));
             }
-            // a day or session's copies, or a repaired memory's corrected
-            // copies (store/repair.rs), follow the label
-            if growing.is_some() || super::repair::REPAIRABLE_SOURCES.contains(&source.as_str()) {
-                private_ids.extend(changed);
-                // already private: its record still follows
-                private_ids.push(ids::episode_id(source, source_ref));
-            }
+            // the rest of the record follows the label, whichever source
+            // keeps copies (`spread_private` passes over the others): a
+            // repaired memory's corrected copies (store/repair.rs), the
+            // copies a day was put behind (store/growing.rs)
+            private_ids.extend(changed);
+            // already private: its record still follows
+            private_ids.push(ids::episode_id(source, source_ref));
         }
-        super::growing::spread_private(&tx, actor, &private_ids)?;
+        // copies the label reached that way count as moved too: the
+        // caller's notice to the owner's other nodes hangs on the count
+        let spread = super::growing::spread_private(&tx, actor, &private_ids)?;
         if !relabeled.is_empty() {
             record_mutation(
                 &tx,
                 actor,
                 "scope_private_on_reimport",
-                &format!("scope_private_on_reimport:{now}:{}", relabeled.len()),
+                &format!(
+                    "scope_private_on_reimport:{now}:{}",
+                    ids::content_hash(relabeled.join("\n").as_bytes())
+                ),
                 &json!({"records": relabeled, "scope": "private"}),
             )?;
         }
         tx.commit()?;
-        Ok(relabeled.len())
+        Ok(relabeled.len() + copies_moved + spread)
     }
 
     /// `apply_batch` with the sender's provenance for synced drafts
@@ -199,6 +349,15 @@ impl Store {
             session_id: batch.session_id.clone(),
         };
         let mut report = IngestReport::default();
+        // a read of this node's own files may name a copy an undone repair
+        // run re-minted: that copy's stored text and those of the copies it
+        // is measured against, read before the store is taken
+        // (store/growing.rs `revive_undone_copy`)
+        let named_texts = if !repair && !actor.actor.starts_with("peer:") {
+            super::growing::named_copy_texts(self, home, &batch.episodes)?
+        } else {
+            Default::default()
+        };
         let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let privacy_rules = super::privacy::load_rules(&tx)?;
@@ -209,6 +368,13 @@ impl Store {
         // the copies of their records — what they seeded goes too.
         let mut retired_here: std::collections::HashMap<String, std::collections::HashSet<String>> =
             std::collections::HashMap::new();
+        // Per retirement: the episodes it took as they arrived, alone.
+        let mut retired_alone: std::collections::HashMap<
+            String,
+            std::collections::HashSet<String>,
+        > = std::collections::HashMap::new();
+        // Owner repair runs that copies of this batch were recorded under.
+        let mut runs_grown: std::collections::BTreeSet<String> = Default::default();
 
         for draft in &batch.episodes {
             let episode_id = ids::episode_id(&draft.source, &draft.source_ref);
@@ -228,7 +394,7 @@ impl Store {
                 // undone repair run re-minted puts that copy back in view
                 // (store/growing.rs)
                 if !repair && !actor.actor.starts_with("peer:") {
-                    super::growing::revive_undone_copy(&tx, home, draft)?;
+                    super::growing::revive_undone_copy(&tx, draft, &named_texts)?;
                 }
                 report.episodes_existing += 1;
                 continue;
@@ -266,7 +432,7 @@ impl Store {
             // the copies already here (see store/growing.rs).
             let growing = super::growing::Arriving::read(
                 &tx,
-                home,
+                super::growing::Texts::Files(home),
                 &draft.source,
                 &draft.source_ref,
                 &draft.body,
@@ -353,7 +519,9 @@ impl Store {
             let mut scope = scope.unwrap_or_else(|| "personal".to_string());
             // Privacy rules outrank every other inference, including an
             // adapter's explicit scope — a matching episode arrives private.
-            if scope != "private" && super::privacy::draft_matches(&privacy_rules, draft) {
+            let rule_private =
+                scope != "private" && super::privacy::draft_matches(&privacy_rules, draft);
+            if rule_private {
                 scope = "private".to_string();
             }
             // A copy of a private record is private, whatever its sender
@@ -361,7 +529,17 @@ impl Store {
             // its draft's, a rule's, the label it inherited — is stamped
             // (when the record's label was given, else now), so the label
             // travels on the scope leg to a node that minted this copy, or
-            // holds another copy of the record, under another label.
+            // holds another copy of the record, under another label. A
+            // peer's copy private by its sender's label, or by a label here
+            // that carries no stamp, is stamped `UNKNOWN_TIME`: the episode
+            // leg carries the label without its stamp, and the label may be
+            // older than the copy (one it inherited where it was made), so
+            // any real stamp chosen here could outrank a decision made in
+            // between. That stamp sorts below every real one, so it reaches
+            // only the copies here that carry no stamp, and travels on the
+            // scope leg to the nodes holding them unstamped; the sender's
+            // own stamp comes on the scope leg right after
+            // (`apply_scope_changes`), and spreads from there.
             let mut private_since: Option<String> = None;
             // A photo day's copy takes the day's private label too: another
             // node's revision carries that node's label, and must not bring
@@ -377,8 +555,13 @@ impl Store {
                     scope = "private".to_string();
                 }
                 if scope == "private" {
-                    private_since =
-                        Some(record.flatten().map(String::from).unwrap_or_else(now_utc));
+                    private_since = Some(match record.flatten() {
+                        Some(stamp) => stamp.to_string(),
+                        None if actor.actor.starts_with("peer:") && !rule_private => {
+                            super::growing::UNKNOWN_TIME.to_string()
+                        }
+                        None => now_utc(),
+                    });
                 }
             }
 
@@ -428,7 +611,9 @@ impl Store {
                     .copied(),
             )?;
             if let Some(run) = &repair_run {
-                super::repair::record_copy(&tx, run, &episode_id)?;
+                if super::repair::record_copy(&tx, run, &episode_id)? {
+                    runs_grown.insert(run.clone());
+                }
             }
             // THE SUPERSESSION PATTERN (v47, CLAUDE.md): an episode whose
             // source_ref carries a revision suffix (`<base>#r<n>`) marks
@@ -531,10 +716,14 @@ impl Store {
             }
             // A growing source keeps the copy holding the most live, and a
             // copy that lands private makes the copies stored before private.
+            let spreads = scope == "private";
+            let spread = |tx: &rusqlite::Connection| {
+                super::growing::spread_private(tx, &actor, std::slice::from_ref(&episode_id))
+            };
             if let Some(g) = &growing {
                 g.settle(&tx, &episode_id, undone_copy)?;
-                if scope == "private" {
-                    super::growing::spread_private(&tx, &actor, std::slice::from_ref(&episode_id))?;
+                if spreads {
+                    report.private_copies += spread(&tx)?;
                 }
             }
             // A repaired record: the copy that stands for it in view, the
@@ -547,14 +736,14 @@ impl Store {
                     &draft.source,
                     repair_base.unwrap_or(&draft.source_ref),
                 )?;
-                if scope == "private" {
-                    super::growing::spread_private(&tx, &actor, std::slice::from_ref(&episode_id))?;
+                if spreads {
+                    report.private_copies += spread(&tx)?;
                 }
             }
             // A photo day's copy landing private takes the day's other copies
             // with it (they are one day).
-            if photo_day.is_some() && scope == "private" {
-                super::growing::spread_private(&tx, &actor, std::slice::from_ref(&episode_id))?;
+            if photo_day.is_some() && spreads {
+                report.private_copies += spread(&tx)?;
             }
             let mut arrival = arrivals.covering(
                 &tx,
@@ -665,13 +854,27 @@ impl Store {
                         Vec::new()
                     };
                     arrivals.retire(&tx, &rid, &episode_id)?;
-                    for copy in &copies {
-                        arrivals.retire(&tx, &rid, copy)?;
+                    let mut taken = Vec::new();
+                    for copy in copies {
+                        if arrivals.retire(&tx, &rid, &copy)? {
+                            taken.push(copy);
+                        }
                     }
-                    retired_here
-                        .entry(rid)
-                        .or_default()
-                        .extend(std::iter::once(episode_id.clone()).chain(copies));
+                    // what the copies it took seeded here goes too (once per
+                    // batch, below; copies retired before took theirs); an
+                    // episode taken alone can have seeded here only what a
+                    // peer sent ahead of it, looked up for the batch below
+                    if taken.is_empty() {
+                        retired_alone
+                            .entry(rid)
+                            .or_default()
+                            .insert(episode_id.clone());
+                    } else {
+                        retired_here
+                            .entry(rid)
+                            .or_default()
+                            .extend(std::iter::once(episode_id.clone()).chain(taken));
+                    }
                 }
                 super::retire::Arrival::Behind(original) => {
                     tx.execute(
@@ -681,12 +884,27 @@ impl Store {
                 }
             }
         }
-        // What those episodes seeded here before they arrived — a cascade of
-        // a copy held already, one that came ahead of its seed — is retired
-        // with them (a cascade arriving after its seed already lands retired).
+        // What the copies held here that those episodes took with them had
+        // seeded — a cascade of a copy, the opportunity it became, and one
+        // of the arriving copy that came ahead of it — is retired with them,
+        // and so is a cascade that came ahead of an episode taken alone
+        // (a cascade or an opportunity arriving after its seed was retired
+        // already lands retired). The cascades' refs are read once for the
+        // whole batch, whichever retirements took its episodes.
+        let taken_alone: std::collections::HashSet<String> =
+            retired_alone.values().flatten().cloned().collect();
+        let named = super::retire::cascade_seeds_among(&tx, &taken_alone)?;
+        for (rid, alone) in &retired_alone {
+            let seeds: Vec<String> = alone.intersection(&named).cloned().collect();
+            if !seeds.is_empty() {
+                retired_here.entry(rid.clone()).or_default().extend(seeds);
+            }
+        }
         for (rid, seeds) in &retired_here {
             arrivals.retire_derived(&tx, rid, seeds)?;
         }
+        // the runs whose copies grew: the repairs leg carries them on
+        super::repair::restamp_runs(&tx, &runs_grown)?;
 
         tx.commit()?;
         Ok(report)
@@ -1048,6 +1266,59 @@ mod tests {
                     "private",
                     "{node} {source_ref}"
                 );
+            }
+        }
+    }
+
+    /// A node whose copies of a day disagree with no stamps — a private
+    /// copy an earlier version labelled, a fuller one outside the vault —
+    /// sends the private copy to a node holding only the fuller one. The
+    /// label it spreads there comes back on the scope leg and takes the
+    /// fuller copy into the vault on the sending node too; a decision the
+    /// sending node stamped about the fuller copy still holds on both.
+    #[test]
+    fn test_a_private_label_spread_without_a_stamp_returns_to_its_sender() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = "+15551234567#2026-03-15";
+        let (r2, r3) = (format!("{base}#r2"), format!("{base}#r3"));
+        for (n, decided) in [None, Some("2026-01-02T00:00:00Z")].into_iter().enumerate() {
+            let (a_home, b_home) = (
+                Home::at(tmp.path().join(format!("a{n}"))),
+                Home::at(tmp.path().join(format!("b{n}"))),
+            );
+            a_home.init().unwrap();
+            b_home.init().unwrap();
+            let a = Store::open_in_memory().unwrap();
+            let b = Store::open_in_memory().unwrap();
+            apply_as(
+                &a,
+                &a_home,
+                "adapter:imessage",
+                vec![chat_day(&r2, 2), chat_day(&r3, 3)],
+            );
+            a.lock()
+                .execute(
+                    "UPDATE episodes SET scope = CASE source_ref WHEN ?1 THEN 'private' ELSE 'personal' END,
+                                         scope_changed_at = CASE source_ref WHEN ?1 THEN NULL ELSE ?2 END",
+                    rusqlite::params![r2, decided],
+                )
+                .unwrap();
+            apply_as(&b, &b_home, "adapter:imessage", vec![chat_day(&r3, 3)]);
+            let mut sent = chat_day(&r2, 2);
+            sent.scope = Some("private".into());
+            apply_as(&b, &b_home, "peer:a", vec![sent]);
+            assert_eq!(scope_at(&b, &r3), "private");
+
+            exchange_scopes(&b, &a);
+            exchange_scopes(&a, &b);
+            let expected = if decided.is_some() {
+                "personal"
+            } else {
+                "private"
+            };
+            for (store, node) in [(&a, "a"), (&b, "b")] {
+                assert_eq!(scope_at(store, &r2), "private", "{node} {decided:?}");
+                assert_eq!(scope_at(store, &r3), expected, "{node} {decided:?}");
             }
         }
     }
@@ -1598,5 +1869,188 @@ mod tests {
                 "{source_ref}"
             );
         }
+    }
+
+    /// A large import read as private relabels its stored copies a batch
+    /// at a time — one hold of the store and one mutation per batch, never
+    /// the whole import at once.
+    #[test]
+    fn test_a_large_reimport_relabels_its_stored_copies_in_batches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path());
+        home.init().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let count = 2 * REIMPORT_RELABEL_BATCH + 1;
+        let conversation = |i: usize, scope: Option<&str>| EpisodeDraft {
+            source: "chatlog-claude".into(),
+            kind: "conversation".into(),
+            title: format!("conversation {i}"),
+            body: format!("you: question {i}"),
+            scope: scope.map(String::from),
+            entities: vec![],
+            edges: vec![],
+            ..draft(&format!("c{i}"))
+        };
+        let stored: Vec<EpisodeDraft> = (0..count).map(|i| conversation(i, None)).collect();
+        apply_as(&store, &home, "adapter:chatlog", stored);
+        let again: Vec<EpisodeDraft> = (0..count)
+            .map(|i| conversation(i, Some("private")))
+            .collect();
+        let moved = store
+            .label_private_on_reimport(&Actor::new("adapter:chatlog"), &again, &[])
+            .unwrap();
+        assert_eq!(moved, count);
+        let conn = store.lock();
+        let outside: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM episodes WHERE scope != 'private'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(outside, 0);
+        let mut stmt = conn
+            .prepare(
+                "SELECT payload FROM mutations WHERE kind = 'scope_private_on_reimport' ORDER BY seq",
+            )
+            .unwrap();
+        let sizes: Vec<usize> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|payload| {
+                let payload: serde_json::Value = serde_json::from_str(&payload.unwrap()).unwrap();
+                payload["records"].as_array().unwrap().len()
+            })
+            .collect();
+        assert_eq!(
+            sizes,
+            [
+                REIMPORT_RELABEL_BATCH,
+                REIMPORT_RELABEL_BATCH,
+                count - 2 * REIMPORT_RELABEL_BATCH
+            ]
+        );
+    }
+
+    /// A photo day read as private again moves every copy of the day into
+    /// the vault — the base the import names and the revision in view.
+    #[test]
+    fn test_a_private_reimport_of_a_photo_day_vaults_its_revisions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path());
+        home.init().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let day = |source_ref: &str, scope: Option<&str>| EpisodeDraft {
+            source: "photos".into(),
+            kind: "photos".into(),
+            title: "2 photos".into(),
+            body: format!("date: 2026-01-01\nphotos: 2\n\n{source_ref}\n"),
+            scope: scope.map(String::from),
+            entities: vec![],
+            edges: vec![],
+            ..draft(source_ref)
+        };
+        apply_as(
+            &store,
+            &home,
+            "adapter:photos",
+            vec![day("photos#2026-01-01", None)],
+        );
+        apply_as(
+            &store,
+            &home,
+            "adapter:photos",
+            vec![day("photos#2026-01-01#r2", None)],
+        );
+        let scopes = || -> Vec<(String, String)> {
+            let conn = store.lock();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT source_ref, scope FROM episodes WHERE source = 'photos' ORDER BY source_ref",
+                )
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap()
+        };
+        assert!(scopes().iter().all(|(_, scope)| scope != "private"));
+        let again = vec![day("photos#2026-01-01", Some("private"))];
+        store
+            .label_private_on_reimport(&Actor::new("adapter:photos"), &again, &[])
+            .unwrap();
+        assert_eq!(
+            scopes(),
+            [
+                ("photos#2026-01-01".to_string(), "private".to_string()),
+                ("photos#2026-01-01#r2".to_string(), "private".to_string()),
+            ]
+        );
+    }
+
+    /// A photo day put into the vault, its revision in view taken out again
+    /// later, then imported as private: the revision goes back into the
+    /// vault — the import is the latest decision, though the base's label
+    /// is older than the revision's.
+    #[test]
+    fn test_a_private_reimport_vaults_a_photo_revision_taken_out_since() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path());
+        home.init().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let day = |source_ref: &str, scope: Option<&str>| EpisodeDraft {
+            source: "photos".into(),
+            kind: "photos".into(),
+            title: "2 photos".into(),
+            body: format!("date: 2026-01-01\nphotos: 2\n\n{source_ref}\n"),
+            scope: scope.map(String::from),
+            entities: vec![],
+            edges: vec![],
+            ..draft(source_ref)
+        };
+        apply_as(
+            &store,
+            &home,
+            "adapter:photos",
+            vec![day("photos#2026-01-01", None)],
+        );
+        apply_as(
+            &store,
+            &home,
+            "adapter:photos",
+            vec![day("photos#2026-01-01#r2", None)],
+        );
+        // vaulted on the 1st, the revision taken out on the 2nd
+        {
+            let conn = store.lock();
+            conn.execute(
+                "UPDATE episodes SET scope = 'private', scope_changed_at = '2026-01-01T00:00:00Z'
+                 WHERE source = 'photos' AND source_ref = 'photos#2026-01-01'",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE episodes SET scope = 'personal', scope_changed_at = '2026-01-02T00:00:00Z'
+                 WHERE source = 'photos' AND source_ref = 'photos#2026-01-01#r2'",
+                [],
+            )
+            .unwrap();
+        }
+        let again = vec![day("photos#2026-01-01", Some("private"))];
+        let moved = store
+            .label_private_on_reimport(&Actor::new("adapter:photos"), &again, &[])
+            .unwrap();
+        assert!(moved > 0);
+        let conn = store.lock();
+        let (scope, stamp): (String, Option<String>) = conn
+            .query_row(
+                "SELECT scope, scope_changed_at FROM episodes
+                 WHERE source = 'photos' AND source_ref = 'photos#2026-01-01#r2'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(scope, "private");
+        assert!(stamp.as_deref() > Some("2026-01-02T00:00:00Z"), "{stamp:?}");
     }
 }

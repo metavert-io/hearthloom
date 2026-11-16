@@ -24,6 +24,12 @@ use serde_json::{json, Value};
 use crate::AppState;
 
 pub(crate) const BATCH: usize = 8;
+/// Threads read per page when looking for ones to sort (most of a page may
+/// be threads known to wait, passed over unread).
+pub(crate) const PAGE: usize = 200;
+/// How long a thread found waiting is passed over before it is looked at
+/// again (unless the thread or the live archives here change first).
+const WAIT_RECHECK: Duration = Duration::from_secs(600);
 const TEXT_CHARS: usize = 1500;
 pub const KEY_ENABLED: &str = "mail.triage";
 pub const KEY_MODEL: &str = "mail.triage.model";
@@ -32,6 +38,102 @@ const CLASSES: &[&str] = &["needs_reply", "scheduling", "opportunity", "fyi", "i
 
 static KICK: tokio::sync::Notify = tokio::sync::Notify::const_new();
 static STATUS: Mutex<Option<Value>> = Mutex::new(None);
+
+/// Threads found waiting here (their mail can't be checked on this node
+/// yet — `for_model`), by home and thread: the thread's stamp and the live
+/// archives here when it was found so, and when. Such a thread is passed
+/// over unread — no archive lookup — until the thread changes (a message
+/// joins it or is observed into it), the live archives here change, or
+/// `WAIT_RECHECK` passes. Kept in memory: a restart looks at each once.
+type WaitKey = (std::path::PathBuf, String);
+type WaitSeen = (String, Vec<std::path::PathBuf>, std::time::Instant);
+static WAITING: Mutex<Option<std::collections::HashMap<WaitKey, WaitSeen>>> = Mutex::new(None);
+
+/// Was this thread found waiting lately, as it is now?
+fn waits_still(state: &AppState, archives: &[std::path::PathBuf], t: &MailThread) -> bool {
+    let waiting = WAITING.lock().unwrap_or_else(|p| p.into_inner());
+    waiting
+        .as_ref()
+        .and_then(|w| w.get(&(state.home.root().to_path_buf(), t.id.clone())))
+        .is_some_and(|(stamp, seen_with, at)| {
+            *stamp == t.updated_at && seen_with == archives && at.elapsed() < WAIT_RECHECK
+        })
+}
+
+/// Record what `for_model` found of these threads: the ones that wait, and
+/// that the others (kept, made private) don't.
+fn note_waiting(
+    state: &AppState,
+    archives: &[std::path::PathBuf],
+    waiting_now: &[MailThread],
+    not_waiting: &[String],
+) {
+    let home = state.home.root().to_path_buf();
+    let mut waiting = WAITING.lock().unwrap_or_else(|p| p.into_inner());
+    let w = waiting.get_or_insert_with(Default::default);
+    w.retain(|_, (_, _, at)| at.elapsed() < WAIT_RECHECK);
+    for id in not_waiting {
+        w.remove(&(home.clone(), id.clone()));
+    }
+    let now = std::time::Instant::now();
+    for t in waiting_now {
+        w.insert(
+            (home.clone(), t.id.clone()),
+            (t.updated_at.clone(), archives.to_vec(), now),
+        );
+    }
+}
+
+/// A count kept per home (tests run side by side in one process).
+#[cfg(test)]
+type CountByHome = Mutex<Vec<(std::path::PathBuf, usize)>>;
+
+/// Archive lookups `for_model` made for messages whose keys the thread
+/// index lacks, by home (it runs on the blocking pool).
+#[cfg(test)]
+static ARCHIVE_LOOKUPS_BY_HOME: CountByHome = Mutex::new(Vec::new());
+
+/// Pages of threads to sort that triage has read, by home.
+#[cfg(test)]
+static PAGES_READ_BY_HOME: CountByHome = Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn count_for(counts: &CountByHome, state: &AppState) {
+    let home = state.home.root().to_path_buf();
+    let mut all = counts.lock().unwrap_or_else(|p| p.into_inner());
+    match all.iter_mut().find(|(h, _)| *h == home) {
+        Some((_, n)) => *n += 1,
+        None => all.push((home, 1)),
+    }
+}
+
+#[cfg(test)]
+fn counted_for(counts: &CountByHome, state: &AppState) -> usize {
+    let home = state.home.root().to_path_buf();
+    counts
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .find(|(h, _)| *h == home)
+        .map_or(0, |(_, n)| *n)
+}
+
+#[cfg(test)]
+fn count_lookup(state: &AppState) {
+    count_for(&ARCHIVE_LOOKUPS_BY_HOME, state);
+}
+
+/// Archive lookups `for_model` made for this home's threads so far.
+#[cfg(test)]
+pub(crate) fn archive_lookups(state: &AppState) -> usize {
+    counted_for(&ARCHIVE_LOOKUPS_BY_HOME, state)
+}
+
+/// Pages of threads to sort triage has read for this home so far.
+#[cfg(test)]
+pub(crate) fn pages_read(state: &AppState) -> usize {
+    counted_for(&PAGES_READ_BY_HOME, state)
+}
 
 pub fn kick() {
     KICK.notify_one();
@@ -109,7 +211,6 @@ pub fn seen(
     raw: &[u8],
 ) -> Option<MailSeen> {
     seen_with(
-        state,
         &crate::virtual_source::MailPrivacy::new(state),
         account,
         mine,
@@ -118,12 +219,11 @@ pub fn seen(
     )
 }
 
-/// `seen`, with the record's mail privacy read once for a batch (`privacy`).
-/// While mail is held (virtual_source::MailHold) a message nothing else
-/// says is private comes back `private` for whoever reads it, and `held`:
-/// `observe` records nothing of it.
+/// `seen`, with the record's mail privacy and the privacy rules read once
+/// for a batch (`privacy`). While mail is held (virtual_source::MailHold) a
+/// message nothing else says is private comes back `private` for whoever
+/// reads it, and `held`: `observe` records nothing of it.
 pub fn seen_with(
-    state: &AppState,
     privacy: &crate::virtual_source::MailPrivacy,
     account: &str,
     mine: &std::collections::BTreeSet<String>,
@@ -138,8 +238,11 @@ pub fn seen_with(
     };
     let references = ids(m.references());
     let in_reply_to = ids(m.in_reply_to()).into_iter().next();
+    // the first From, as the import and the archive's index read it
     let (from, from_addr) = m
-        .from()
+        .headers()
+        .all_from()
+        .next()
         .and_then(|l| l.first())
         .map(|x| {
             let addr = x.address().unwrap_or("").to_string();
@@ -170,9 +273,8 @@ pub fn seen_with(
     let key =
         crate::virtual_source::mail_key(&String::from_utf8_lossy(raw), Some(message_id.as_str()));
     let private = privacy.key_found(&key).unwrap_or(true)
-        || state
-            .store
-            .privacy_rules_match(&format!(
+        || privacy
+            .rules_match(&format!(
                 "{}{}",
                 crate::mbox_text::privacy_text(raw),
                 labels.join(", ")
@@ -243,6 +345,13 @@ fn private_now(privacy: &crate::virtual_source::MailPrivacy, s: &MailSeen) -> Re
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A test's messages (by Message-ID) whose observation fails.
+    pub(crate) static OBSERVE_FAILS: std::cell::RefCell<std::collections::BTreeSet<String>> =
+        Default::default();
+}
+
 /// Record what the pull fetched; wake triage when anything changed.
 /// Returns the positions in `seen` of the messages not wholly recorded
 /// (their thread, or an ember's match): observing one again finishes it
@@ -255,6 +364,11 @@ pub fn observe(state: &AppState, seen: &[MailSeen]) -> Vec<usize> {
     // read after the pull made the memories, once for the batch
     let privacy = crate::virtual_source::MailPrivacy::new(state);
     for (i, s) in seen.iter().enumerate() {
+        #[cfg(test)]
+        if OBSERVE_FAILS.with(|ids| ids.borrow().contains(&s.message_id)) {
+            failed.push(i);
+            continue;
+        }
         // its privacy as of now: the pull made its memory after reading it
         let private = match private_now(&privacy, s) {
             Ok(Now::Private) => true,
@@ -347,17 +461,27 @@ pub fn backfill(state: &AppState, mb: &crate::mailboxes::Mailbox) -> Result<usiz
     }
     let since = chrono::Utc::now() - chrono::Duration::days(BACKFILL_DAYS);
     let mut seen_all = Vec::new();
+    let mut ids = Vec::new();
+    // what couldn't be read or recorded: observed by the next pull
+    let mut unfinished = Vec::new();
     for (id, labels) in crate::mbox_index::since(&mbox, since)? {
         let labels: Vec<String> = labels
             .split(',')
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty())
             .collect();
-        let Ok(raw) = crate::mbox_index::fetch(&mbox, &id, 2_000_000) else {
-            continue;
+        // the bytes as archived: 8-bit text is decoded by its own charset
+        let raw = match crate::mbox_index::fetch_bytes(&mbox, &id) {
+            Ok(raw) => raw,
+            Err(err) => {
+                tracing::warn!("mail: {id}: archived copy unreadable: {err:#}");
+                unfinished.push(id);
+                continue;
+            }
         };
-        if let Some(s) = seen_with(state, &privacy, &account, &mine, &labels, raw.as_bytes()) {
+        if let Some(s) = seen_with(&privacy, &account, &mine, &labels, &raw) {
             seen_all.push(s);
+            ids.push(id);
         }
     }
     let n = seen_all.len();
@@ -366,6 +490,8 @@ pub fn backfill(state: &AppState, mb: &crate::mailboxes::Mailbox) -> Result<usiz
     if !failed.is_empty() && failed.len() == n && privacy_held_now(state) {
         return Ok(0);
     }
+    unfinished.extend(failed.iter().map(|i| ids[*i].clone()));
+    crate::gmail_pull::keep_pending(mb, &mbox, unfinished)?;
     state
         .store
         .set_consolidation_state(&mb.key(KEY_BACKFILLED), &hearthloom_core::time::now_utc())?;
@@ -680,16 +806,22 @@ async fn ask_api(
 /// one the index knows, this node hasn't pulled it, or its archive is
 /// gone — can't be checked, so its thread waits: left out, its label as
 /// it is (nothing says its mail is private; a node that took over another
-/// node's mailbox holds none of its archive), and checked again next
-/// round. Returns the threads kept and how many wait. None while mail is
-/// held: no thread goes to a model, and none is made private on the
-/// hold's strength. An error fails the round: nothing goes to a model.
+/// node's mailbox holds none of its archive), and checked again later
+/// (`waits_still`). Returns the threads kept and those that wait. None
+/// while mail is held: no thread goes to a model, and none is made private
+/// on the hold's strength. An error fails the round: nothing goes to a
+/// model.
 fn for_model(
     state: &AppState,
+    archives: &[std::path::PathBuf],
     threads: Vec<MailThread>,
-) -> Result<Option<(Vec<MailThread>, usize)>> {
+) -> Result<Option<(Vec<MailThread>, Vec<MailThread>)>> {
     use crate::virtual_source::ItemKey;
-    let archives = crate::mailboxes::live_archives(state)?;
+    let keys_from_archive = |id: &str| {
+        #[cfg(test)]
+        count_lookup(state);
+        keys_from_archive(archives, id)
+    };
     // per thread: each message's id and the keys its memory can be under
     // (None: keys that can't be read — the id alone), and whether a
     // message's keys can't be known
@@ -704,7 +836,7 @@ fn for_model(
             let refs = match refs {
                 Some(refs) => Some(refs),
                 None => {
-                    let refs = keys_from_archive(&archives, &id)?;
+                    let refs = keys_from_archive(&id)?;
                     match &refs {
                         Some(refs) => state.store.mail_thread_message_set_refs(&id, refs)?,
                         // the id alone: not a memory keyed by its text
@@ -721,7 +853,7 @@ fn for_model(
         // they can't be, it can't be checked.
         if let Some(last) = &t.last_message_id {
             if !messages.iter().any(|(id, _)| id == last) {
-                let refs = keys_from_archive(&archives, last)?;
+                let refs = keys_from_archive(last)?;
                 unknown |= refs.is_none();
                 messages.push((last.clone(), refs));
             }
@@ -749,7 +881,7 @@ fn for_model(
     };
     let held = privacy.hold()?.is_some();
     let mut kept = Vec::new();
-    let mut waiting = 0;
+    let mut waiting = Vec::new();
     for ((t, messages), unknown) in threads.into_iter().zip(messages_of).zip(unknown_of) {
         let private = messages.iter().any(|(id, refs)| {
             found.contains(id)
@@ -763,15 +895,16 @@ fn for_model(
             state.store.mail_thread_make_private(&actor(), &t.id)?;
             tracing::info!("mail: a thread's mail is private now: made private, not sorted");
         } else if unknown {
-            waiting += 1;
+            waiting.push(t);
         } else {
             kept.push(t);
         }
     }
-    if waiting > 0 {
+    if !waiting.is_empty() {
         tracing::debug!(
-            "mail: {waiting} thread(s) whose mail this node can't check yet (no memory keys \
-             here, none in a live archive here): left waiting, not sorted"
+            "mail: {} thread(s) whose mail this node can't check yet (no memory keys \
+             here, none in a live archive here): left waiting, not sorted",
+            waiting.len()
         );
     }
     Ok((!held).then_some((kept, waiting)))
@@ -864,6 +997,40 @@ pub(crate) fn close_private_threads(
     Ok(closed)
 }
 
+/// One page of the threads waiting to be sorted, past the first `skip`
+/// (call it from a blocking thread: one short hold of the store): the first
+/// ones not known to wait, at most `BATCH`, and how many known to wait come
+/// before the last of them. None when no thread is past `skip`.
+fn next_batch(
+    state: &AppState,
+    archives: &[std::path::PathBuf],
+    skip: usize,
+    mine: &[String],
+    unwatched: Option<&[String]>,
+) -> Result<Option<(Vec<MailThread>, usize)>> {
+    let page = state
+        .store
+        .mail_threads_to_triage_from(skip, PAGE, mine, unwatched)?;
+    #[cfg(test)]
+    count_for(&PAGES_READ_BY_HOME, state);
+    if page.is_empty() {
+        return Ok(None);
+    }
+    let mut batch = Vec::new();
+    let mut passed = 0;
+    for t in page {
+        if batch.len() == BATCH {
+            break;
+        }
+        if waits_still(state, archives, &t) {
+            passed += 1;
+        } else {
+            batch.push(t);
+        }
+    }
+    Ok(Some((batch, passed)))
+}
+
 /// Sort the threads waiting for it, one batch. Returns how many were sorted.
 /// Sort what waits, of the mailboxes this node handles: each thread is
 /// sorted once, on the node that handles its mailbox (mailboxes::duty).
@@ -875,31 +1042,50 @@ pub(crate) async fn triage_for(state: &AppState, duty: &crate::mailboxes::Duty) 
     if duty.is_idle() {
         return Ok(0);
     }
-    // threads that wait stay in the queue, ahead of the next page
+    let archives = crate::mailboxes::live_archives(state)?;
+    // threads that wait stay in the queue, ahead of the next page; those
+    // found waiting lately are passed over unread (`waits_still`)
     let mut skip = 0;
     let threads = loop {
-        let batch = state.store.mail_threads_to_triage_from(
-            skip,
-            BATCH,
-            &duty.mine,
-            duty.unwatched.as_deref(),
-        )?;
-        if batch.is_empty() {
+        // a page at a time on the blocking pool (one short hold of the
+        // store each), a pause between pages: a long backlog of threads
+        // that wait never holds a runtime worker
+        let (st, seen_with) = (state.clone(), archives.clone());
+        let (mine, unwatched) = (duty.mine.clone(), duty.unwatched.clone());
+        let page = tokio::task::spawn_blocking(move || {
+            next_batch(&st, &seen_with, skip, &mine, unwatched.as_deref())
+        })
+        .await
+        .map_err(|err| anyhow!("reading threads to sort: {err}"))??;
+        let Some((batch, passed)) = page else {
             return Ok(0);
+        };
+        if batch.is_empty() {
+            skip += passed;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            continue;
         }
-        let st = state.clone();
-        let kept = tokio::task::spawn_blocking(move || for_model(&st, batch))
+        let ids: Vec<String> = batch.iter().map(|t| t.id.clone()).collect();
+        let (st, seen_with) = (state.clone(), archives.clone());
+        let kept = tokio::task::spawn_blocking(move || for_model(&st, &seen_with, batch))
             .await
             .map_err(|err| anyhow!("checking threads' privacy: {err}"))??;
         match kept {
             // mail is held: nothing is sorted until it ends
             None => return Ok(0),
-            Some((kept, _)) if !kept.is_empty() => break kept,
-            // a batch made private leaves the queue, one that waits is
-            // paged past: the next one is new (after a pause for whoever
-            // waits on the store)
-            Some((_, waiting)) => {
-                skip += waiting;
+            Some((kept, waiting)) => {
+                let not_waiting: Vec<String> = ids
+                    .into_iter()
+                    .filter(|id| !waiting.iter().any(|t| t.id == *id))
+                    .collect();
+                note_waiting(state, &archives, &waiting, &not_waiting);
+                if !kept.is_empty() {
+                    break kept;
+                }
+                // a batch made private leaves the queue, one that waits is
+                // paged past: the next one is new (after a pause for
+                // whoever waits on the store)
+                skip += passed + waiting.len();
                 tokio::time::sleep(Duration::from_millis(50)).await
             }
         }

@@ -675,4 +675,29 @@ mod tests {
             offenders.join("\n")
         );
     }
+
+    /// Pulse keeps a series for the page's life only when every request
+    /// for it was answered: a failed one (the health sidecar still being
+    /// brought up to date after an upgrade) is asked again on the next
+    /// view. `tests/pulse/cache.mjs` runs the real pulse.js in Node with a
+    /// stubbed fetch; without Node on the machine the test says so and
+    /// passes.
+    #[test]
+    fn test_pulse_asks_again_after_a_failed_request() {
+        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/pulse/cache.mjs");
+        let output = match std::process::Command::new("node").arg(script).output() {
+            Ok(output) => output,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("node isn't installed: tests/pulse/cache.mjs not run");
+                return;
+            }
+            Err(err) => panic!("running node: {err}"),
+        };
+        assert!(
+            output.status.success(),
+            "tests/pulse/cache.mjs failed:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

@@ -70,18 +70,33 @@ function aggToday(rows, keep, field, combine) {
 
 // One fetch of today's live rollup per page view and set of units (a
 // metric's readings come back in the unit asked for, each row naming
-// its unit), shared across metrics.
+// its unit), shared across metrics. A request that fails is not kept
+// (null): the next view asks again.
 const todayCache = new Map();
 function loadToday(units = {}) {
   const query = new URLSearchParams(
     Object.entries(units).map(([metric, unit]) => [`unit.${metric}`, unit])).toString();
   if (!todayCache.has(query)) {
+    const forget = () => {
+      todayCache.delete(query);
+      return null;
+    };
     todayCache.set(query, fetch(`/v1/health/today${query ? `?${query}` : ""}`)
-      .then((r) => r.json()).catch(() => null));
+      .then((r) => (r.ok ? r.json() : forget())).catch(forget));
   }
   return todayCache.get(query);
 }
 
+/// A request's JSON; a failed request (the daemon busy, the health
+/// sidecar still being brought up to date after an upgrade) throws.
+async function fetchJson(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url}: ${r.status}`);
+  return r.json();
+}
+
+// Kept for the life of the page — only a series whose every request was
+// answered: one that failed is asked for again on the next view.
 const seriesCache = new Map();
 
 /// The unit a metric's series is in: the one its rows named, else the
@@ -92,14 +107,15 @@ function unitOf(metric) {
   return named ? named.replace(/<[^>]*>/g, "") : metric.unit;
 }
 
-async function loadSeries(metric) {
+export async function loadSeries(metric) {
   if (seriesCache.has(metric.id)) return seriesCache.get(metric.id);
   let points = [];
   let unit = null;
+  let answered = true;
   try {
     if (metric.src === "health") {
-      const data = await (await fetch(
-        `/v1/sources/virtual/apple-health/query?sql=${encodeURIComponent(metric.sql)}&limit=6000`)).json();
+      const data = await fetchJson(
+        `/v1/sources/virtual/apple-health/query?sql=${encodeURIComponent(metric.sql)}&limit=6000`);
       points = (data.rows || []).map(([day, v]) => [dayNum(day), v]);
       unit = (data.rows || []).map((row) => row[2]).find((u) => typeof u === "string" && u) || null;
       // "Today so far": the live device stream's intra-day point — the
@@ -108,6 +124,7 @@ async function loadSeries(metric) {
       // out); with no history, the live rows name the unit.
       if (metric.today) {
         const today = await loadToday(metric.hk && unit ? { [metric.hk]: unit } : {});
+        if (today == null) answered = false;
         if (metric.hk && !unit) {
           unit = (today?.rows || []).find((r) => r.metric === metric.hk && r.unit)?.unit || null;
         }
@@ -122,8 +139,7 @@ async function loadSeries(metric) {
     } else if (metric.src === "metrics") {
       // Native derived series: rows are [day, metric, value, unit];
       // fold to one point per day (sum across exercises, or max).
-      const data = await (await fetch(
-        `/v1/metrics?metric=${encodeURIComponent(metric.metric)}`)).json();
+      const data = await fetchJson(`/v1/metrics?metric=${encodeURIComponent(metric.metric)}`);
       const byDay = new Map();
       for (const [day, , value] of (data.rows || [])) {
         const n = dayNum(day);
@@ -134,10 +150,14 @@ async function loadSeries(metric) {
     } else {
       const p = new URLSearchParams({ from: "0000-01-01", to: "9999-12-31", bucket: "day" });
       if (metric.source) p.set("source", metric.source);
-      const data = await (await fetch(`/v1/timeline/histogram?${p}`)).json();
+      const data = await fetchJson(`/v1/timeline/histogram?${p}`);
       points = (data.buckets || []).map((b) => [dayNum(b.bucket), b.n]);
     }
-  } catch { /* daemon busy */ }
+  } catch {
+    // the daemon busy, or the sidecar not yet up to date: shown empty
+    // now, asked for again on the next view
+    answered = false;
+  }
   points.sort((a, b) => a[0] - b[0]);
   // milestones: all-time extremes
   let hi = null, lo = null;
@@ -146,7 +166,7 @@ async function loadSeries(metric) {
     if (!lo || p[1] < lo[1]) lo = p;
   }
   const series = { points, hi, lo, unit };
-  seriesCache.set(metric.id, series);
+  if (answered) seriesCache.set(metric.id, series);
   return series;
 }
 

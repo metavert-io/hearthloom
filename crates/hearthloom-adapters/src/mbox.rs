@@ -6,7 +6,8 @@
 //! archive text index): the subject and display names decoded (RFC 2047),
 //! the body's first text part decoded from its transfer encoding and
 //! charset, wherever it sits in the MIME tree. The episode body is that
-//! readable text (capped); the original bytes stay in the archive. The
+//! readable text (capped) — for mail with only an HTML part, followed by
+//! its links' and images' targets; the original bytes stay in the archive. The
 //! message's identity (Message-ID, or the hash of its text) and its Gmail
 //! labels are read from the raw header block, as before.
 
@@ -136,6 +137,21 @@ pub fn ingest_batched_filtered(
     scope: Option<&str>,
     filter: &LabelFilter,
     batch_size: usize,
+    sink: impl FnMut(Vec<EpisodeDraft>) -> Result<()>,
+) -> Result<usize> {
+    ingest_batched_checked(path, scope, filter, &|_| false, batch_size, sink)
+}
+
+/// [`ingest_batched_filtered`], with `private` asked of each kept message's
+/// bytes: one it answers true for is drafted private. The stored text is
+/// cut ([`BODY_CAP`], the link targets' room), so a check of the draft
+/// alone misses what was cut; the caller checks the whole message.
+pub fn ingest_batched_checked(
+    path: &Path,
+    scope: Option<&str>,
+    filter: &LabelFilter,
+    private: &dyn Fn(&[u8]) -> bool,
+    batch_size: usize,
     mut sink: impl FnMut(Vec<EpisodeDraft>) -> Result<()>,
 ) -> Result<usize> {
     use std::io::BufRead;
@@ -158,7 +174,10 @@ pub fn ingest_batched_filtered(
                 return;
             }
             match draft_from_bytes_filtered(current, filter, scope) {
-                Ok(Some(draft)) => {
+                Ok(Some(mut draft)) => {
+                    if private(current) {
+                        draft.scope = Some("private".into());
+                    }
                     batch.push(draft);
                     *total += 1;
                 }
@@ -314,6 +333,129 @@ fn people(list: Option<mail_parser::AddressList<'_>>) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The targets of an HTML part's links and images (the values of its
+/// `href` and `src` attributes), in order, once each and one line each,
+/// at most [`BODY_CAP`] bytes together: a target too long for the room left
+/// is left out, and the ones after it still go in. A target left out keeps
+/// its host in its place (`target_host`, once each, in a room of their own
+/// as large), so a domain rule made after the import still finds the
+/// stored memory. Inline data (`data:`) is left out. One pass over the
+/// text, however many links it repeats. The rest of a target left out is
+/// not stored, so the importing caller checks the privacy rules over the
+/// whole message (`ingest_batched_checked`). The flag: a host didn't fit
+/// its room either — a rule made later can't find that one, so the caller
+/// drafts the memory private.
+fn link_targets(html: &str) -> (Vec<String>, bool) {
+    // ASCII lowercasing keeps every byte where it was, so positions found
+    // in `lower` slice `html`
+    let lower = html.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let blank = |i: usize| bytes.get(i).is_some_and(|b| b.is_ascii_whitespace());
+    let mut out: Vec<String> = Vec::new();
+    let mut kept: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut total = 0;
+    let mut hosts_total = 0;
+    let mut host_left_out = false;
+    let mut at = 0;
+    while at < bytes.len() {
+        // the next `href` or `src`: the search only ever moves forward
+        let Some((start, len)) = (at..bytes.len()).find_map(|i| {
+            if bytes[i..].starts_with(b"href") {
+                Some((i, 4))
+            } else if bytes[i..].starts_with(b"src") {
+                Some((i, 3))
+            } else {
+                None
+            }
+        }) else {
+            break;
+        };
+        at = start + len;
+        // a whole attribute name, then `=`
+        if start > 0
+            && !matches!(
+                bytes[start - 1],
+                b'"' | b'\'' | b'/' | b' ' | b'\t' | b'\r' | b'\n'
+            )
+        {
+            continue;
+        }
+        let mut i = at;
+        while blank(i) {
+            i += 1;
+        }
+        if bytes.get(i) != Some(&b'=') {
+            continue;
+        }
+        i += 1;
+        while blank(i) {
+            i += 1;
+        }
+        let (from, to) = match bytes.get(i) {
+            Some(&quote @ (b'"' | b'\'')) => {
+                let from = i + 1;
+                let to = lower[from..]
+                    .find(quote as char)
+                    .map_or(bytes.len(), |e| from + e);
+                (from, to)
+            }
+            Some(_) => {
+                let to = lower[i..]
+                    .find(|c: char| c.is_ascii_whitespace() || c == '>')
+                    .map_or(bytes.len(), |e| i + e);
+                (i, to)
+            }
+            None => break,
+        };
+        at = to;
+        let target = hearthloom_core::one_line(&html[from..to]);
+        if target.is_empty()
+            || target
+                .get(..5)
+                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
+            || kept.contains(&target)
+        {
+            continue;
+        }
+        if total + target.len() + 1 > BODY_CAP {
+            let host = target_host(&target);
+            // each host with its line break, in a room as large
+            if !host.is_empty() && !kept.contains(host) {
+                if hosts_total + host.len() < BODY_CAP {
+                    hosts_total += host.len() + 1;
+                    kept.insert(host.to_string());
+                    out.push(host.to_string());
+                } else {
+                    host_left_out = true;
+                }
+            }
+            continue;
+        }
+        total += target.len() + 1;
+        kept.insert(target.clone());
+        out.push(target);
+    }
+    (out, host_left_out)
+}
+
+/// A link target up to the end of its host: `https://portal.example/r?d=1`
+/// → `https://portal.example`, `mailto:desk@clinic.example?subject=x` →
+/// `mailto:desk@clinic.example`.
+fn target_host(target: &str) -> &str {
+    let start = if target.starts_with("//") {
+        2
+    } else {
+        match target.find("://") {
+            Some(i) if !target[..i].contains(['/', '?', '#']) => i + 3,
+            _ => 0,
+        }
+    };
+    let end = target[start..]
+        .find(['/', '?', '#'])
+        .map_or(target.len(), |e| start + e);
+    &target[..end]
+}
+
 /// The `source_ref` prefix of a message without a Message-ID: its memory
 /// is keyed by a hash of the exact text the import read, which depends on
 /// how that copy was framed (the archive's line endings, the labels the
@@ -358,11 +500,14 @@ fn message_to_draft(raw: &[u8], labels: &[String], scope: Option<&str>) -> Resul
         Err(_) => EventTime::unknown(),
     };
 
+    // The first of each address header, as the archive's index reads them
+    // (mail-parser's `from()` and the like answer the last).
     let (from, recipients) = match parsed.as_ref() {
         Some(m) => {
-            let mut recipients = people(m.to());
-            recipients.extend(people(m.cc()));
-            (people(m.from()), recipients)
+            let fields = m.headers();
+            let mut recipients = people(fields.all_to().next());
+            recipients.extend(people(fields.all_cc().next()));
+            (people(fields.all_from().next()), recipients)
         }
         None => (vec![], vec![]),
     };
@@ -384,6 +529,24 @@ fn message_to_draft(raw: &[u8], labels: &[String], scope: Option<&str>) -> Resul
         text.truncate(text.floor_char_boundary(BODY_CAP));
         text.push_str("\n[truncated]");
     }
+    // HTML turned into text keeps only what a reader sees: the targets of
+    // its links and images go after it, so the stored memory names the
+    // domains its message links to (the importing caller checks the
+    // privacy rules over the whole message, past any cut). A message
+    // linking to more hosts than their room holds is drafted private: a
+    // domain rule made later couldn't find the ones left out.
+    let (links, host_left_out) = parsed
+        .as_ref()
+        .and_then(|m| m.text_body().next())
+        .filter(|part| matches!(part.kind(), mail_parser::PartKind::Html))
+        .and_then(|part| part.text())
+        .map(|html| link_targets(&html))
+        .unwrap_or_default();
+    let scope = if host_left_out {
+        Some("private")
+    } else {
+        scope
+    };
     let mut body = format!("subject: {subject}\n");
     if let Some((email, name)) = from.first() {
         body.push_str(&format!("from: {name} <{email}>\n"));
@@ -398,6 +561,10 @@ fn message_to_draft(raw: &[u8], labels: &[String], scope: Option<&str>) -> Resul
     }
     body.push('\n');
     body.push_str(text.trim());
+    if !links.is_empty() {
+        body.push_str("\n\nlinks:\n");
+        body.push_str(&links.join("\n"));
+    }
 
     let mut entities = Vec::new();
     let mut edges = Vec::new();
@@ -548,6 +715,245 @@ Content-Type: text/html\n\
         assert!(!draft.body.contains("<b>html part</b>"));
         // An encoded-word display name is decoded.
         assert_eq!(draft.entities[0].name, "Jane");
+    }
+
+    /// Mail with only an HTML part keeps the targets of its links and
+    /// images beside the text it shows: a privacy rule naming a link's
+    /// domain reads the memory as it reads the message.
+    #[test]
+    fn test_html_only_mail_keeps_its_link_targets() {
+        let message = "From: Ann <ann@x.example>\nSubject: your visit\n\
+             Date: Mon, 05 Jan 2026 10:00:00 -0400\nMessage-ID: <html1@x>\n\
+             Content-Type: text/html; charset=utf-8\n\n\
+             <p>Your results are ready: <a class=\"btn\" HREF = 'https://portal.clinic-one.example/r?id=7'>view them</a>\
+             <img src=https://img.clinic-one.example/logo.png alt=logo>\
+             <img src=\"data:image/png;base64,AAAA\"><a data-href=\"x\" href=\"mailto:desk@clinic-one.example\">mail us</a></p>\n";
+        let draft = message_to_draft(message.as_bytes(), &[], None).unwrap();
+        assert!(draft.body.contains("view them"), "{}", draft.body);
+        assert!(
+            draft.body.ends_with(
+                "\n\nlinks:\nhttps://portal.clinic-one.example/r?id=7\n\
+                 https://img.clinic-one.example/logo.png\nmailto:desk@clinic-one.example"
+            ),
+            "{}",
+            draft.body
+        );
+        // a message with a text part stores that part alone, as before
+        let messages = split_mbox(SAMPLE);
+        let draft = message_to_draft(messages[1].as_bytes(), &[], None).unwrap();
+        assert!(!draft.body.contains("links:"), "{}", draft.body);
+    }
+
+    /// An image address longer than the room for targets is left out but
+    /// for its host, and the link after it is kept: a domain rule naming
+    /// that link's domain makes the memory private when it is stored.
+    #[test]
+    fn test_a_target_too_long_to_keep_leaves_the_rest_for_the_rules() {
+        use hearthloom_core::store::{Actor, Store};
+        let pixel = format!("https://track.example/p?d={}", "a".repeat(BODY_CAP + 10));
+        let message = format!(
+            "From: Ann <ann@x.example>\nSubject: your visit\n\
+             Date: Mon, 05 Jan 2026 10:00:00 -0400\nMessage-ID: <long1@x>\n\
+             Content-Type: text/html; charset=utf-8\n\n\
+             <p><img src=\"{pixel}\">Your results are ready: \
+             <a href=\"https://portal.clinic-one.example/r?id=7\">view them</a></p>\n"
+        );
+        let draft = message_to_draft(message.as_bytes(), &[], None).unwrap();
+        assert!(
+            draft.body.ends_with(
+                "\n\nlinks:\nhttps://track.example\nhttps://portal.clinic-one.example/r?id=7"
+            ),
+            "{}",
+            &draft.body[draft.body.len().saturating_sub(200)..]
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::paths::Home::at(tmp.path());
+        home.init().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        store
+            .add_privacy_rule(&Actor::new("human:test"), "domain", "clinic-one.example")
+            .unwrap();
+        store
+            .apply_batch(
+                &home,
+                &hearthloom_core::IngestBatch {
+                    actor: "adapter:mbox".into(),
+                    session_id: None,
+                    episodes: vec![draft],
+                },
+            )
+            .unwrap();
+        store.vault_unlock(15);
+        let stored = store
+            .episode(&hearthloom_core::ids::episode_id("mbox", "long1@x"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.scope, "private");
+    }
+
+    /// A link the room leaves out keeps its host in the stored text, so a
+    /// domain rule made after the import finds the memory — whether an image
+    /// address took the whole room before the link, or the link alone is
+    /// longer than the room.
+    #[test]
+    fn test_a_rule_made_after_the_import_finds_the_host_of_a_link_left_out() {
+        use hearthloom_core::store::{Actor, Store};
+        let prefix = "https://track.example/p?d=";
+        let filler = format!("{prefix}{}", "a".repeat(BODY_CAP - 1 - prefix.len()));
+        let message = |id: &str, html: &str| {
+            format!(
+                "From: Ann <ann@x.example>\nSubject: your visit\n\
+                 Date: Mon, 05 Jan 2026 10:00:00 -0400\nMessage-ID: <{id}>\n\
+                 Content-Type: text/html; charset=utf-8\n\n{html}\n"
+            )
+        };
+        let messages = [
+            message(
+                "filled@x",
+                &format!(
+                    "<p><img src=\"{filler}\">Your results are ready: \
+                     <a href=\"https://portal.clinic-one.example/r\">view them</a></p>"
+                ),
+            ),
+            message(
+                "long@x",
+                &format!(
+                    "<p>Your results are ready: \
+                     <a href=\"https://portal.clinic-one.example/r?d={}\">view them</a></p>",
+                    "a".repeat(BODY_CAP + 10)
+                ),
+            ),
+        ];
+        let drafts: Vec<EpisodeDraft> = messages
+            .iter()
+            .map(|m| message_to_draft(m.as_bytes(), &[], None).unwrap())
+            .collect();
+        for draft in &drafts {
+            let tail = &draft.body[draft.body.len().saturating_sub(200)..];
+            assert!(
+                draft.body.ends_with("\nhttps://portal.clinic-one.example"),
+                "{tail}"
+            );
+            assert!(!draft.body.contains("clinic-one.example/r"), "{tail}");
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::paths::Home::at(tmp.path());
+        home.init().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        store
+            .apply_batch(
+                &home,
+                &hearthloom_core::IngestBatch {
+                    actor: "adapter:mbox".into(),
+                    session_id: None,
+                    episodes: drafts,
+                },
+            )
+            .unwrap();
+        let (_, relabeled) = store
+            .add_privacy_rule(&Actor::new("human:test"), "domain", "clinic-one.example")
+            .unwrap();
+        assert_eq!(relabeled, 2);
+        assert_eq!(
+            store
+                .private_source_refs("mbox", &["filled@x".into(), "long@x".into()])
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    /// A message linking to more hosts than the hosts' room holds goes into
+    /// the vault as it is stored: a domain rule made later couldn't find
+    /// the hosts left out.
+    #[test]
+    fn test_a_message_with_more_hosts_than_their_room_is_stored_private() {
+        use hearthloom_core::store::Store;
+        let prefix = "https://track.example/p?d=";
+        let filler = format!("{prefix}{}", "a".repeat(BODY_CAP - 1 - prefix.len()));
+        let mut html = format!("<p><img src=\"{filler}\">");
+        for i in 0..3_000 {
+            html.push_str(&format!("<a href=\"https://h{i:04}.example/x\">h</a>"));
+        }
+        html.push_str("<a href=\"https://portal.clinic-one.example/r\">view them</a></p>");
+        let message = format!(
+            "From: Ann <ann@x.example>\nSubject: your visit\n\
+             Date: Mon, 05 Jan 2026 10:00:00 -0400\nMessage-ID: <hosts@x>\n\
+             Content-Type: text/html; charset=utf-8\n\n{html}\n"
+        );
+        let draft = message_to_draft(message.as_bytes(), &[], None).unwrap();
+        assert!(!draft.body.contains("clinic-one.example"));
+        assert_eq!(draft.scope.as_deref(), Some("private"));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::paths::Home::at(tmp.path());
+        home.init().unwrap();
+        let store = Store::open_in_memory().unwrap();
+        store
+            .apply_batch(
+                &home,
+                &hearthloom_core::IngestBatch {
+                    actor: "adapter:mbox".into(),
+                    session_id: None,
+                    episodes: vec![draft],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .private_source_refs("mbox", &["hosts@x".into()])
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// A large body repeating links is read in one pass: the targets are
+    /// the distinct ones, found in time proportional to its length.
+    #[test]
+    fn test_repeated_links_are_read_in_one_pass() {
+        let mut html = String::new();
+        for i in 0..5_000 {
+            html.push_str(&format!("<a href=d{i}>d</a>"));
+        }
+        html.push_str(&"<a href=d4999>d</a>".repeat(60_000));
+        let started = std::time::Instant::now();
+        let (targets, _) = link_targets(&html);
+        let took = started.elapsed();
+        assert_eq!(targets.len(), 5_000);
+        assert_eq!(targets.last().map(String::as_str), Some("d4999"));
+        assert!(
+            took < std::time::Duration::from_secs(3),
+            "{} bytes took {took:?}",
+            html.len()
+        );
+    }
+
+    /// With From, To or Cc written twice, the memory names the first of
+    /// each, as the archive's index does.
+    #[test]
+    fn test_a_repeated_address_header_is_read_first_one_first() {
+        let message = "From: Ann <ann@x.example>\nTo: Bob <bob@x.example>\n\
+             Cc: Cy <cy@x.example>\nFrom: Dee <dee@y.example>\nTo: Eve <eve@y.example>\n\
+             Cc: Fay <fay@y.example>\nSubject: s\n\
+             Date: Mon, 05 Jan 2026 10:00:00 -0400\nMessage-ID: <dup1@x>\n\nbody\n";
+        let draft = message_to_draft(message.as_bytes(), &[], None).unwrap();
+        let people: Vec<(&str, &str)> = draft
+            .entities
+            .iter()
+            .map(|e| (e.role.as_str(), e.attributes[0].1.as_str()))
+            .collect();
+        assert_eq!(
+            people,
+            vec![
+                ("author", "ann@x.example"),
+                ("recipient", "bob@x.example"),
+                ("recipient", "cy@x.example"),
+            ]
+        );
+        assert!(draft.body.contains("from: Ann <ann@x.example>\n"));
     }
 
     /// What is stored is readable text: encoded subjects and names decoded,

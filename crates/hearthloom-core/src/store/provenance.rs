@@ -54,9 +54,10 @@ pub const OTHERS_WORDS_SOURCES: &[&str] = &[
 pub const OTHERS_WORDS_PREFIXES: &[&str] = &["chatlog-"];
 
 /// What the v61 migration relabelled, as it shipped. A migration's effect
-/// stays fixed; sources added to `OTHERS_WORDS_SOURCES` later are judged
-/// when read instead (`not_owners_words_sql`), whatever trust an earlier
-/// build stored them with.
+/// stays fixed: a source added to `OTHERS_WORDS_SOURCES` later is
+/// relabelled by a migration of its own (git and Substack by v73,
+/// `v73_relabel_sql`), and the taint checks judge every row when read
+/// (`not_owners_words_sql`), whatever trust an earlier build stored it with.
 const V61_RELABELLED: &[&str] = &[
     "imessage",
     "chrome",
@@ -117,6 +118,13 @@ pub fn trust_for(source: &str, trust: &str) -> String {
 /// source others wrote, as the migration shipped (`V61_RELABELLED`).
 pub(crate) fn others_words_sql() -> String {
     format!("trust = 'self' AND ({})", source_sql(V61_RELABELLED, ""))
+}
+
+/// The v73 relabel's WHERE clause: `self` rows of the sources that joined
+/// `OTHERS_WORDS_SOURCES` after v61 — a repository's history and a
+/// publication — so every reader sees the trust `trust_for` now gives them.
+pub(crate) fn v73_relabel_sql() -> &'static str {
+    "trust = 'self' AND source IN ('git', 'substack')"
 }
 
 /// One node an episode passed through. `node` is a node id (names are
@@ -451,6 +459,53 @@ mod tests {
             !others_words_sql().contains("'git'"),
             "the shipped migration's list stays as it was"
         );
+    }
+
+    /// Commits and posts an earlier build stored as the owner's own words
+    /// are stored as outside text once the store is opened by this one;
+    /// the owner's own writing keeps its trust.
+    #[test]
+    fn test_commits_and_posts_stored_as_the_owners_words_are_relabelled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = crate::paths::Home::at(tmp.path());
+        home.init().unwrap();
+        let store = Store::open(&home.db_path()).unwrap();
+        store
+            .apply_batch(
+                &home,
+                &IngestBatch {
+                    actor: "human:owner".into(),
+                    session_id: None,
+                    episodes: vec![
+                        draft("git", "repo#1", "self"),
+                        draft("substack", "post-1", "self"),
+                        draft("desk", "task-1", "self"),
+                    ],
+                },
+            )
+            .unwrap();
+        // what a build before the migration left: every one `self`
+        {
+            let conn = store.lock();
+            conn.execute("UPDATE episodes SET trust = 'self'", [])
+                .unwrap();
+            conn.pragma_update(None, "user_version", 72).unwrap();
+        }
+        drop(store);
+        let store = Store::open(&home.db_path()).unwrap();
+        let trust = |s: &str, r: &str| -> String {
+            store
+                .lock()
+                .query_row(
+                    "SELECT trust FROM episodes WHERE id = ?1",
+                    [crate::ids::episode_id(s, r)],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(trust("git", "repo#1"), "imported");
+        assert_eq!(trust("substack", "post-1"), "imported");
+        assert_eq!(trust("desk", "task-1"), "self");
     }
 
     /// A commit or a post is outside text for the taint checks: one landing

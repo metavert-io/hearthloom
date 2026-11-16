@@ -17,6 +17,11 @@
 //!   lands under the profile's key, and the store puts the named day
 //!   behind it (store/growing.rs); a same-named day it doesn't hold (another
 //!   profile's, on this machine or another) stays in view.
+//! - A git commit an earlier version stored under its repository's address
+//!   as `git remote` gave it (a credential in it) is left out: the clean
+//!   address names the same commit ([`FormerAddresses`]). An import labelled
+//!   private names it under that address too ([`private_refs`]), so the
+//!   stored copy goes into the vault.
 //!
 //! Peers' batches never pass through here: they replicate copies already
 //! decided on the node that read the files. Callers run this on a blocking
@@ -37,7 +42,20 @@ pub(crate) fn prepare(
 ) -> anyhow::Result<Vec<EpisodeDraft>> {
     let mut out = Vec::with_capacity(drafts.len());
     let mut looked = 0usize;
+    // read once a commit comes along
+    let mut former_addresses: Option<FormerAddresses> = None;
     for mut draft in drafts {
+        if draft.source == "git" {
+            let former = match &mut former_addresses {
+                Some(former) => former,
+                None => former_addresses.insert(FormerAddresses::read(store)?),
+            };
+            if former.holds(store, &draft, &mut looked)? {
+                continue;
+            }
+            out.push(draft);
+            continue;
+        }
         // a draft that already names a revision passes as it is
         let Some((base, 0)) = growing_copy(&draft.source, &draft.source_ref) else {
             out.push(draft);
@@ -50,14 +68,8 @@ pub(crate) fn prepare(
         let base = base.to_string();
         match store.growing_latest(home, &draft.source, &base)? {
             None => {
-                if let Some(named) = chrome_named_ref(&draft.source_ref, &draft.body) {
-                    let held = store
-                        .growing_latest(home, "chrome", &named)?
-                        .and_then(|day| day.body(home))
-                        .is_some_and(|day| chrome_day_holds(&day, &draft.body));
-                    if held {
-                        continue;
-                    }
+                if named_day_holding(store, home, &draft)?.is_some() {
+                    continue;
                 }
                 // named by what it holds, like every later read: a first
                 // read of the same day or session on another node that
@@ -85,6 +97,150 @@ pub(crate) fn prepare(
         }
     }
     Ok(out)
+}
+
+/// For a Chrome day keyed by its profile: the day an earlier version
+/// stored under the profile's shown name, when that day holds every visit
+/// of this one — this day's earlier copy.
+fn named_day_holding(
+    store: &Store,
+    home: &Home,
+    draft: &EpisodeDraft,
+) -> anyhow::Result<Option<String>> {
+    let Some(named) = chrome_named_ref(&draft.source_ref, &draft.body) else {
+        return Ok(None);
+    };
+    let held = store
+        .growing_latest(home, "chrome", &named)?
+        .and_then(|day| day.body(home))
+        .is_some_and(|day| chrome_day_holds(&day, &draft.body));
+    Ok(held.then_some(named))
+}
+
+/// The addresses earlier versions stored repositories under: a commit's
+/// ref is `<address>#<sha>`, and before remote addresses lost their
+/// credentials (`git::without_credentials`) the address was kept as `git
+/// remote` gave it — `https://user:token@host/…`. A commit stored under
+/// such an address is the same commit: storing it again under the clean
+/// address would store the repository's whole history twice.
+struct FormerAddresses(std::collections::HashMap<String, Vec<String>>);
+
+impl FormerAddresses {
+    /// Each clean address, with the stored addresses that clean to it.
+    fn read(store: &Store) -> anyhow::Result<Self> {
+        let mut former: std::collections::HashMap<String, Vec<String>> = Default::default();
+        for stored in store.known_repo_urls()? {
+            let clean = hearthloom_adapters::git::without_credentials(&stored);
+            if clean != stored {
+                former.entry(clean).or_default().push(stored);
+            }
+        }
+        Ok(FormerAddresses(former))
+    }
+
+    /// The refs this commit (`<address>#<sha>`) has under its repository's
+    /// former addresses.
+    fn refs_of<'a>(&'a self, source_ref: &'a str) -> impl Iterator<Item = String> + 'a {
+        source_ref
+            .rsplit_once('#')
+            .into_iter()
+            .flat_map(move |(address, sha)| {
+                self.0
+                    .get(address)
+                    .into_iter()
+                    .flatten()
+                    .map(move |former| format!("{former}#{sha}"))
+            })
+    }
+
+    /// Is this commit stored under a former address of its repository?
+    fn holds(
+        &self,
+        store: &Store,
+        draft: &EpisodeDraft,
+        looked: &mut usize,
+    ) -> anyhow::Result<bool> {
+        for former in self.refs_of(&draft.source_ref) {
+            if *looked > 0 && looked.is_multiple_of(BATCH) {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+            *looked += 1;
+            if store.episode_exists("git", &former)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
+/// (source, source ref) of the drafts an import labels private — taken
+/// before [`prepare`], which leaves out a day or session stored before
+/// whose copy may still sit outside the vault, a Chrome day an earlier
+/// version stored under the profile's shown name, and a commit stored
+/// under a former address of its repository: that day, and that commit
+/// under each of them, are named too.
+pub(crate) fn private_refs(
+    store: &Store,
+    home: &Home,
+    drafts: &[EpisodeDraft],
+) -> anyhow::Result<Vec<(String, String)>> {
+    // read once a private commit comes along
+    let mut former_addresses: Option<FormerAddresses> = None;
+    let mut refs = Vec::new();
+    let mut looked = 0usize;
+    for draft in drafts
+        .iter()
+        .filter(|d| d.scope.as_deref() == Some("private"))
+    {
+        refs.push((draft.source.clone(), draft.source_ref.clone()));
+        if draft.source == "chrome" {
+            if looked > 0 && looked.is_multiple_of(BATCH) {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+            looked += 1;
+            if let Some(named) = named_day_holding(store, home, draft)? {
+                refs.push(("chrome".to_string(), named));
+            }
+        }
+        if draft.source == "git" {
+            let former = match &mut former_addresses {
+                Some(former) => former,
+                None => former_addresses.insert(FormerAddresses::read(store)?),
+            };
+            refs.extend(
+                former
+                    .refs_of(&draft.source_ref)
+                    .map(|former| ("git".to_string(), former)),
+            );
+        }
+    }
+    Ok(refs)
+}
+
+/// What the owner's import read as private — its drafts labelled private,
+/// and the `flagged` records it made no draft of — moves the copies stored
+/// before into the vault (`Store::label_private_on_reimport`), and the
+/// owner's other nodes hear of it at once (`privacy.changed`), as after a
+/// relabel by hand — also when the import's own apply already moved them
+/// (`landed`: its reports' `private_copies`, a fuller copy that landed
+/// private taking the copies of its day or session with it). Only for the
+/// owner's own imports. Call from a blocking thread of the runtime. Returns
+/// the records relabelled, with the other copies of their records the label
+/// reached.
+pub(crate) fn vault_stored_copies(
+    state: &crate::AppState,
+    actor: &hearthloom_core::Actor,
+    drafts: &[EpisodeDraft],
+    flagged: &[(String, String)],
+    landed: usize,
+) -> anyhow::Result<usize> {
+    let moved = state
+        .store
+        .label_private_on_reimport(actor, drafts, flagged)?;
+    if moved + landed > 0 {
+        crate::bus::touch(state, "privacy.changed");
+    }
+    Ok(moved)
 }
 
 #[cfg(test)]
@@ -160,6 +316,105 @@ mod tests {
         )
         .unwrap()
         .drafts
+    }
+
+    fn commit(address: &str, sha: &str, scope: Option<&str>) -> EpisodeDraft {
+        EpisodeDraft {
+            source: "git".into(),
+            source_ref: format!("{address}#{sha}"),
+            kind: "commit".into(),
+            title: format!("commit {sha}"),
+            body: format!("commit {sha}\nrepo: {address}\n"),
+            event_time: EventTime::unknown(),
+            trust: "imported".into(),
+            scope: scope.map(String::from),
+            entities: vec![hearthloom_core::EntityRef {
+                entity_type: "Project".into(),
+                name: "r".into(),
+                attributes: vec![("repo-url".into(), address.into())],
+                role: "repo".into(),
+            }],
+            edges: vec![],
+        }
+    }
+
+    /// A commit an earlier version stored under its repository's address
+    /// with the credential in it isn't stored again under the clean
+    /// address; a commit not stored before is, and another repository's
+    /// commit of the same id isn't held back.
+    #[test]
+    fn test_a_commit_stored_under_its_former_address_is_not_stored_again() {
+        let (store, home, _tmp) = node();
+        let commit = |address: &str, sha: &str| commit(address, sha, None);
+        let former = "https://user:tok@git.example/o/r.git";
+        let clean = "https://git.example/o/r.git";
+        let other = "https://git.example/o/fork.git";
+        let (a, b) = ("a".repeat(40), "b".repeat(40));
+        assert_eq!(
+            apply(&store, &home, "adapter:git", vec![commit(former, &a)]),
+            1
+        );
+        let landed = import(
+            &store,
+            &home,
+            "adapter:git",
+            vec![commit(clean, &a), commit(clean, &b), commit(other, &a)],
+        );
+        assert_eq!(landed, 2);
+        let mut refs: Vec<String> = live(&store, &home, "git")
+            .into_iter()
+            .map(|(r, _)| r)
+            .collect();
+        refs.sort();
+        let mut expected = vec![
+            format!("{former}#{a}"),
+            format!("{clean}#{b}"),
+            format!("{other}#{a}"),
+        ];
+        expected.sort();
+        assert_eq!(refs, expected);
+    }
+
+    /// The same, imported again as private: the commit stored under the
+    /// former address goes into the vault, though the import stores
+    /// nothing under the clean one.
+    #[test]
+    fn test_a_private_reimport_vaults_a_commit_stored_under_its_former_address() {
+        let (store, home, _tmp) = node();
+        let former = "https://user:tok@git.example/o/r.git";
+        let clean = "https://git.example/o/r.git";
+        let sha = "a".repeat(40);
+        assert_eq!(
+            apply(
+                &store,
+                &home,
+                "adapter:git",
+                vec![commit(former, &sha, None)]
+            ),
+            1
+        );
+        let drafts = vec![commit(clean, &sha, Some("private"))];
+        let private = private_refs(&store, &home, &drafts).unwrap();
+        assert_eq!(import(&store, &home, "adapter:git", drafts), 0);
+        let moved = store
+            .label_private_on_reimport(&hearthloom_core::Actor::new("adapter:git"), &[], &private)
+            .unwrap();
+        assert_eq!(moved, 1);
+        store.vault_unlock(15);
+        let (_, rows) = store
+            .read_query(
+                "SELECT source_ref, scope FROM episodes /* all-episodes: a label check */
+                 WHERE source = 'git'",
+                10,
+            )
+            .unwrap();
+        store.vault_lock();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0][0].as_str(),
+            Some(format!("{former}#{sha}").as_str())
+        );
+        assert_eq!(rows[0][1].as_str(), Some("private"));
     }
 
     /// A session left quiet long enough to be stored, then picked up
@@ -277,6 +532,33 @@ mod tests {
             live(&store, &home, "imessage")[0].0,
             "+15551234567#2026-03-16#r3"
         );
+    }
+
+    /// A chat-day an earlier version stored (no count line) that holds a
+    /// message with lines shaped like messages — a pasted chat log — still
+    /// gains the messages sent after it: those lines weigh the same in
+    /// every read of the day.
+    #[test]
+    fn test_a_day_holding_a_pasted_log_still_gains_its_later_messages() {
+        let (store, home, tmp) = node();
+        let db = tmp.path().join("chat.db");
+        let conn = chat_db(&db);
+        let pasted: String = (0..50).map(|i| format!("\n[10:{i:02}] x: y")).collect();
+        message(&conn, 1, 795362400000000000, &format!("look{pasted}"));
+        message(&conn, 2, 795362460000000000, "ok");
+        let read = || hearthloom_adapters::imessage::ingest(&db, None).unwrap();
+        // the day as an earlier version wrote it: the text without its count
+        let mut stored = read();
+        let body = stored[0].body.clone();
+        stored[0].body = body.split_once('\n').unwrap().1.to_string();
+        assert!(!stored[0].body.contains("messages: "));
+        assert_eq!(apply(&store, &home, "adapter:imessage", stored), 1);
+
+        message(&conn, 3, 795362520000000000, "one more");
+        assert_eq!(import(&store, &home, "adapter:imessage", read()), 1);
+        let kept = live(&store, &home, "imessage");
+        assert_eq!(kept.len(), 1);
+        assert!(kept[0].1.contains("one more"));
     }
 
     /// Today's messages land with the import that reads them, and the next
@@ -399,6 +681,61 @@ mod tests {
         );
         // the same read again changes nothing
         assert_eq!(import(&store, &home, "adapter:chrome", read), 0);
+    }
+
+    /// A private import of a profile's day that a day stored under the
+    /// profile's name already holds stores nothing, and takes that day into
+    /// the vault; a same-named day it isn't the copy of stays out.
+    #[test]
+    fn test_a_private_import_vaults_the_day_stored_under_the_profile_name() {
+        let (store, home, _tmp) = node();
+        let date = "2026-11-10";
+        apply(
+            &store,
+            &home,
+            "adapter:chrome",
+            vec![
+                chrome_day("Work#2026-11-10", "Work", date, &["09:00", "10:00"]),
+                chrome_day("Personal#2026-11-10", "Personal", date, &["20:00"]),
+            ],
+        );
+        let mut drafts = vec![
+            chrome_day("profile:1#2026-11-10", "Work", date, &["09:00", "10:00"]),
+            chrome_day("profile:2#2026-11-10", "Personal", date, &["08:00"]),
+        ];
+        for d in &mut drafts {
+            d.scope = Some("private".into());
+        }
+        let private = private_refs(&store, &home, &drafts).unwrap();
+        assert_eq!(import(&store, &home, "adapter:chrome", drafts), 1);
+        store
+            .label_private_on_reimport(
+                &hearthloom_core::Actor::new("adapter:chrome"),
+                &[],
+                &private,
+            )
+            .unwrap();
+        store.vault_unlock(15);
+        let (_, rows) = store
+            .read_query(
+                "SELECT source_ref, scope FROM episodes /* all-episodes: a label check */
+                 WHERE source = 'chrome' ORDER BY source_ref",
+                10,
+            )
+            .unwrap();
+        store.vault_lock();
+        let labels: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|r| (r[0].as_str().unwrap(), r[1].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                ("Personal#2026-11-10", "personal"),
+                ("Work#2026-11-10", "private"),
+                ("profile:2#2026-11-10#r1", "private"),
+            ]
+        );
     }
 
     /// Two Macs that both stored a "Work" day under the name, upgraded:

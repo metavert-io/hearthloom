@@ -398,21 +398,35 @@ pub(crate) struct MailHold {
 /// counts every message as private (`key_private`); what records a
 /// message's privacy reads `found`/`key_found` and `hold` apart.
 ///
-/// Read at most once for a batch of messages: the legacy promotions and the
+/// Read at most once for a batch of messages: the legacy promotions, the
 /// private keys a header's text around the id leaves
-/// (`Store::private_refs_not_bare`, a scan of the private set). The
-/// memories under a message's own key are looked up per call. Make one per
-/// batch, after the memories it should see were made.
+/// (`Store::private_refs_not_bare`, a scan of the private set) and the
+/// messages private corrected copies stand for
+/// (`Store::private_replacement_bases`, the same scan), whether a
+/// memory keyed by its text (no Message-ID) is private, and the privacy
+/// rules (`rules_match`). The memories under a message's own key are looked
+/// up per call. Make one per batch, after the memories it should see were
+/// made.
 pub(crate) struct MailPrivacy<'a> {
     state: &'a AppState,
     legacy: std::cell::OnceCell<LegacyPromotions>,
     not_bare: std::cell::OnceCell<Vec<String>>,
+    /// Whether a memory keyed by its text (no Message-ID) is private.
+    unkeyed: std::cell::OnceCell<bool>,
+    rules: std::cell::OnceCell<Vec<hearthloom_core::store::PrivacyRule>>,
 }
 
 #[cfg(test)]
 thread_local! {
     /// How many times this thread read the private set's not-bare keys.
     pub(crate) static NOT_BARE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many times this thread looked for a private memory keyed by its
+    /// text.
+    pub(crate) static UNKEYED_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many times this thread looked items' paths up (`marked_private`).
+    pub(crate) static PATH_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many times this thread read the privacy rules for mail.
+    pub(crate) static RULE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 impl<'a> MailPrivacy<'a> {
@@ -421,7 +435,53 @@ impl<'a> MailPrivacy<'a> {
             state,
             legacy: Default::default(),
             not_bare: Default::default(),
+            unkeyed: Default::default(),
+            rules: Default::default(),
         }
+    }
+
+    fn rules(&self) -> Result<&[hearthloom_core::store::PrivacyRule]> {
+        if let Some(rules) = self.rules.get() {
+            return Ok(rules);
+        }
+        #[cfg(test)]
+        RULE_READS.with(|n| n.set(n.get() + 1));
+        let rules = self.state.store.list_privacy_rules()?;
+        Ok(self.rules.get_or_init(|| rules))
+    }
+
+    /// Whether there are privacy rules at all (none: no text need be read).
+    pub(crate) fn any_rules(&self) -> Result<bool> {
+        Ok(!self.rules()?.is_empty())
+    }
+
+    /// `Store::privacy_rules_match`, over the rules as read for the batch.
+    pub(crate) fn rules_match(&self, text: &str) -> Result<bool> {
+        Ok(hearthloom_core::store::rules_match_text(
+            self.rules()?,
+            text,
+        ))
+    }
+
+    /// `mbox_text::rules_match_message`, over the rules as read for the
+    /// batch.
+    pub(crate) fn rules_match_message(&self, raw: &[u8]) -> Result<bool> {
+        Ok(crate::mbox_text::rules_match_message(self.rules()?, raw))
+    }
+
+    /// Whether a private memory is keyed the way the import keys a message
+    /// without a Message-ID — the same for every such message.
+    fn unkeyed_private(&self) -> Result<bool> {
+        if let Some(found) = self.unkeyed.get() {
+            return Ok(*found);
+        }
+        #[cfg(test)]
+        UNKEYED_READS.with(|n| n.set(n.get() + 1));
+        let found = self
+            .state
+            .store
+            .private_ref_prefixed_anywhere(hearthloom_adapters::mbox::UNKEYED_REF_PREFIX)?;
+        Ok(*self.unkeyed.get_or_init(|| found))
     }
 
     fn legacy(&self) -> Result<&LegacyPromotions> {
@@ -438,7 +498,10 @@ impl<'a> MailPrivacy<'a> {
         }
         #[cfg(test)]
         NOT_BARE_READS.with(|n| n.set(n.get() + 1));
-        let keys = self.state.store.private_refs_not_bare()?;
+        let mut keys = self.state.store.private_refs_not_bare()?;
+        // a private corrected copy is known by the key of the message it
+        // corrects, also where the original never arrived
+        keys.extend(self.state.store.private_replacement_bases()?);
         Ok(self.not_bare.get_or_init(|| keys))
     }
 
@@ -447,9 +510,10 @@ impl<'a> MailPrivacy<'a> {
         Ok(self.legacy()?.unknown.as_ref())
     }
 
-    /// Which of these keys has a memory labelled private — by its key, or
-    /// by the Message-ID a legacy promotion's text names. The hold is not
-    /// counted: this is what the record says of these messages themselves.
+    /// Which of these keys has a memory labelled private — by its key, by
+    /// a corrected copy of it (`<key>#repair:<hash>`), or by the Message-ID
+    /// a legacy promotion's text names. The hold is not counted: this is
+    /// what the record says of these messages themselves.
     pub(crate) fn found(&self, ids: &[String]) -> Result<std::collections::HashSet<String>> {
         let mut out = std::collections::HashSet::new();
         if ids.is_empty() {
@@ -469,12 +533,7 @@ impl<'a> MailPrivacy<'a> {
         Ok(match key {
             ItemKey::Path => false,
             ItemKey::Refs(refs) => !self.found(refs)?.is_empty(),
-            ItemKey::Unkeyed => {
-                self.legacy()?.unkeyed
-                    || self.state.store.private_ref_prefixed_anywhere(
-                        hearthloom_adapters::mbox::UNKEYED_REF_PREFIX,
-                    )?
-            }
+            ItemKey::Unkeyed => self.legacy()?.unkeyed || self.unkeyed_private()?,
         })
     }
 
@@ -654,11 +713,15 @@ fn note_hold(hold: Option<&MailHold>) {
 /// holds. Only a writer known to be someone else can't: an importer
 /// (`adapter:…`, whose refs others can choose — a calendar UID), a key that
 /// isn't the owner's (the server names it `agent:key:…`, an ember
-/// `plugin:…` — http.rs `ingest_actor`). Such a memory still counts as a
-/// private memory of the message its text names, but it never holds mail.
+/// `plugin:…` — http.rs `ingest_actor`), or one of the owner's own devices
+/// (`human:device:…`, a scoped key whose grants reach no promotion — its
+/// feeds carry refs others choose: a calendar UID). Such a memory still
+/// counts as a private memory of the message its text names, but it never
+/// holds mail.
 fn promoted_by_a_person(writer: Option<&str>) -> bool {
     match writer {
         None => true,
+        Some(w) if w.starts_with("human:device:") => false,
         Some(w) => w.starts_with("human:") || w.starts_with("peer:"),
     }
 }
@@ -688,6 +751,8 @@ fn marked_private(
     def: &VirtualSourceDef,
     paths: &[String],
 ) -> Result<std::collections::HashSet<String>> {
+    #[cfg(test)]
+    PATH_READS.with(|n| n.set(n.get() + 1));
     state.store.private_source_refs(&def.name, paths)
 }
 
@@ -717,14 +782,26 @@ fn item_private(
     privacy: &Privacy,
     mail: &MailPrivacy,
 ) -> Result<bool> {
-    if !marked_private(state, def, &[path.to_string()])?.is_empty() || mail.key_private(key)? {
+    Ok(!marked_private(state, def, &[path.to_string()])?.is_empty()
+        || private_beyond_path(def, key, privacy, mail)?)
+}
+
+/// `item_private` but for the path, which the caller has checked (a search
+/// looks every hit's path up at once): the item's own key, and the rules.
+fn private_beyond_path(
+    def: &VirtualSourceDef,
+    key: &ItemKey,
+    privacy: &Privacy,
+    mail: &MailPrivacy,
+) -> Result<bool> {
+    if mail.key_private(key)? {
         return Ok(true);
     }
-    if state.store.list_privacy_rules()?.is_empty() {
+    if !mail.any_rules()? {
         return Ok(false); // nothing to read the text for
     }
     match privacy_text(def, privacy) {
-        Some(text) => state.store.privacy_rules_match(&text),
+        Some(text) => mail.rules_match(&text),
         None => Ok(true),
     }
 }
@@ -813,7 +890,8 @@ pub fn search_with(
             )
         };
         // the path is already checked above; this adds the item's own key
-        if item_private(state, def, &hit.path, &key, &privacy, &mail)? {
+        // and the rules
+        if private_beyond_path(def, &key, &privacy, &mail)? {
             continue;
         }
         kept.push(hit);
@@ -2826,6 +2904,57 @@ mod tests {
         assert_eq!(reads() - before, 1);
     }
 
+    /// A locked search looks its hits' paths up once, all together, and
+    /// whether a memory without a Message-ID is private once — not again
+    /// for every hit.
+    #[test]
+    fn test_a_locked_archive_search_looks_paths_and_unkeyed_memories_up_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mbox = tmp.path().join("archive.mbox");
+        let message = |n: usize| {
+            format!(
+                "From a@x Mon Jan 05 10:00:00 2026\nFrom: Ann <ann@x.example>\nSubject: plans {n}\n\
+                 Date: Mon, 05 Jan 2026 10:00:00 -0400\n\nSee you then.\n\n"
+            )
+        };
+        std::fs::write(&mbox, (0..4).map(message).collect::<String>()).unwrap();
+        crate::mbox_index::build(&mbox).unwrap();
+        let (state, _home) = state_with(tmp.path(), "imported");
+        state
+            .store
+            .register_virtual_source(
+                &Actor::new("human:test"),
+                "archive",
+                "mbox",
+                &json!({"mount": mbox.to_string_lossy(), "trust": "imported"}),
+                &["search".into(), "fetch".into()],
+            )
+            .unwrap();
+        let def = resolve(&state, "archive").unwrap();
+        // a rule none of them meets: each hit's text is read against it
+        state
+            .store
+            .add_privacy_rule(&Actor::new("human:test"), "term", "test results")
+            .unwrap();
+        let count = || {
+            (
+                PATH_READS.with(|n| n.get()),
+                UNKEYED_READS.with(|n| n.get()),
+                RULE_READS.with(|n| n.get()),
+            )
+        };
+        let before = count();
+        assert_eq!(
+            search_for_viewer(&state, &def, "plans", 10).unwrap().len(),
+            4
+        );
+        let after = count();
+        assert_eq!(
+            (after.0 - before.0, after.1 - before.1, after.2 - before.2),
+            (1, 1, 1)
+        );
+    }
+
     /// A private promotion holds wherever the message is read, whether or
     /// not the source it was promoted from is registered here: after it is
     /// unregistered (archives move between nodes), and when it was never
@@ -3051,6 +3180,76 @@ mod tests {
             .unwrap();
         assert_eq!(writers(), vec![Some("peer:laptop".to_string())]);
         assert_eq!(hold(), Some("uid:9".to_string()));
+        assert!(gmail_held(&state, &gmail, "uid:77"));
+    }
+
+    /// A private memory one of the owner's own devices wrote (its key can
+    /// reach no promotion) never holds mail, whatever its ref reads: a
+    /// calendar event whose UID a sender chose as `uid:42`.
+    #[test]
+    fn test_a_device_feeds_private_uid_ref_holds_no_mail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, _home) = state_with(tmp.path(), "imported");
+        let mut event = stored_private("ics", "uid:42", "event: planning\nstart: 2026-01-05");
+        event.kind = "event".into();
+        import_as(&state, "human:device:phone", vec![event]);
+        assert_eq!(
+            state
+                .store
+                .private_prefixed_anywhere("uid:")
+                .unwrap()
+                .into_iter()
+                .map(|m| m.writer)
+                .collect::<Vec<_>>(),
+            vec![Some("human:device:phone".to_string())]
+        );
+        assert!(MailPrivacy::new(&state).hold().unwrap().is_none());
+        let gmail =
+            b"From: Ann <ann@x.example>\r\nSubject: s\r\nDate: Mon, 05 Jan 2026 10:00:00 -0400\r\n\
+             Message-ID: <sail@x>\r\n\r\nSee you then.\r\n"
+                .to_vec();
+        assert!(!gmail_held(&state, &gmail, "uid:77"));
+    }
+
+    /// A private corrected copy of a message (an owner repair) keeps the
+    /// message private where its original never arrived: the copy's ref is
+    /// `<key>#repair:<hash>`, never the key itself.
+    #[test]
+    fn test_a_private_corrected_copy_keeps_its_message_private_without_the_original() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, _home) = state_with(tmp.path(), "imported");
+        let body = "From: Ann <ann@x.example>\nSubject: plans for the clinic\n\nSee you then.";
+        let fixed = hearthloom_core::store::replacement_ref("clinic@x", "promoted", body);
+        state
+            .store
+            .apply_batch_from(
+                &state.home,
+                &hearthloom_core::IngestBatch {
+                    actor: "peer:laptop".into(),
+                    session_id: None,
+                    episodes: vec![stored_private("mbox", &fixed, body)],
+                },
+                &[hearthloom_core::store::Origin {
+                    source: "mbox".into(),
+                    source_ref: fixed.clone(),
+                    writer: Some(hearthloom_core::store::REPAIR_WRITER.into()),
+                    session: Some("rp_1".into()),
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
+        let ids = ["clinic@x".to_string(), "sail@x".to_string()];
+        assert_eq!(
+            private_mail_ids(&state, &ids).unwrap(),
+            std::collections::HashSet::from(["clinic@x".to_string()])
+        );
+        assert!(mail_memory_private(&state, &ItemKey::Refs(vec!["clinic@x".into()])).unwrap());
+        assert!(!mail_memory_private(&state, &ItemKey::Refs(vec!["sail@x".into()])).unwrap());
+        // and through a Gmail read of the message
+        let gmail =
+            b"From: Ann <ann@x.example>\r\nSubject: s\r\nDate: Mon, 05 Jan 2026 10:00:00 -0400\r\n\
+             Message-ID: <clinic@x>\r\n\r\nSee you then.\r\n"
+                .to_vec();
         assert!(gmail_held(&state, &gmail, "uid:77"));
     }
 

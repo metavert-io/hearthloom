@@ -541,10 +541,7 @@ fn stored_labels(body: &str) -> Vec<String> {
 /// The sender's address on a mail memory's `from:` line (lowercase), the
 /// part every version of the reader wrote the same way.
 fn sender_of(body: &str) -> Option<String> {
-    let head = body.split("\n\n").next().unwrap_or("");
-    let line = head.lines().find_map(|l| l.strip_prefix("from: "))?;
-    let (_, address) = line.trim_end().rsplit_once('<')?;
-    Some(address.strip_suffix('>')?.trim().to_lowercase())
+    hearthloom_core::store::mail_sender(body)
 }
 
 /// Labels a message the import never keeps sits under.
@@ -598,6 +595,9 @@ fn mail_archives(state: &AppState, unavailable: &mut Vec<String>) -> Vec<PathBuf
 /// The mail repair's plan (blocking).
 pub fn plan_mail(state: &AppState) -> Result<Plan> {
     let mut plan = Plan::new("mail");
+    // the privacy rules over each original read whole: the corrected copy
+    // is cut as the import cuts it
+    let rules = state.store.list_privacy_rules()?;
     // An archive that can't be read now may hold the original — or another
     // message under the same Message-ID that would make it ambiguous — so
     // while one is listed no message is repaired.
@@ -687,6 +687,10 @@ pub fn plan_mail(state: &AppState) -> Result<Plan> {
         let labels = stored_labels(&body);
         let sender = sender_of(&body);
         let mut readings: Vec<EpisodeDraft> = Vec::new();
+        let mut rule_matches = false;
+        // the reader drafts a message private itself (more link hosts than
+        // their room holds: a domain rule made later couldn't find them)
+        let mut drafted_private = false;
         for copy in &copies {
             if dropped_labels(&copy.labels) {
                 continue;
@@ -702,6 +706,9 @@ pub fn plan_mail(state: &AppState) -> Result<Plan> {
             {
                 continue;
             }
+            rule_matches =
+                rule_matches || crate::mbox_text::rules_match_message(&rules, &copy.bytes);
+            drafted_private = drafted_private || draft.scope.as_deref() == Some("private");
             if !readings
                 .iter()
                 .any(|r| r.title == draft.title && r.body == draft.body)
@@ -747,7 +754,24 @@ pub fn plan_mail(state: &AppState) -> Result<Plan> {
             );
             continue;
         }
-        plan.replace(state, &target, draft, &why);
+        // a rule matching the original read whole, or the reader drafting it
+        // private, puts the record into the vault before the run (`apply`),
+        // so the corrected copy lands private
+        let to_vault = (rule_matches || drafted_private) && target.scope != "private";
+        if to_vault {
+            plan.private
+                .push((target.source.clone(), target.base_ref.clone()));
+            let why = if rule_matches {
+                format!("{why}; a privacy rule matches it, it ends private")
+            } else {
+                format!(
+                    "{why}; it links to more hosts than its stored text has room for, it ends private"
+                )
+            };
+            plan.replace_as(state, &target, draft, &why, true);
+        } else {
+            plan.replace(state, &target, draft, &why);
+        }
     }
     Ok(plan)
 }
@@ -1863,11 +1887,16 @@ pub async fn catch_up(state: &AppState) -> usize {
         let Some(_one) = try_start(&home) else {
             return Ok(0);
         };
-        let pending = store.repairs_pending_here()?;
-        for run in &pending {
-            store.repair_settle_run(&home, run)?;
+        // each run on its own: one whose settling keeps failing is tried
+        // again next cycle, and never holds up the runs after it
+        let mut settled = 0;
+        for run in store.repairs_pending_here()? {
+            match store.repair_settle_run(&home, &run) {
+                Ok(_) => settled += 1,
+                Err(err) => tracing::warn!("repair {run}: settling here failed: {err:#}"),
+            }
         }
-        Ok(pending.len())
+        Ok(settled)
     })
     .await;
     match result {
@@ -2081,6 +2110,145 @@ Nothing encoded here.\n";
         let again = plan_mail(&state).unwrap();
         assert!(again.items.is_empty());
         assert!(apply(&state, "human:owner", &again).unwrap().run.is_none());
+    }
+
+    /// A privacy rule naming a domain only the part of a link the corrected
+    /// copy leaves out names (the link is longer than the room for link
+    /// targets; the copy keeps its host) still decides: the record goes
+    /// into the vault before the run, and the corrected copy lands private.
+    #[test]
+    fn test_a_rule_matching_a_link_the_corrected_copy_leaves_out_ends_it_private() {
+        let (state, tmp) = state();
+        let archive = tmp.path().join("takeout.mbox");
+        std::fs::write(
+            &archive,
+            format!(
+                "From jose@x.example Mon Jan  5 10:00:00 2026\n\
+                 X-Gmail-Labels: Sent\n\
+                 From: Someone <jose@x.example>\n\
+                 To: bob@y.example\n\
+                 Subject: =?UTF-8?Q?Caf=C3=A9_plans?=\n\
+                 Date: Mon, 05 Jan 2026 10:00:00 -0400\n\
+                 Message-ID: <lnk1@x>\n\
+                 Content-Type: text/html; charset=utf-8\n\
+                 \n\
+                 <p>Your results are ready: \
+                 <a href=\"https://go.example/r?to=portal.clinic-one.example&d={}\">view them</a></p>\n",
+                "a".repeat(70_000)
+            ),
+        )
+        .unwrap();
+        crate::mbox_index::build(&archive).unwrap();
+        state
+            .store
+            .register_virtual_source(
+                &Actor::new("human:test"),
+                "gmail-archive",
+                "mbox",
+                &json!({"mount": archive.display().to_string()}),
+                &[],
+            )
+            .unwrap();
+        land(&state, "adapter:mbox", vec![stored_encoded("lnk1@x")]);
+        state
+            .store
+            .add_privacy_rule(&Actor::new("human:test"), "domain", "clinic-one.example")
+            .unwrap();
+        let refs = |more: &[String]| {
+            let mut refs = vec!["lnk1@x".to_string()];
+            refs.extend_from_slice(more);
+            state.store.private_source_refs("mbox", &refs).unwrap()
+        };
+        assert!(refs(&[]).is_empty());
+
+        let plan = plan_mail(&state).unwrap();
+        assert_eq!(plan.items.len(), 1);
+        let draft = &plan.items[0].draft;
+        assert!(!draft.body.contains("clinic-one"), "left out");
+        assert_eq!(plan.private, [("mbox".to_string(), "lnk1@x".to_string())]);
+        let why = plan.findings[0].reason.as_str();
+        assert!(why.ends_with("it ends private"), "{why}");
+
+        let fixed = replacement_ref("lnk1@x", &draft.title, &draft.body);
+        let applied = apply(&state, "human:owner", &plan).unwrap();
+        assert_eq!((applied.replaced, applied.made_private), (1, 1));
+        assert_eq!(
+            refs(std::slice::from_ref(&fixed)),
+            HashSet::from(["lnk1@x".to_string(), fixed])
+        );
+    }
+
+    /// An original whose links name more hosts than their room in the
+    /// stored text holds, which the mail reader drafts private, ends
+    /// private with no privacy rule: the record goes into the vault before
+    /// the run, and the plan says why without quoting the message.
+    #[test]
+    fn test_an_original_the_reader_drafts_private_ends_private() {
+        let (state, tmp) = state();
+        let prefix = "https://track.example/p?d=";
+        let filler = format!("{prefix}{}", "a".repeat(65_535 - prefix.len()));
+        let mut html = format!("<p><img src=\"{filler}\">Your results are ready:");
+        for i in 0..3_000 {
+            html.push_str(&format!(" <a href=\"https://h{i:04}.example/x\">h</a>"));
+        }
+        html.push_str("</p>");
+        let archive = tmp.path().join("takeout.mbox");
+        std::fs::write(
+            &archive,
+            format!(
+                "From jose@x.example Mon Jan  5 10:00:00 2026\n\
+                 X-Gmail-Labels: Sent\n\
+                 From: Someone <jose@x.example>\n\
+                 To: bob@y.example\n\
+                 Subject: =?UTF-8?Q?Caf=C3=A9_plans?=\n\
+                 Date: Mon, 05 Jan 2026 10:00:00 -0400\n\
+                 Message-ID: <hosts1@x>\n\
+                 Content-Type: text/html; charset=utf-8\n\
+                 \n\
+                 {html}\n"
+            ),
+        )
+        .unwrap();
+        crate::mbox_index::build(&archive).unwrap();
+        state
+            .store
+            .register_virtual_source(
+                &Actor::new("human:test"),
+                "gmail-archive",
+                "mbox",
+                &json!({"mount": archive.display().to_string()}),
+                &[],
+            )
+            .unwrap();
+        land(&state, "adapter:mbox", vec![stored_encoded("hosts1@x")]);
+        assert!(state.store.list_privacy_rules().unwrap().is_empty());
+        let refs = |more: &[String]| {
+            let mut refs = vec!["hosts1@x".to_string()];
+            refs.extend_from_slice(more);
+            state.store.private_source_refs("mbox", &refs).unwrap()
+        };
+        assert!(refs(&[]).is_empty());
+
+        let plan = plan_mail(&state).unwrap();
+        assert_eq!(plan.items.len(), 1);
+        let draft = &plan.items[0].draft;
+        assert_eq!(draft.scope.as_deref(), Some("private"));
+        assert_eq!(plan.private, [("mbox".to_string(), "hosts1@x".to_string())]);
+        let report = plan.report(None);
+        assert_eq!(report["private"], 1);
+        let why = plan.findings[0].reason.as_str();
+        assert!(why.ends_with("it ends private"), "{why}");
+        for words in ["results", "track.example", "h0001", "Café"] {
+            assert!(!why.contains(words), "the note shows {words:?}: {why}");
+        }
+
+        let fixed = replacement_ref("hosts1@x", &draft.title, &draft.body);
+        let applied = apply(&state, "human:owner", &plan).unwrap();
+        assert_eq!((applied.replaced, applied.made_private), (1, 1));
+        assert_eq!(
+            refs(std::slice::from_ref(&fixed)),
+            HashSet::from(["hosts1@x".to_string(), fixed])
+        );
     }
 
     /// One archived message from `from` under `id`, dated as the stored
@@ -2564,16 +2732,10 @@ END:VCALENDAR\r\n";
         );
         assert_eq!(status(&id("b-1")), ["add: an occurrence not stored yet"]);
         assert_eq!(status(&id("r-1")), ["add: an occurrence not stored yet"]);
+        // the importer gives an override the ref earlier versions stored it
+        // under, so it is found under its own ref
         let moved = status(&id("r-1#20260316T140000Z"));
-        assert_eq!(moved.len(), 1, "{report}");
-        assert!(
-            moved[0].starts_with("replace: description differ"),
-            "{moved:?}"
-        );
-        assert!(
-            moved[0].ends_with("stored under an earlier ref"),
-            "{moved:?}"
-        );
+        assert_eq!(moved, ["replace: description differ"], "{report}");
         assert!(!report.to_string().contains("reminder"));
 
         let applied = apply(&state, "human:owner", &plan).unwrap();
@@ -4213,5 +4375,40 @@ END:VCALENDAR\r\n";
         assert!(joined_from("", &places));
         assert!(!joined_from("Cambridge", &places));
         assert!(!joined_from("Boston, Salem", &places));
+    }
+
+    /// A run whose settling here keeps failing is tried again later and
+    /// never holds up the runs after it.
+    #[tokio::test]
+    async fn test_a_run_that_fails_to_settle_holds_up_no_other() {
+        let (state, _tmp) = state();
+        {
+            let conn = rusqlite::Connection::open(state.home.db_path()).unwrap();
+            for (id, at) in [
+                ("rp_stuck", "2026-01-01T00:00:00Z"),
+                ("rp_later", "2026-01-02T00:00:00Z"),
+            ] {
+                conn.execute(
+                    "INSERT INTO repairs (id, kind, replaced, added, actor, node, created_at,
+                         undone_at, updated_at)
+                     VALUES (?1, 'mail', 0, 0, 'human:owner', 'n-peer', ?2, ?2, ?2)",
+                    [id, at],
+                )
+                .unwrap();
+            }
+            // the older run's settling can never be recorded here
+            conn.execute_batch(
+                "CREATE TRIGGER stuck BEFORE INSERT ON consolidation_state
+                 WHEN NEW.key = 'repair.state.rp_stuck'
+                 BEGIN SELECT RAISE(ABORT, 'disk trouble'); END;",
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            state.store.repairs_pending_here().unwrap(),
+            ["rp_stuck", "rp_later"]
+        );
+        assert_eq!(catch_up(&state).await, 1);
+        assert_eq!(state.store.repairs_pending_here().unwrap(), ["rp_stuck"]);
     }
 }

@@ -1566,6 +1566,19 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// Every repository remote address stored (repo-url identifying
+    /// attributes) — including the ones earlier versions kept as `git
+    /// remote` gave them, credential and all.
+    pub fn known_repo_urls(&self) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT value FROM entity_attributes WHERE kind = 'repo-url' ORDER BY value",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     /// Relabel every episode from a source (e.g. an entire imported
     /// account's conversations). Scope is correction metadata; the
     /// mutation log keeps the audit trail.
@@ -1602,13 +1615,29 @@ impl Store {
         let keep_vaulted = self.relabel_keeps_private();
         let conn = self.lock();
         let mut relabeled = 0;
+        // the copies this relabel takes out of the vault (only with it open)
+        let mut unvaulted = Vec::new();
         for id in episode_ids {
-            relabeled += conn.execute(
+            let was_private = scope != "private"
+                && keep_vaulted.is_empty()
+                && conn
+                    .query_row(
+                        "SELECT scope = 'private' FROM episodes /* all-episodes: the label a relabel replaces */ WHERE id = ?1",
+                        [id],
+                        |r| r.get::<_, bool>(0),
+                    )
+                    .optional()?
+                    .unwrap_or(false);
+            let changed = conn.execute(
                 &format!(
                     "UPDATE episodes SET scope = ?1, scope_changed_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?2 AND scope != ?1{keep_vaulted}"
                 ),
                 [scope, id],
             )?;
+            relabeled += changed;
+            if changed > 0 && was_private {
+                unvaulted.push(id.clone());
+            }
         }
         if relabeled > 0 {
             record_mutation(
@@ -1622,10 +1651,11 @@ impl Store {
         // a day or session made private is private in every copy of it
         if scope == "private" {
             relabeled += super::growing::spread_private(&conn, actor, episode_ids)?;
-        } else if keep_vaulted.is_empty() {
-            // taken out of the vault (only with it open): a repaired
-            // record comes out whole
-            relabeled += super::repair::spread_unvault(&conn, actor, episode_ids, scope)?;
+        } else if !unvaulted.is_empty() {
+            // taken out of the vault by this relabel (only with it open): a
+            // repaired record comes out whole. A copy already outside, or
+            // left as it was, takes nothing out with it.
+            relabeled += super::repair::spread_unvault(&conn, actor, &unvaulted, scope)?;
         }
         Ok(relabeled)
     }
@@ -1879,7 +1909,7 @@ impl Store {
             ))?;
             let mut rows = stmt.query(rusqlite::params_from_iter(&group))?;
             while let Some(row) = rows.next()? {
-                if !owned.covers(&super::owned::Candidate::from_row(row, 1)?) {
+                if !owned.covers(&super::owned::Candidate::from_row(row, 1)?)? {
                     let member: String = row.get(0)?;
                     return Ok(Some(shown_as[&member].clone()));
                 }

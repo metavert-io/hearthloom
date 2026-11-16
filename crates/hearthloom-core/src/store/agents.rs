@@ -639,6 +639,37 @@ impl Store {
         error: Option<&str>,
         node: Option<&str>,
     ) -> Result<AgentTaskRow> {
+        self.move_agent_task(actor, id, status, result, error, node, None)
+    }
+
+    /// A task's run begins on `harness`: the task moves to `running` and
+    /// keeps the harness its run started on (`agent_tasks.harness` —
+    /// store/owned.rs tells by it whether Hearthloom stops the run itself,
+    /// whatever the agent is set to later). Kept as the run first starts;
+    /// a task started again on another harness, or first started before
+    /// harnesses were kept, keeps none (its harness can't be told).
+    pub fn start_agent_task_run(
+        &self,
+        actor: &Actor,
+        id: &str,
+        harness: &str,
+        error: Option<&str>,
+        node: Option<&str>,
+    ) -> Result<AgentTaskRow> {
+        self.move_agent_task(actor, id, "running", None, error, node, Some(harness))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn move_agent_task(
+        &self,
+        actor: &Actor,
+        id: &str,
+        status: &str,
+        result: Option<&str>,
+        error: Option<&str>,
+        node: Option<&str>,
+        harness: Option<&str>,
+    ) -> Result<AgentTaskRow> {
         if !TASK_STATUSES.contains(&status) {
             return Err(anyhow!("unknown task status {status:?}"));
         }
@@ -657,9 +688,13 @@ impl Store {
                  error = COALESCE(?4, error), updated_at = ?5,
                  started_at = CASE WHEN ?2 = 'running' AND started_at IS NULL THEN ?5 ELSE started_at END,
                  finished_at = CASE WHEN ?2 IN ('done','failed','cancelled','refused') THEN ?5 ELSE finished_at END,
-                 node = COALESCE(?6, node)
+                 node = COALESCE(?6, node),
+                 harness = CASE WHEN ?2 <> 'running' THEN harness
+                                WHEN started_at IS NULL THEN ?7
+                                WHEN harness = ?7 THEN harness
+                                ELSE NULL END
              WHERE id = ?1",
-            rusqlite::params![id, status, result, error, now, node],
+            rusqlite::params![id, status, result, error, now, node, harness],
         )?;
         super::journal_row(&conn, actor, "agent_task", "agent_tasks", id, "update")?;
         drop(conn);
@@ -1165,6 +1200,7 @@ impl Store {
                     "finished_at",
                     "inputs",
                     "outputs",
+                    "harness",
                 ],
             ),
             (

@@ -20,9 +20,12 @@ General rules:
   files ingest automatically. Archives unpack only files and folders
   (links and special files are left out) and only as far as the disk can
   spare while keeping 1 GB free. A recognised export (ChatGPT, Facebook,
-  LinkedIn, Notion, Apple Health) is staged into `archives/<key>` for its
-  card's run-now — refused while that import is running; drop it again
-  when it has finished.
+  LinkedIn, Notion, Apple Health), at any depth of the archive, is staged
+  into `archives/<key>` for its card's run-now — refused while that
+  import is running; drop it again when it has finished. Each is
+  recognised by its own files (a Notion export: an `Export-…` folder
+  holding Notion pages), so another folder of that name is walked like
+  any other.
 - Importing a ChatGPT export again (either route) moves a conversation
   now flagged "do not remember" into the vault, even if it was stored
   before outside it — also when the branch it ended on has no turns left
@@ -74,6 +77,26 @@ General rules:
   rebuilt automatically when the file changes.
 - Re-import: a newer Takeout replaces the file; Tier-1 re-run is
   idempotent, the Tier-2 sidecar rebuilds on fingerprint change.
+- A memory holds the message's decoded text (up to 64 KB); mail with only
+  an HTML part also keeps its links' and images' targets after the text (a
+  `links:` block, up to another 64 KB — a target too long for the room
+  left is left out but for its host, the ones after it still go in; the
+  hosts have 64 KB of their own, and a message linking to more hosts than
+  that is stored private). Text
+  or targets past those limits are in the archive only. Every mail import
+  (the Gmail pull and its label re-read, the inbox, `hearthloom ingest
+  mbox`, `hearthloom repair mail`) checks the privacy rules over the whole
+  decoded message, as the archive's readers do, so a rule matching only
+  what was left out still makes the memory private. A copy of the message
+  stored before keeps its label: its stored text doesn't reach what the
+  rule matched, so it can't be told from other mail written under the same
+  Message-ID (the sender's choice) — mark it private in Memories if it is
+  that message. `hearthloom ingest mbox --scope private` does move a copy
+  stored before into the vault, when it is the same message (the same
+  date, sender and text; a copy an earlier version left encoded counts
+  only once `hearthloom repair mail` has corrected it). A rule made after the import is
+  checked against the stored text: it finds a left-out link's domain (the
+  host is kept), not a word only past the cut.
 
 ## Apple Health
 1. Health app → profile → Export All Health Data → move the zip's
@@ -86,14 +109,23 @@ General rules:
    and workouts dedupe by source_ref; the sidecar rebuilds.
 4. Units: each metric's day rollups are in one unit, named in
    `daily.unit` (active energy kcal, exercise min, HRV ms; mass,
-   distance and glucose in the export's own unit). A sidecar an earlier
-   version built is brought up to date from its samples the first time
-   it's read (a minute's wait); a re-import rebuilds it whole, which
-   also re-reads device names (only "Apple Watch" names count as the
-   watch; an app like SleepWatch is a tracker of its own).
+   distance and glucose in the export's own unit — the first one the
+   import can convert that measures what the metric does, so a reading in
+   a unit it doesn't know never decides it; a metric it doesn't know a
+   measure for, like steps in `count`, keeps its first unit; a bare
+   `mmol/L` reads as glucose). Readings in a unit that
+   can't be converted to the day's are left out, with a warning in the
+   log. A sidecar an earlier version built is brought up to date from its
+   samples the first time it's read (a minute's wait; Pulse asks again on
+   the next view); a re-import rebuilds it whole, which also re-reads
+   device names (a name saying "Apple Watch", or ending in "Watch" — a
+   watch you renamed — is the watch; an app like SleepWatch is a tracker
+   of its own).
 5. Sleep: a night is one device's record — two trackers, or two
-   watches, on the same night never add up. The sidecar keeps sleep
-   stages per device (`daily.source` names the device for those rows).
+   watches, on the same night never add up. The preferred tracker's
+   night counts; of two equally preferred (two watches), the longer one,
+   as Pulse shows it. The sidecar keeps sleep stages per device
+   (`daily.source` names the device for those rows).
    Pulse's "today so far" point comes from the live device stream in
    the unit the history is in (`/v1/health/today?unit.BodyMass=lb`).
 
@@ -124,8 +156,11 @@ keyed by profile (`profile:<creation time>#<date>`; a profile with no
 creation time by this machine and its folder's path); a day earlier
 versions stored under a profile's shown name is replaced by that
 profile's day only when the new day holds all of it (at least as many
-visits, and every visit line), so same-named profiles (on one Mac or
-two) keep their own days. Photos keys each photo by capture time and
+visits, its first visit, and every visit line the new day doesn't leave
+out — a long day keeps its first and latest visits; a day the earlier
+version stored whole must show whole), so same-named
+profiles (on one Mac or two) keep their own days; importing a profile as
+private takes such a day into the vault too. Photos keys each photo by capture time and
 ORIGINAL file name, the identity the phone sends too; a photo an earlier
 scan stored under the library's file name moves to that key on the next
 scan, on every synced node — also a node that holds only the old key, and
@@ -134,7 +169,11 @@ location index (GPS lines parsed at consolidation).
 
 ## Git / ICS / chatlog / Substack
 - `hearthloom ingest git <repo-path>` per repo (registered in sources;
-  refreshed automatically ≤1/20h).
+  refreshed automatically ≤1/20h). A remote address is stored without
+  a token or password saved in it (an ssh user name stays); commits an
+  earlier version stored under the address with its credential aren't
+  stored a second time (an import with `--scope private` moves those
+  into the vault).
 - `.ics` files → drop folder, or `hearthloom ingest ics <file>`. A
   recurring event becomes one episode per occurrence (RRULE/RDATE,
   minus EXDATEs; an overridden occurrence comes from its override, and a
@@ -145,10 +184,16 @@ location index (GPS lines parsed at consolidation).
   text it first landed with, so a later
   move or cancellation of one still to come is picked up by importing
   the file again later. Cancelled events and occurrences are left out.
-  Time zones: IANA names, Windows names (Outlook/Exchange) or the file's
-  own VTIMEZONE; a rule's start at a time a daylight-saving change skips
-  is no occurrence; an event that can't be read is skipped with a
-  warning and the rest of the file imports.
+  An overridden occurrence keeps the ref earlier versions gave it
+  (`<UID>#<RECURRENCE-ID as written>`, the first occurrence's too), so
+  importing a calendar again adds no second copy — except a
+  RECURRENCE-ID written as a wall-clock time in another zone than the
+  series', which is written by its time in UTC so it can't take another
+  occurrence's ref. Time zones: IANA names, else the file's own
+  VTIMEZONE, else Windows names (Outlook/Exchange); a rule's start at a
+  time a daylight-saving change skips is no occurrence; an event that
+  can't be read is skipped with a warning, one missing its END:VEVENT
+  ends where the next event begins, and the rest of the file imports.
 - Claude/ChatGPT exports: `conversations.json` → drop folder
   (owner-aware via users.json).
 - Substack: `hearthloom ingest substack <publication-url>` (archive
@@ -185,8 +230,20 @@ location index (GPS lines parsed at consolidation).
   guest posts included. Commits and posts imported by a version before
   this setting existed stay outside text even when marked: their records
   don't say a commit's parents or when it was made, or which host served
-  a post, and importing again doesn't replace a stored memory. The
-  list shows how many stored memories each entry names — none means the
+  a post, and importing again doesn't replace a stored memory. Nor do the
+  oldest commits read from a shallow clone (`git clone --depth …`): git
+  doesn't show their parents, so whether one is a merge can't be told,
+  and fetching more history later doesn't change the stored record.
+  Hearthloom's own re-reading of known repositories leaves out a
+  checkout one of your agents works in (its working folder inside the
+  checkout, or the checkout inside it). An agent task that never
+  finished counts as at work for at most a day and five minutes after
+  its last activity when the agent runs in Claude Code — Hearthloom stops
+  a run there at its time limit. A task sent to Hermes or OpenClaw, which
+  run on their own, or to an agent Hearthloom no longer knows, counts as
+  at work until it finishes. The
+  list shows how many stored memories each entry names (private ones
+  only while the vault is unlocked) — none means the
   entry changes nothing yet (a publication with its own domain files its
   posts under that domain). Sources whose items mix authors (iMessage,
   Chrome, Claude Code, chat exports, calendar invitations, scans, media)

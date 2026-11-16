@@ -10,8 +10,10 @@
 //! the background), so every import reads every day, today's included. A
 //! later import that finds more messages for a stored day lands as a
 //! fuller copy (the store's growing-source revisions): each day's text
-//! opens with how many messages it holds (`messages: <n>`), and a day too
-//! long to keep whole keeps its first and its latest messages.
+//! opens with how many messages it holds (`messages: <n>`) — and, when
+//! messages hold lines shaped like messages, how many such lines the day
+//! holds (`lines: <m>`) — and a day too long to keep whole keeps its first
+//! and its latest messages.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -183,15 +185,22 @@ pub fn ingest(db_path: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> 
         // The count comes first, ahead of the chat's name (anyone in a
         // group can set that): a later import of the day is fuller when it
         // holds more, even where the text below can't show every message.
-        let body = crate::fit_entries(
-            format!(
-                "messages: {}\nchat: {chat_label}\ndate: {date}\n\n",
-                lines.len()
-            ),
-            &lines,
-            BODY_CAP,
-            |n| format!("[{n} messages not shown]\n"),
-        );
+        // Messages whose text holds lines shaped like messages (a pasted
+        // chat log) add how many such lines the whole day holds: an earlier
+        // version's text is counted by them, and this text may not show
+        // them all.
+        let mut head = format!("messages: {}\n", lines.len());
+        let shaped: u64 = lines
+            .iter()
+            .map(|l| hearthloom_core::store::chat_lines(l))
+            .sum();
+        if shaped > lines.len() as u64 {
+            head.push_str(&format!("lines: {shaped}\n"));
+        }
+        head.push_str(&format!("chat: {chat_label}\ndate: {date}\n\n"));
+        let body = crate::fit_entries(head, &lines, BODY_CAP, |n| {
+            format!("[{n} messages not shown]\n")
+        });
 
         let entities = participants
             .keys()
@@ -449,6 +458,59 @@ mod tests {
         let after = ingest(&db, None).unwrap();
         assert_eq!(count(&after[0]), Some(301));
         assert!(after[0].body.contains("the latest one"));
+    }
+
+    /// A day whose message holds a pasted chat log, stored by an earlier
+    /// version (counted by its lines shaped like messages), is held back by
+    /// no later read: a read with one more message counts above it even
+    /// when that message is long enough that the text leaves the log out.
+    #[test]
+    fn test_a_pasted_log_left_out_of_a_long_day_still_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("chat.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (ROWID INTEGER PRIMARY KEY, date INTEGER, text TEXT,
+                 is_from_me INTEGER, handle_id INTEGER);
+             CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT);
+             CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, display_name TEXT);
+             CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+             INSERT INTO handle VALUES (1, '+15551234567');
+             INSERT INTO chat VALUES (1, '+15551234567', '');",
+        )
+        .unwrap();
+        let add = |id: i64, text: &str| {
+            conn.execute(
+                "INSERT INTO message VALUES (?1, ?2, ?3, 0, 1)",
+                rusqlite::params![id, 795362400000000000 + id * 1_000_000_000, text],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO chat_message_join VALUES (1, ?1)", [id])
+                .unwrap();
+        };
+        let pasted: String = (0..400)
+            .map(|i| format!("look\n[10:{:02}] x: {}", i % 60, "y".repeat(90)))
+            .collect();
+        add(1, &pasted);
+        add(2, "ok");
+        // the text an earlier version stored of those two messages
+        let earlier = ingest(&db, None).unwrap()[0]
+            .body
+            .split_once("chat: ")
+            .map(|(_, rest)| format!("chat: {rest}"))
+            .unwrap();
+        assert!(earlier.len() <= BODY_CAP);
+        let stored = hearthloom_core::store::growing_items("imessage", &earlier).unwrap();
+        assert_eq!(stored, 402);
+
+        add(3, &"z".repeat(30 * 1024));
+        let read = ingest(&db, None).unwrap();
+        assert!(
+            read[0].body.contains("messages not shown]"),
+            "the log is left out"
+        );
+        let now = hearthloom_core::store::growing_items("imessage", &read[0].body).unwrap();
+        assert!(now > stored, "{now} after {stored}");
     }
 
     #[test]

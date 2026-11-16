@@ -339,30 +339,39 @@ impl Store {
         let marks = vec!["?"; ids.len()].join(",");
         let conn = self.lock();
         let owned = super::owned::OwnedWords::load(&conn)?;
-        if owned.is_empty() {
-            return conn
-                .query_row(
-                    &format!(
-                        "SELECT id FROM episodes /* all-episodes: a retired untrusted memory still taints */
-                         WHERE id IN ({marks}) AND {} LIMIT 1",
-                        super::provenance::not_owners_words_sql("")
-                    ),
-                    rusqlite::params_from_iter(ids),
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(Into::into);
+        // everything outside the parts of sources the owner's list names,
+        // in one cheap look; only what the list may cover is read and
+        // judged one episode at a time (`owned::OwnedWords`)
+        let judged_apart = if owned.is_empty() {
+            String::new()
+        } else {
+            format!(" AND source NOT IN ({})", owned.sources_sql())
+        };
+        let outside: Option<String> = conn
+            .query_row(
+                &format!(
+                    "SELECT id FROM episodes /* all-episodes: a retired untrusted memory still taints */
+                     WHERE id IN ({marks}) AND {}{judged_apart} LIMIT 1",
+                    super::provenance::not_owners_words_sql("")
+                ),
+                rusqlite::params_from_iter(&ids),
+                |r| r.get(0),
+            )
+            .optional()?;
+        if outside.is_some() || owned.is_empty() {
+            return Ok(outside);
         }
         let mut stmt = conn.prepare(&format!(
             "SELECT e.id, {} FROM episodes e /* all-episodes: a retired untrusted memory still taints */
-             {} WHERE e.id IN ({marks}) AND {}",
+             {} WHERE e.id IN ({marks}) AND {} AND e.source IN ({})",
             super::owned::candidate_cols(),
             super::owned::candidate_joins(),
-            super::provenance::not_owners_words_sql("e.")
+            super::provenance::not_owners_words_sql("e."),
+            owned.sources_sql()
         ))?;
-        let mut rows = stmt.query(rusqlite::params_from_iter(ids))?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(&ids))?;
         while let Some(row) = rows.next()? {
-            if !owned.covers(&super::owned::Candidate::from_row(row, 1)?) {
+            if !owned.covers(&super::owned::Candidate::from_row(row, 1)?)? {
                 return Ok(Some(row.get(0)?));
             }
         }

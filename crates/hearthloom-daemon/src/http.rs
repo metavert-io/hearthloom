@@ -1684,6 +1684,229 @@ mod owned_source_tests {
         assert!(matches!(card_emails(&state.store), Ok(emails) if !emails.contains(address)));
     }
 
+    /// A card line that doesn't read as an address (two `@`s, a space) can
+    /// never be one of the owner's addresses, so it is never a new one:
+    /// with a repository listed and the vault locked, the card still saves
+    /// when nothing else about its addresses changed — and a real new
+    /// address still needs the vault.
+    #[tokio::test]
+    async fn test_a_card_line_that_is_no_address_is_never_a_new_one() {
+        let (state, _tmp) = state();
+        let card = |emoji: &str, extra: Option<&str>| {
+            let mut emails = vec![
+                "me@own.example".to_string(),
+                "a@b@c.example".to_string(),
+                "first last@own.example".to_string(),
+            ];
+            emails.extend(extra.map(String::from));
+            Json(MyCardBody {
+                actor: "human:owner".into(),
+                name: "Owner".into(),
+                emails,
+                emoji: emoji.into(),
+                color: String::new(),
+                bio: String::new(),
+                avatar: String::new(),
+            })
+        };
+        let set = |body| {
+            let state = state.clone();
+            async move {
+                match mycard_set(State(state), axum::Extension(AuthInfo(None)), body).await {
+                    Ok(_) => Ok(()),
+                    Err(ApiError(code, why)) => Err((code, why)),
+                }
+            }
+        };
+        assert_eq!(set(card("a", None)).await, Ok(()));
+        state
+            .store
+            .owned_source_add(&Actor::new("human:owner"), "git", REPO, "session")
+            .unwrap();
+        assert_eq!(set(card("b", None)).await, Ok(()));
+        assert!(matches!(
+            set(card("c", Some("ann@else.example"))).await,
+            Err((StatusCode::FORBIDDEN, why)) if why.contains("ann@else.example")
+                && !why.contains("a@b@c.example")
+        ));
+    }
+
+    /// A change to the owner's addresses that waits for another's turn
+    /// leaves its thread to other work: on a runtime with one thread, the
+    /// change holding the turn still finishes, and then the waiting one.
+    #[test]
+    fn test_a_change_waiting_for_its_turn_leaves_its_thread_free() {
+        let (state, _tmp) = state();
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap();
+            let saved = runtime.block_on(async {
+                let holder = async {
+                    let _turn = owner_addresses_turn().await;
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                };
+                let waiter = async {
+                    // the holder takes the turn first
+                    tokio::task::yield_now().await;
+                    mycard_set(
+                        State(state.clone()),
+                        axum::Extension(AuthInfo(None)),
+                        Json(MyCardBody {
+                            actor: "human:owner".into(),
+                            name: "Owner".into(),
+                            emails: vec!["me@own.example".into()],
+                            emoji: String::new(),
+                            color: String::new(),
+                            bio: String::new(),
+                            avatar: String::new(),
+                        }),
+                    )
+                    .await
+                    .is_ok()
+                };
+                tokio::join!(holder, waiter).1
+            });
+            let _ = done.send(saved);
+        });
+        assert_eq!(
+            finished.recv_timeout(std::time::Duration::from_secs(20)),
+            Ok(true)
+        );
+    }
+
+    /// What a change does in its turn — here a connect's save, which goes
+    /// to the Keychain and the sealed file — runs off the runtime's
+    /// threads: on a runtime with one thread, other work goes on while the
+    /// save is slow (this save finishes only once other work has run).
+    #[test]
+    fn test_a_slow_save_in_its_turn_leaves_the_runtime_free() {
+        let (state, _tmp) = state();
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap();
+            let saved = runtime.block_on(async {
+                let (started, saving) = tokio::sync::oneshot::channel::<()>();
+                let (go_on, release) = std::sync::mpsc::channel::<()>();
+                let other = async move {
+                    // other work, once the save has begun
+                    let _ = saving.await;
+                    let _ = go_on.send(());
+                };
+                let connect = gmail_save_with(
+                    state.clone(),
+                    AuthInfo(None),
+                    GmailSaveBody {
+                        actor: "human:owner".into(),
+                        address: None,
+                        user: Some("slow-save@own.example".into()),
+                        password: Some("abcd efgh ijkl mnop".into()),
+                        disconnect: false,
+                        watch: None,
+                        every_minutes: None,
+                        aliases: None,
+                        embers: None,
+                    },
+                    |_, _| Ok(()),
+                    move |_, _| {
+                        let _ = started.send(());
+                        release
+                            .recv_timeout(std::time::Duration::from_secs(5))
+                            .map_err(|_| anyhow::anyhow!("nothing else ran during the save"))
+                    },
+                );
+                tokio::join!(connect, other).0.is_ok()
+            });
+            let _ = done.send(saved);
+        });
+        assert_eq!(
+            finished.recv_timeout(std::time::Duration::from_secs(30)),
+            Ok(true)
+        );
+    }
+
+    /// A connect whose request ends while its save is under way (the
+    /// client went away) keeps its turn until the save is done: a card
+    /// change made meanwhile waits for it, so the connect can't land
+    /// after a later change to the owner's addresses.
+    #[test]
+    fn test_a_connect_cancelled_during_its_save_keeps_its_turn() {
+        let (state, _tmp) = state();
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap();
+            let outcome = runtime.block_on(async {
+                let (started, saving) = tokio::sync::oneshot::channel::<()>();
+                let (finish, release) = std::sync::mpsc::channel::<()>();
+                let connect = gmail_save_with(
+                    state.clone(),
+                    AuthInfo(None),
+                    GmailSaveBody {
+                        actor: "human:owner".into(),
+                        address: None,
+                        user: Some("cancelled-save@own.example".into()),
+                        password: Some("abcd efgh ijkl mnop".into()),
+                        disconnect: false,
+                        watch: None,
+                        every_minutes: None,
+                        aliases: None,
+                        embers: None,
+                    },
+                    |_, _| Ok(()),
+                    move |_, _| {
+                        let _ = started.send(());
+                        release
+                            .recv_timeout(std::time::Duration::from_secs(10))
+                            .map_err(|_| anyhow::anyhow!("the save was never let finish"))
+                    },
+                );
+                // the request ends once its save has begun
+                tokio::select! {
+                    _ = connect => return Err("the connect finished during its save"),
+                    _ = saving => {}
+                }
+                let card = mycard_set(
+                    State(state.clone()),
+                    axum::Extension(AuthInfo(None)),
+                    Json(MyCardBody {
+                        actor: "human:owner".into(),
+                        name: "Owner".into(),
+                        emails: vec![],
+                        emoji: String::new(),
+                        color: String::new(),
+                        bio: String::new(),
+                        avatar: String::new(),
+                    }),
+                );
+                tokio::pin!(card);
+                let early = tokio::time::timeout(std::time::Duration::from_millis(300), &mut card)
+                    .await
+                    .ok();
+                let _ = finish.send(());
+                let early_done = early.is_some();
+                let changed = match early {
+                    Some(done) => done,
+                    None => card.await,
+                };
+                Ok((early_done, changed.is_ok()))
+            });
+            let _ = done.send(outcome);
+        });
+        assert_eq!(
+            finished.recv_timeout(std::time::Duration::from_secs(30)),
+            Ok(Ok((false, true))),
+            "(card change done before the save, card change saved)"
+        );
+    }
+
     #[test]
     fn test_a_newer_profile_card_is_taken_and_an_older_one_is_not() {
         let (state, _tmp) = state();
@@ -2781,8 +3004,341 @@ mod ingest_origin_tests {
             let _ = send(key(scopes)).await.map_err(|e| e.1).unwrap();
             assert_eq!(scope(), "personal", "{scopes:?}");
         }
+        assert!(!state.bus.touched("privacy.changed"));
         let _ = send(key(&["admin"])).await.map_err(|e| e.1).unwrap();
         assert_eq!(scope(), "private");
+        // the owner's other nodes hear of it at once, as after /v1/scope
+        assert!(state.bus.touched("privacy.changed"));
+    }
+
+    /// An mbox import run with `--scope private` (daemon-side, detached)
+    /// moves the copies stored before of the messages it reads into the
+    /// vault, as the CLI's other imports do.
+    #[tokio::test]
+    async fn test_a_private_mbox_import_vaults_the_stored_copies() {
+        let (state, tmp) = state();
+        let mbox = tmp.path().join("mail.mbox");
+        std::fs::write(
+            &mbox,
+            "From a@x Mon Jan 05 10:00:00 2026\n\
+             From: Sender <sender@mail.example>\n\
+             To: me@mail.example\n\
+             Subject: Lab results\n\
+             Date: Mon, 05 Jan 2026 10:00:00 +0000\n\
+             Message-ID: <m1@mail.example>\n\
+             \n\
+             the results are in\n",
+        )
+        .unwrap();
+        // stored once outside the vault
+        let drafts = hearthloom_adapters::mbox::ingest(&mbox, None).unwrap();
+        assert_eq!(drafts.len(), 1);
+        state
+            .store
+            .apply_batch(
+                &state.home,
+                &hearthloom_core::IngestBatch {
+                    actor: "adapter:mbox".into(),
+                    session_id: None,
+                    episodes: drafts,
+                },
+            )
+            .unwrap();
+        let scope = || {
+            state.store.vault_unlock(15);
+            let (_, rows) = state
+                .store
+                .read_query(
+                    "SELECT scope FROM episodes /* all-episodes: a label check */
+                     WHERE source = 'mbox'",
+                    5,
+                )
+                .unwrap();
+            state.store.vault_lock();
+            rows.iter()
+                .map(|r| r[0].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(scope(), ["personal"]);
+
+        let body: IngestLocalBody = serde_json::from_value(json!({
+            "actor": "human:cli", "adapter": "mbox",
+            "path": mbox.display().to_string(), "scope": "private",
+        }))
+        .unwrap();
+        let _ = ingest_local(State(state.clone()), Json(body))
+            .await
+            .map_err(|e| e.1)
+            .unwrap();
+        // the import runs detached: wait for it to let go of its claim
+        let started = std::time::Instant::now();
+        while state.is_automation_running(&crate::downloads::import_claim_key("mbox")) {
+            assert!(started.elapsed() < std::time::Duration::from_secs(30));
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(scope(), ["private"]);
+        assert!(state.bus.touched("privacy.changed"));
+    }
+
+    /// An mbox import (daemon-side, detached) reads the privacy rules over
+    /// each whole message: a rule naming a domain only the part of a link
+    /// the stored text leaves out names (the stored text keeps its host; an
+    /// image address of 65,535 bytes before it takes the targets' whole
+    /// room, or the link alone is longer than the room) lands the memory
+    /// private, and leaves a copy stored before as it is: the stored copy
+    /// doesn't reach what the rule matched, so it can't be shown to be the
+    /// same message.
+    #[tokio::test]
+    async fn test_an_mbox_import_reads_the_rules_over_links_left_out_of_the_stored_text() {
+        let (state, tmp) = state();
+        let prefix = "https://track.example/p?d=";
+        let filler = format!("{prefix}{}", "a".repeat(65_535 - prefix.len()));
+        let message = |id: &str, html: &str| {
+            format!(
+                "From ann@x.example Mon Jan 05 10:00:00 2026\n\
+                 From: Ann <ann@x.example>\nTo: Jon <jon@y.example>\nSubject: your visit\n\
+                 Date: Mon, 05 Jan 2026 10:00:00 -0400\nMessage-ID: <{id}>\n\
+                 Content-Type: text/html; charset=utf-8\n\n{html}\n\n"
+            )
+        };
+        let filled = message(
+            "filled@x",
+            &format!(
+                "<p><img src=\"{filler}\">Your results are ready: \
+                 <a href=\"https://go.example/r?to=portal.clinic-one.example\">view them</a></p>"
+            ),
+        );
+        let long = message(
+            "long@x",
+            &format!(
+                "<p>Your results are ready: \
+                 <a href=\"https://go.example/r?to=portal.clinic-one.example&d={}\">view them</a></p>",
+                "a".repeat(70_000)
+            ),
+        );
+        // one stored before, outside the vault
+        let before = tmp.path().join("before.mbox");
+        std::fs::write(&before, &filled).unwrap();
+        state
+            .store
+            .apply_batch(
+                &state.home,
+                &hearthloom_core::IngestBatch {
+                    actor: "adapter:mbox".into(),
+                    session_id: None,
+                    episodes: hearthloom_adapters::mbox::ingest(&before, None).unwrap(),
+                },
+            )
+            .unwrap();
+        state
+            .store
+            .add_privacy_rule(&Actor::new("human:test"), "domain", "clinic-one.example")
+            .unwrap();
+        let refs = ["filled@x".to_string(), "long@x".to_string()];
+        let private = || state.store.private_source_refs("mbox", &refs).unwrap();
+        assert!(private().is_empty());
+
+        let mbox = tmp.path().join("mail.mbox");
+        std::fs::write(&mbox, format!("{filled}{long}")).unwrap();
+        let body: IngestLocalBody = serde_json::from_value(json!({
+            "actor": "human:cli", "adapter": "mbox",
+            "path": mbox.display().to_string(),
+        }))
+        .unwrap();
+        let _ = ingest_local(State(state.clone()), Json(body))
+            .await
+            .map_err(|e| e.1)
+            .unwrap();
+        // the import runs detached: wait for it to let go of its claim
+        let started = std::time::Instant::now();
+        while state.is_automation_running(&crate::downloads::import_claim_key("mbox")) {
+            assert!(started.elapsed() < std::time::Duration::from_secs(30));
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            private(),
+            std::collections::HashSet::from(["long@x".to_string()])
+        );
+        assert!(!state.bus.touched("privacy.changed"));
+    }
+
+    /// The owner's import of a fuller day labelled private lands it as a
+    /// new copy, which takes the copy stored before into the vault — and
+    /// the owner's other nodes hear of it at once, though nothing was left
+    /// for the relabel after the apply to move.
+    #[tokio::test]
+    async fn test_a_fuller_private_day_announces_the_copies_it_vaults() {
+        let (state, _tmp) = state();
+        let day = |source_ref: &str, visits: &[&str], scope: Option<&str>| {
+            let mut body = format!(
+                "browsing (Work) on 2026-11-10: {} visits\n\ntop sites: example.com ({})\n\n",
+                visits.len(),
+                visits.len()
+            );
+            for v in visits {
+                body.push_str(&format!("[{v}] Example — example.com\n"));
+            }
+            hearthloom_core::EpisodeDraft {
+                source: "chrome".into(),
+                source_ref: source_ref.into(),
+                kind: "browsing".into(),
+                title: "Browsing (Work)".into(),
+                body,
+                event_time: hearthloom_core::EventTime::unknown(),
+                trust: "self".into(),
+                scope: scope.map(String::from),
+                entities: vec![],
+                edges: vec![],
+            }
+        };
+        state
+            .store
+            .apply_batch(
+                &state.home,
+                &hearthloom_core::IngestBatch {
+                    actor: "adapter:chrome".into(),
+                    session_id: None,
+                    episodes: vec![day("profile:1#2026-11-10#r1", &["09:00"], None)],
+                },
+            )
+            .unwrap();
+        let body: IngestBody = serde_json::from_value(json!({
+            "actor": "adapter:chrome",
+            "episodes": [day("profile:1#2026-11-10", &["09:00", "10:00"], Some("private"))],
+        }))
+        .unwrap();
+        let _ = ingest(
+            State(state.clone()),
+            HeaderMap::new(),
+            axum::Extension(key(&["admin"])),
+            Json(body),
+        )
+        .await
+        .map_err(|e| e.1)
+        .unwrap();
+        // every copy's label, the one put behind the new copy too (the
+        // store's readers show only the copy in view)
+        let rows: Vec<(String, String)> = {
+            let conn = rusqlite::Connection::open_with_flags(
+                state.home.db_path(),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT source_ref, scope FROM episodes /* all-episodes: a label check */
+                     WHERE source = 'chrome' ORDER BY source_ref",
+                )
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            rows,
+            [
+                ("profile:1#2026-11-10#r1".to_string(), "private".to_string()),
+                ("profile:1#2026-11-10#r2".to_string(), "private".to_string()),
+            ]
+        );
+        assert!(state.bus.touched("privacy.changed"));
+    }
+
+    /// The owner's private import of a mail memory that is in the vault
+    /// already, whose corrected copy (an owner repair) sits outside it:
+    /// the import moves no label of its own, the copy follows the record
+    /// into the vault, and the owner's other nodes hear of it at once.
+    #[tokio::test]
+    async fn test_a_private_reimport_announces_the_copies_its_record_reaches() {
+        let (state, _tmp) = state();
+        let base = "m1@mail.example";
+        let mail = |title: &str, body: &str, scope: Option<&str>| hearthloom_core::EpisodeDraft {
+            source: "mbox".into(),
+            source_ref: base.into(),
+            kind: "email".into(),
+            title: title.into(),
+            body: body.into(),
+            event_time: hearthloom_core::EventTime::parse_rfc3339(
+                "2026-03-16T09:30:00Z",
+                hearthloom_core::TimeUncertainty::Exact,
+            )
+            .unwrap(),
+            trust: "imported".into(),
+            scope: scope.map(String::from),
+            entities: vec![],
+            edges: vec![],
+        };
+        let stored = mail("=?UTF-8?Q?Caf=C3=A9?=", "TWVldCBhdCB0aGUgY2Fmw6k=", None);
+        let fixed = mail("Café", "Meet at the café", None);
+        state
+            .store
+            .apply_batch(
+                &state.home,
+                &hearthloom_core::IngestBatch {
+                    actor: "adapter:mbox".into(),
+                    session_id: None,
+                    episodes: vec![stored.clone()],
+                },
+            )
+            .unwrap();
+        state
+            .store
+            .repair_apply(
+                &state.home,
+                &Actor::new("human:owner"),
+                "mail",
+                &[hearthloom_core::store::RepairItem {
+                    base_ref: base.into(),
+                    draft: fixed,
+                }],
+                &[],
+                "adapter:ics",
+            )
+            .unwrap();
+        // labels an earlier version left: the memory private with no stamp,
+        // its corrected copy outside the vault
+        let db = || rusqlite::Connection::open(state.home.db_path()).unwrap();
+        db().execute(
+            "UPDATE episodes SET scope = CASE WHEN source_ref = ?1 THEN 'private' ELSE 'personal' END,
+                                 scope_changed_at = NULL
+             WHERE source = 'mbox'",
+            [base],
+        )
+        .unwrap();
+        let body: IngestBody = serde_json::from_value(json!({
+            "actor": "adapter:mbox",
+            "episodes": [mail(&stored.title, &stored.body, Some("private"))],
+        }))
+        .unwrap();
+        let _ = ingest(
+            State(state.clone()),
+            HeaderMap::new(),
+            axum::Extension(key(&["admin"])),
+            Json(body),
+        )
+        .await
+        .map_err(|e| e.1)
+        .unwrap();
+        let scopes: Vec<(String, String)> = {
+            let conn = db();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT source_ref, scope FROM episodes /* all-episodes: a label check */
+                     WHERE source = 'mbox' ORDER BY source_ref",
+                )
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(scopes.len(), 2, "{scopes:?}");
+        assert!(
+            scopes.iter().all(|(_, scope)| scope == "private"),
+            "{scopes:?}"
+        );
+        assert!(state.bus.touched("privacy.changed"));
     }
 }
 
@@ -2902,7 +3458,8 @@ mod import_single_flight_tests {
         }
         let staged =
             crate::inbox::process_file(&state.store, &state.home, &state.running, &zip_path)
-                .unwrap();
+                .unwrap()
+                .summary;
         assert!(staged.contains("staged the openai export"), "{staged}");
         // the other exports, staged where the zip route puts them
         let archives = state.home.root().join("archives");
@@ -2958,6 +3515,33 @@ mod import_single_flight_tests {
             )
             .unwrap();
         assert_eq!(rows[0][0], 1, "the uploaded conversation landed");
+    }
+}
+
+#[cfg(test)]
+mod repairs_leg_tests {
+    /// The repairs routes and the repairs sync step run their store work on
+    /// the blocking pool (the handler contract), never on a runtime worker:
+    /// applying a peer's page writes every copy of every run in it.
+    #[test]
+    fn test_the_repairs_leg_keeps_store_work_off_runtime_workers() {
+        for (file, source) in [
+            ("http.rs", include_str!("http.rs")),
+            ("sync.rs", include_str!("sync.rs")),
+        ] {
+            for call in [
+                "repairs_sync_apply(",
+                "repairs_sync_export(",
+                "repair_runs(",
+                "repairs_pending_here(",
+            ] {
+                let inline = format!("state.store.{call}");
+                assert!(
+                    !source.contains(&inline),
+                    "{file} calls {inline}…) on a runtime worker: move it to spawn_blocking"
+                );
+            }
+        }
     }
 }
 
@@ -4435,8 +5019,9 @@ async fn ingest(
         ));
     }
     // A local import (the CLI reading this machine's files) lands a day or
-    // session stored before only when fuller; a peer's batch replicates
-    // what the node that read the files decided.
+    // session stored before only when fuller, and no commit an earlier
+    // version stored under its repository's former address; a peer's batch
+    // replicates what the node that read the files decided.
     let peer = auth
         .0
         .as_ref()
@@ -4455,22 +5040,17 @@ async fn ingest(
     // store work off the runtime's threads: a large import holds the store
     // many times over
     let report = crate::scoped::spawn_blocking(move || -> anyhow::Result<Value> {
-        let private: Vec<hearthloom_core::EpisodeDraft> = if owners_import {
-            batch
-                .episodes
-                .iter()
-                .filter(|d| d.scope.as_deref() == Some("private"))
-                .cloned()
-                .collect()
+        let private = if owners_import {
+            crate::local_import::private_refs(&state.store, &state.home, &batch.episodes)?
         } else {
             Vec::new()
         };
         let mut dropped = 0usize;
         if !peer
-            && batch
-                .episodes
-                .iter()
-                .any(|d| hearthloom_core::store::GROWING_SOURCES.contains(&d.source.as_str()))
+            && batch.episodes.iter().any(|d| {
+                d.source == "git"
+                    || hearthloom_core::store::GROWING_SOURCES.contains(&d.source.as_str())
+            })
         {
             let drafts = std::mem::take(&mut batch.episodes);
             let count = drafts.len();
@@ -4481,14 +5061,18 @@ async fn ingest(
             .store
             .apply_batch_from(&state.home, &batch, &origins)?;
         report.episodes_existing += dropped;
-        state.store.label_private_on_reimport(
-            &Actor {
-                actor: batch.actor.clone(),
-                session_id: batch.session_id.clone(),
-            },
-            &private,
-            &[],
-        )?;
+        if owners_import {
+            crate::local_import::vault_stored_copies(
+                &state,
+                &Actor {
+                    actor: batch.actor.clone(),
+                    session_id: batch.session_id.clone(),
+                },
+                &[],
+                &private,
+                report.private_copies,
+            )?;
+        }
         Ok(serde_json::to_value(report)?)
     })
     .await
@@ -5358,7 +5942,7 @@ async fn gmail_save_with(
     auth: AuthInfo,
     body: GmailSaveBody,
     sign_in: impl FnOnce(String, String) -> anyhow::Result<()> + Send + 'static,
-    save: impl FnOnce(&std::path::Path, &[(&str, &str)]) -> anyhow::Result<()> + Send,
+    save: impl FnOnce(&std::path::Path, &[(&str, &str)]) -> anyhow::Result<()> + Send + 'static,
 ) -> Result<Json<Value>, ApiError> {
     require_owner(&auth, "change this node's mail connections")?;
     if body.actor.trim().is_empty() {
@@ -5369,96 +5953,112 @@ async fn gmail_save_with(
         || body.every_minutes.is_some()
         || body.aliases.is_some()
         || body.embers.is_some();
+    let via = owner_via(&auth);
     if settings && !connecting {
-        let _turn = owner_addresses_turn();
-        let mb = mailbox_named(body.address.as_deref())?;
-        // aliases are owner addresses (core store/owned.rs): checked
-        // before anything here is saved
-        let aliases_before: std::collections::BTreeSet<String> =
-            crate::mailboxes::aliases(&state, &mb).into_iter().collect();
-        let aliases_after = match &body.aliases {
-            Some(list) => {
-                let clean = crate::mailboxes::clean_aliases(&mb.account(), list)
+        let (state, via) = (state.clone(), via.clone());
+        let (address, aliases) = (body.address.clone(), body.aliases.clone());
+        let (watch, every_minutes, embers) = (body.watch, body.every_minutes, body.embers);
+        let disconnect = body.disconnect;
+        // what the change does in its turn (the node list, the watch) runs
+        // off the runtime's threads (`in_turn`)
+        let saved = in_turn(move || {
+            let mb = mailbox_named(address.as_deref())?;
+            // aliases are owner addresses (core store/owned.rs): checked
+            // before anything here is saved
+            let aliases_before: std::collections::BTreeSet<String> =
+                crate::mailboxes::aliases(&state, &mb).into_iter().collect();
+            let aliases_after = match &aliases {
+                Some(list) => {
+                    let clean = crate::mailboxes::clean_aliases(&mb.account(), list)
+                        .map_err(|e| bad_request(format!("{e:#}")))?;
+                    let clean: std::collections::BTreeSet<String> = clean.into_iter().collect();
+                    may_add_owner_addresses(&state, &clean)?;
+                    Some(clean)
+                }
+                None => None,
+            };
+            if let Some(on) = watch {
+                state.store.set_consolidation_state(
+                    &mb.key(crate::gmail_watch::KEY_WATCH),
+                    if on { "on" } else { "off" },
+                )?;
+            }
+            if let Some(minutes) = every_minutes {
+                if !(1..=60).contains(&minutes) {
+                    return Err(bad_request("catch up every 1 to 60 minutes"));
+                }
+                state.store.set_consolidation_state(
+                    &mb.key(crate::gmail_watch::KEY_EVERY),
+                    &minutes.to_string(),
+                )?;
+            }
+            if let (Some(list), Some(after)) = (&aliases, &aliases_after) {
+                crate::mailboxes::set_aliases(&state, &mb, list)
                     .map_err(|e| bad_request(format!("{e:#}")))?;
-                let clean: std::collections::BTreeSet<String> = clean.into_iter().collect();
-                may_add_owner_addresses(&state, &clean)?;
-                Some(clean)
+                state.store.owned_addresses_changed(
+                    &Actor::new("human:owner"),
+                    &format!("aliases of {}", mb.address),
+                    &aliases_before,
+                    after,
+                    &via,
+                )?;
             }
-            None => None,
-        };
-        if let Some(on) = body.watch {
-            state.store.set_consolidation_state(
-                &mb.key(crate::gmail_watch::KEY_WATCH),
-                if on { "on" } else { "off" },
-            )?;
-        }
-        if let Some(minutes) = body.every_minutes {
-            if !(1..=60).contains(&minutes) {
-                return Err(bad_request("catch up every 1 to 60 minutes"));
+            if let Some(on) = embers {
+                crate::mailboxes::set_embers(&state, &mb, on)?;
             }
-            state.store.set_consolidation_state(
-                &mb.key(crate::gmail_watch::KEY_EVERY),
-                &minutes.to_string(),
-            )?;
-        }
-        if let (Some(list), Some(after)) = (&body.aliases, &aliases_after) {
-            crate::mailboxes::set_aliases(&state, &mb, list)
-                .map_err(|e| bad_request(format!("{e:#}")))?;
-            state.store.owned_addresses_changed(
-                &Actor::new("human:owner"),
-                &format!("aliases of {}", mb.address),
-                &aliases_before,
-                after,
-                &owner_via(&auth),
-            )?;
-        }
-        if let Some(on) = body.embers {
-            crate::mailboxes::set_embers(&state, &mb, on)?;
-        }
-        crate::gmail_watch::recheck_mailbox(&mb.id, false);
-        crate::agents::publish_self(&state);
-        if !body.disconnect {
-            return Ok(Json(json!({
-                "saved": true,
-                "mailbox": mailbox_json(&state, &mb),
-                "watch": crate::gmail_watch::status_json_for(&state, &mb),
-            })));
+            crate::gmail_watch::recheck_mailbox(&mb.id, false);
+            crate::agents::publish_self(&state);
+            Ok((!disconnect).then(|| {
+                json!({
+                    "saved": true,
+                    "mailbox": mailbox_json(&state, &mb),
+                    "watch": crate::gmail_watch::status_json_for(&state, &mb),
+                })
+            }))
+        })
+        .await?;
+        if let Some(saved) = saved {
+            return Ok(Json(saved));
         }
     }
     if body.disconnect {
-        let _turn = owner_addresses_turn();
-        let mb = mailbox_named(body.address.as_deref())?;
-        let (user_var, pass_var) = mb.env_names();
-        hearthloom_core::secrets::set_env_vars(
-            state.home.root(),
-            &[(user_var.as_str(), ""), (pass_var.as_str(), "")],
-        )
-        .map_err(|e| bad_request(format!("{e:#}")))?;
-        crate::gmail_watch::recheck_mailbox(&mb.id, true);
-        crate::agents::publish_self(&state);
-        // its addresses were the owner's (core store/owned.rs): the list's
-        // history shows they went
-        state.store.owned_addresses_changed(
-            &Actor::new("human:owner"),
-            &format!("mailbox {}", mb.address),
-            &crate::mailboxes::addresses_of(&state, &mb),
-            &Default::default(),
-            &owner_via(&auth),
-        )?;
-        crate::monitor::log(
-            &state,
-            "info",
-            "gmail_disconnected",
-            &format!(
-                "Google Mail live pull disconnected ({}) — its live archive stays",
-                mb.address
-            ),
-            None,
-        );
+        let (state, via, address) = (state.clone(), via.clone(), body.address.clone());
+        let gone = in_turn(move || {
+            let mb = mailbox_named(address.as_deref())?;
+            let (user_var, pass_var) = mb.env_names();
+            hearthloom_core::secrets::set_env_vars(
+                state.home.root(),
+                &[(user_var.as_str(), ""), (pass_var.as_str(), "")],
+            )
+            .map_err(|e| bad_request(format!("{e:#}")))?;
+            crate::gmail_watch::recheck_mailbox(&mb.id, true);
+            crate::agents::publish_self(&state);
+            // its addresses were the owner's (core store/owned.rs): the
+            // list's history shows they went
+            state.store.owned_addresses_changed(
+                &Actor::new("human:owner"),
+                &format!("mailbox {}", mb.address),
+                &crate::mailboxes::addresses_of(&state, &mb),
+                &Default::default(),
+                &via,
+            )?;
+            crate::monitor::log(
+                &state,
+                "info",
+                "gmail_disconnected",
+                &format!(
+                    "Google Mail live pull disconnected ({}) — its live archive stays",
+                    mb.address
+                ),
+                None,
+            );
+            Ok(mb.address)
+        })
+        .await?;
         return Ok(Json(json!({
             "saved": true,
             "configured": !crate::mailboxes::all().is_empty(),
-            "disconnected": mb.address,
+            "disconnected": gone,
         })));
     }
     let user = body
@@ -5512,41 +6112,47 @@ async fn gmail_save_with(
     // the owner's addresses may have changed while Gmail answered (one
     // taken off the card, an alias kept): checked again on what is here
     // now, in this change's turn, which lasts until it is saved, published
-    // and recorded (nothing awaited from here on)
-    let _turn = owner_addresses_turn();
-    // an address already here keeps its slot; the first mailbox keeps the
-    // original names (mailboxes.rs)
-    let (first, id, (user_var, pass_var)) =
-        crate::mailboxes::slot_for(&crate::mailboxes::all(), &user);
-    let gives = mailbox_connect_gives(&state, &id, &user);
-    may_add_owner_addresses(&state, &gives)?;
-    let gave = crate::mailboxes::find(&id)
-        .map(|mb| crate::mailboxes::addresses_of(&state, &mb))
-        .unwrap_or_default();
-    save(
-        state.home.root(),
-        &[
-            (user_var.as_str(), user.as_str()),
-            (pass_var.as_str(), password.as_str()),
-        ],
-    )
-    .map_err(|e| bad_request(format!("{e:#}")))?;
-    crate::gmail_watch::recheck_mailbox(&id, true);
-    crate::agents::publish_self(&state);
-    state.store.owned_addresses_changed(
-        &Actor::new("human:owner"),
-        &format!("mailbox {user}"),
-        &gave,
-        &gives,
-        &owner_via(&auth),
-    )?;
-    crate::monitor::log(
-        &state,
-        "info",
-        "gmail_connected",
-        &format!("Google Mail connected ({user}) — new mail is watched live"),
-        None,
-    );
+    // and recorded — on the blocking pool (`in_turn`: the save goes to the
+    // Keychain and the sealed file), even if this request ends first
+    let (in_state, in_user) = (state.clone(), user.clone());
+    let (first, id) = in_turn(move || {
+        let (state, user) = (in_state, in_user);
+        // an address already here keeps its slot; the first mailbox keeps
+        // the original names (mailboxes.rs)
+        let (first, id, (user_var, pass_var)) =
+            crate::mailboxes::slot_for(&crate::mailboxes::all(), &user);
+        let gives = mailbox_connect_gives(&state, &id, &user);
+        may_add_owner_addresses(&state, &gives)?;
+        let gave = crate::mailboxes::find(&id)
+            .map(|mb| crate::mailboxes::addresses_of(&state, &mb))
+            .unwrap_or_default();
+        save(
+            state.home.root(),
+            &[
+                (user_var.as_str(), user.as_str()),
+                (pass_var.as_str(), password.as_str()),
+            ],
+        )
+        .map_err(|e| bad_request(format!("{e:#}")))?;
+        crate::gmail_watch::recheck_mailbox(&id, true);
+        crate::agents::publish_self(&state);
+        state.store.owned_addresses_changed(
+            &Actor::new("human:owner"),
+            &format!("mailbox {user}"),
+            &gave,
+            &gives,
+            &via,
+        )?;
+        crate::monitor::log(
+            &state,
+            "info",
+            "gmail_connected",
+            &format!("Google Mail connected ({user}) — new mail is watched live"),
+            None,
+        );
+        Ok((first, id))
+    })
+    .await?;
     let mailbox = crate::mailboxes::find(&id).map(|mb| mailbox_json(&state, &mb));
     Ok(Json(json!({
         "saved": true,
@@ -7743,8 +8349,8 @@ async fn owned_sources_get(
         .iter()
         .map(|(source, why)| json!({"source": source.trim_end_matches('-'), "why": why}))
         .collect();
-    // how many memories each entry names reads every commit's and post's
-    // ref: off the runtime's threads
+    // how many memories each entry names (as this viewer sees the record)
+    // reads the refs that can name it: off the runtime's threads
     let store = state.store.clone();
     let (entries, identities, history, stored) = crate::scoped::spawn_blocking(move || {
         anyhow::Ok((
@@ -7819,7 +8425,8 @@ async fn owned_source_add(
         crate::bus::touch(&state, "operational.changed");
     }
     let store = state.store.clone();
-    let stored = crate::scoped::spawn_blocking(move || store.owned_source_stored())
+    let counted = entry.clone();
+    let stored = crate::scoped::spawn_blocking(move || store.owned_entry_stored(&counted))
         .await
         .map_err(anyhow::Error::from)??;
     Ok(Json(json!({
@@ -7828,7 +8435,7 @@ async fn owned_source_add(
         // memories stored under this entry's key: 0 means it changes
         // nothing yet (an address its posts aren't filed under, or nothing
         // imported)
-        "stored": stored.get(&entry.id).copied().unwrap_or(0),
+        "stored": stored,
     })))
 }
 
@@ -10945,7 +11552,7 @@ async fn mycard_set(
         .map(|e| e.trim().to_lowercase())
         .filter(|e| e.contains('@'))
         .collect();
-    let _turn = owner_addresses_turn();
+    let _turn = owner_addresses_turn().await;
     let before = card_emails(&state.store)?;
     let after: std::collections::BTreeSet<String> = emails.iter().cloned().collect();
     may_add_owner_addresses(&state, &after)?;
@@ -11006,11 +11613,32 @@ fn card_emails(
 /// each holds this from its last `may_add_owner_addresses` check until it
 /// has saved, published and recorded the change, so no other change lands
 /// between a check and the save it allows (an address taken off in between
-/// would come back without the vault). Hold it on the request's own
-/// thread, never across an await.
-fn owner_addresses_turn() -> std::sync::MutexGuard<'static, ()> {
-    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    TURN.lock().unwrap_or_else(|e| e.into_inner())
+/// would come back without the vault). A change waiting for its turn
+/// yields its runtime thread to other requests. Never hold it while
+/// waiting on something outside this node (the connect lets it go while
+/// Gmail answers the sign-in).
+async fn owner_addresses_turn() -> tokio::sync::MutexGuard<'static, ()> {
+    static TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    TURN.lock().await
+}
+
+/// A change to the owner's addresses, in its turn: the turn is taken, then
+/// the work — its last check, saving to the Keychain and the sealed file,
+/// publishing the node list, the store — runs on the blocking pool, in the
+/// caller's read scope, so a slow save holds no runtime thread. The turn
+/// goes with the work and ends when the work does: a request that ends
+/// early (its client gone) leaves the work running, and no other change
+/// begins before it is done.
+async fn in_turn<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, ApiError> + Send + 'static,
+) -> Result<T, ApiError> {
+    let turn = owner_addresses_turn().await;
+    crate::scoped::spawn_blocking(move || {
+        let _turn = turn;
+        work()
+    })
+    .await
+    .map_err(anyhow::Error::from)?
 }
 
 /// An address added to the owner's own (on the profile card, as a
@@ -11018,6 +11646,9 @@ fn owner_addresses_turn() -> std::sync::MutexGuard<'static, ()> {
 /// repository marked as theirs count as their words (core
 /// store/owned.rs). While a repository is on that list, adding one needs
 /// the vault open, as marking one does; removing one only narrows it.
+/// Only what reads as an address can become one of the owner's
+/// (`owner_address`, as the owner's addresses are read): anything else
+/// written beside them decides nothing, so it needs nothing either.
 /// The call a save relies on is made inside `owner_addresses_turn`.
 fn may_add_owner_addresses(
     state: &AppState,
@@ -11025,7 +11656,11 @@ fn may_add_owner_addresses(
 ) -> Result<(), ApiError> {
     let mut known = state.store.owner_emails()?;
     known.extend(crate::mailboxes::owner_addresses(state));
-    let new: Vec<&str> = given.difference(&known).map(String::as_str).collect();
+    let new: Vec<String> = given
+        .iter()
+        .filter_map(|a| hearthloom_core::store::owner_address(a))
+        .filter(|a| !known.contains(a))
+        .collect();
     if new.is_empty()
         || !state.store.vault_status().0
         || !state.store.owned_list_reads_addresses()?
@@ -11920,15 +12555,12 @@ async fn ingest_local(
         let drafts = read?;
         let count = drafts.len();
         // an import asked to be private makes the copies stored before so
-        let private: Vec<hearthloom_core::EpisodeDraft> = drafts
-            .iter()
-            .filter(|d| d.scope.as_deref() == Some("private"))
-            .cloned()
-            .collect();
+        let private = crate::local_import::private_refs(&st.store, &st.home, &drafts)?;
         // a day or session stored before lands again only when fuller
         let drafts = crate::local_import::prepare(&st.store, &st.home, drafts)?;
         let mut new = 0usize;
         let mut existing = count - drafts.len();
+        let mut private_copies = 0usize;
         for (i, chunk) in drafts.chunks(500).enumerate() {
             if i > 0 {
                 std::thread::sleep(std::time::Duration::from_millis(40));
@@ -11943,9 +12575,15 @@ async fn ingest_local(
             )?;
             new += report.episodes_new;
             existing += report.episodes_existing;
+            private_copies += report.private_copies;
         }
-        st.store
-            .label_private_on_reimport(&Actor::new(actor.clone()), &private, &[])?;
+        crate::local_import::vault_stored_copies(
+            &st,
+            &Actor::new(actor.clone()),
+            &[],
+            &private,
+            private_copies,
+        )?;
         Ok((count, new, existing))
     })
     .await
@@ -12010,35 +12648,55 @@ fn ingest_mbox_background(state: AppState, body: IngestLocalBody) -> Result<Json
         let mut new = 0usize;
         let mut existing = 0usize;
         let mut batches = 0usize;
-        let result = hearthloom_adapters::mbox::ingest_batched_filtered(
-            &path,
-            body.scope.as_deref(),
-            &filter,
-            500,
-            |batch| {
-                let report = state.store.apply_batch(
-                    &state.home,
-                    &IngestBatch {
+        let asked_private = body.scope.as_deref() == Some("private");
+        // the privacy rules over each whole message (what is stored is
+        // cut), read again after each batch as the apply reads them
+        let result = state.store.list_privacy_rules().and_then(|rules| {
+            let rules = std::cell::RefCell::new(rules);
+            hearthloom_adapters::mbox::ingest_batched_checked(
+                &path,
+                body.scope.as_deref(),
+                &filter,
+                &|raw| crate::mbox_text::rules_match_message(&rules.borrow(), raw),
+                500,
+                |batch| {
+                    let batch = IngestBatch {
                         actor: "adapter:mbox".into(),
                         session_id: None,
                         episodes: batch,
-                    },
-                )?;
-                new += report.episodes_new;
-                existing += report.episodes_existing;
-                batches += 1;
-                // Keep the dashboard responsive during a big archive
-                // scan (shared store mutex — see consolidate.rs note).
-                std::thread::sleep(std::time::Duration::from_millis(40));
-                if batches.is_multiple_of(10) {
-                    tracing::info!(
-                        "mbox ingest {}: {new} new episodes ({existing} existing) so far",
-                        path.display()
-                    );
-                }
-                Ok(())
-            },
-        );
+                    };
+                    let report = state.store.apply_batch(&state.home, &batch)?;
+                    // an import asked to be private makes the copy stored
+                    // before of the same message so; a label read from a
+                    // message's own content (a rule over the whole of it,
+                    // more hosts than the stored text holds) lands on its
+                    // new memory only — other mail under that Message-ID
+                    // can read the same where the stored copy reaches
+                    // (gmail_pull.rs `apply_drafts`)
+                    crate::local_import::vault_stored_copies(
+                        &state,
+                        &Actor::new("adapter:mbox"),
+                        if asked_private { &batch.episodes } else { &[] },
+                        &[],
+                        report.private_copies,
+                    )?;
+                    new += report.episodes_new;
+                    existing += report.episodes_existing;
+                    batches += 1;
+                    *rules.borrow_mut() = state.store.list_privacy_rules()?;
+                    // Keep the dashboard responsive during a big archive
+                    // scan (shared store mutex — see consolidate.rs note).
+                    std::thread::sleep(std::time::Duration::from_millis(40));
+                    if batches.is_multiple_of(10) {
+                        tracing::info!(
+                            "mbox ingest {}: {new} new episodes ({existing} existing) so far",
+                            path.display()
+                        );
+                    }
+                    Ok(())
+                },
+            )
+        });
         match result {
             Ok(total) => {
                 tracing::info!(
@@ -12125,6 +12783,7 @@ fn ingest_openai_background(
             );
             let mut new = 0usize;
             let mut existing = 0usize;
+            let mut private_copies = 0usize;
             for chunk in drafts.chunks(500) {
                 let report = state.store.apply_batch(
                     &state.home,
@@ -12136,16 +12795,19 @@ fn ingest_openai_background(
                 )?;
                 new += report.episodes_new;
                 existing += report.episodes_existing;
+                private_copies += report.private_copies;
                 // shared store mutex — keep the dashboard alive
                 std::thread::sleep(std::time::Duration::from_millis(40));
             }
             // a conversation flagged "do not remember" since it was stored
             // (here or through the chat-log reader) goes into the vault —
             // one with no turns left to make a draft of too
-            state.store.label_private_on_reimport(
+            crate::local_import::vault_stored_copies(
+                &state,
                 &Actor::new("adapter:openai"),
                 &drafts,
                 &flagged,
+                private_copies,
             )?;
             Ok((parsed, new, existing))
         })();
@@ -14118,11 +14780,15 @@ async fn repairs_list(
     axum::Extension(auth): axum::Extension<AuthInfo>,
 ) -> Result<Json<Value>, ApiError> {
     repair_allowed(&state, &auth)?;
-    let pending: std::collections::HashSet<String> =
-        state.store.repairs_pending_here()?.into_iter().collect();
-    let runs: Vec<Value> = state
-        .store
-        .repair_runs(200)?
+    let store = state.store.clone();
+    let (pending, runs) = crate::scoped::spawn_blocking(move || -> anyhow::Result<_> {
+        let pending: std::collections::HashSet<String> =
+            store.repairs_pending_here()?.into_iter().collect();
+        Ok((pending, store.repair_runs(200)?))
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    let runs: Vec<Value> = runs
         .into_iter()
         .map(|r| {
             let here = if pending.contains(&r.id) {
@@ -14185,7 +14851,11 @@ async fn sync_repairs_get(
     axum::Extension(auth): axum::Extension<AuthInfo>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&auth, "peer")?;
-    Ok(Json(state.store.repairs_sync_export(&params.since)?))
+    let store = state.store.clone();
+    let page = crate::scoped::spawn_blocking(move || store.repairs_sync_export(&params.since))
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    Ok(Json(page))
 }
 
 /// Peer: take the other node's runs; settle what changed here.
@@ -14195,7 +14865,10 @@ async fn sync_repairs_post(
     Json(batch): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&auth, "peer")?;
-    let changed = state.store.repairs_sync_apply(&batch)?;
+    let store = state.store.clone();
+    let changed = crate::scoped::spawn_blocking(move || store.repairs_sync_apply(&batch))
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
     if !changed.is_empty() {
         let background = state.clone();
         tokio::spawn(async move {

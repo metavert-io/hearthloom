@@ -108,7 +108,8 @@ pub struct SessionRead {
     /// that file last changed, so the next run reads it again.
     pub read_through: SystemTime,
     /// The project folders under the dir now: the next run's
-    /// `known_folders`.
+    /// `known_folders` — less a new one holding a file that couldn't be
+    /// read, which the next run reads whole again.
     pub folders: Vec<String>,
 }
 
@@ -137,6 +138,10 @@ pub fn ingest_window(
     };
     let mut drafts = Vec::new();
     let mut read_through = window.settled_before;
+    // new folders holding a file that couldn't be read: left off the list,
+    // so the next run reads them whole again (a file's time can't say
+    // when it was moved in, and an unknown one says nothing at all)
+    let mut unread: BTreeSet<String> = BTreeSet::new();
     for file in files {
         let changed = match file.changed {
             Ok(changed) => changed,
@@ -144,8 +149,15 @@ pub fn ingest_window(
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
             Err(err) => {
                 tracing::warn!("{} can't be read now: {err}", file.path.display());
-                read_through =
-                    read_through.min(window.changed_since.unwrap_or(SystemTime::UNIX_EPOCH));
+                match &file.folder {
+                    Some(folder) if is_new(&file.folder) => {
+                        unread.insert(folder.clone());
+                    }
+                    _ => {
+                        read_through = read_through
+                            .min(window.changed_since.unwrap_or(SystemTime::UNIX_EPOCH));
+                    }
+                }
                 continue;
             }
         };
@@ -163,14 +175,19 @@ pub fn ingest_window(
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => {
                 tracing::warn!("{} can't be read now: {err}", file.path.display());
-                read_through = read_through.min(changed);
+                match &file.folder {
+                    Some(folder) if is_new(&file.folder) => {
+                        unread.insert(folder.clone());
+                    }
+                    _ => read_through = read_through.min(changed),
+                }
             }
         }
     }
     Ok(SessionRead {
         drafts,
         read_through,
-        folders: folders.into_iter().collect(),
+        folders: folders.difference(&unread).cloned().collect(),
     })
 }
 
@@ -648,6 +665,47 @@ mod tests {
         .unwrap();
         assert!(refs_of(&two).contains(&"locked".to_string()));
         assert_eq!(two.read_through, Window::at(after, None).settled_before);
+    }
+
+    /// A session in a folder new to this run whose file can't even be
+    /// looked at leaves the folder off the list: the next run reads the
+    /// folder whole again, files older than its start included.
+    #[cfg(unix)]
+    #[test]
+    fn test_a_new_folder_with_a_file_that_cannot_be_looked_at_is_read_whole_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_session(tmp.path(), "first");
+        let proj = tmp.path().join("-Users-you-proj");
+        // a file whose details can't be read (a link to itself)
+        std::os::unix::fs::symlink("loop.jsonl", proj.join("loop.jsonl")).unwrap();
+        assert!(fs::metadata(proj.join("loop.jsonl")).is_err());
+        let after = SystemTime::now() + QUIET + Duration::from_secs(60);
+        // the last run's start lies after every file here
+        let since = SystemTime::now() + Duration::from_secs(60);
+        let one = ingest_window(
+            tmp.path(),
+            None,
+            &[],
+            Window::at(after, Some(since)),
+            Some(&[] as &[String]),
+        )
+        .unwrap();
+        assert_eq!(refs_of(&one), ["first"]);
+        assert!(one.folders.is_empty());
+
+        // in its place now, a session older than that start
+        fs::remove_file(proj.join("loop.jsonl")).unwrap();
+        write_session(tmp.path(), "second");
+        let two = ingest_window(
+            tmp.path(),
+            None,
+            &[],
+            Window::at(after, Some(one.read_through.max(since))),
+            Some(&one.folders),
+        )
+        .unwrap();
+        assert!(refs_of(&two).contains(&"second".to_string()));
+        assert_eq!(two.folders, ["-Users-you-proj"]);
     }
 
     #[test]
