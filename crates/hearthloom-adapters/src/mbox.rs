@@ -347,6 +347,27 @@ fn extract_text(headers: &Headers<'_>) -> String {
     body.to_string()
 }
 
+/// The `source_ref` prefix of a message without a Message-ID: its memory
+/// is keyed by a hash of the exact text the import read, which depends on
+/// how that copy was framed (the archive's line endings, the labels the
+/// live pull wrote) — so no later read of the message can rebuild it.
+pub const UNKEYED_REF_PREFIX: &str = "nomsgid:";
+
+/// The `source_ref` an import gives a message that has a Message-ID: the
+/// first `Message-ID` header, unfolded and trimmed, without the `<` `>`
+/// at its ends. None: the message has none (its memory is keyed under
+/// [`UNKEYED_REF_PREFIX`]). The one rule for this — every reader that
+/// looks for a message's memory uses it, so they agree with the import.
+pub fn message_id_ref(message: &str) -> Option<String> {
+    id_ref(&parse_headers(message))
+}
+
+fn id_ref(headers: &Headers<'_>) -> Option<String> {
+    headers
+        .get("Message-ID")
+        .map(|id| id.trim_matches(|c| c == '<' || c == '>').to_string())
+}
+
 fn message_to_draft(message: &str, labels: &[String], scope: Option<&str>) -> Result<EpisodeDraft> {
     let headers = parse_headers(message);
     let subject = headers.get("Subject").unwrap_or("(no subject)").to_string();
@@ -367,15 +388,12 @@ fn message_to_draft(message: &str, labels: &[String], scope: Option<&str>) -> Re
     }
 
     // Source-native identity: Message-ID, else a content hash stand-in.
-    let source_ref = headers
-        .get("Message-ID")
-        .map(|id| id.trim_matches(|c| c == '<' || c == '>').to_string())
-        .unwrap_or_else(|| {
-            format!(
-                "nomsgid:{}",
-                hearthloom_core::ids::content_hash(message.as_bytes())
-            )
-        });
+    let source_ref = id_ref(&headers).unwrap_or_else(|| {
+        format!(
+            "{UNKEYED_REF_PREFIX}{}",
+            hearthloom_core::ids::content_hash(message.as_bytes())
+        )
+    });
 
     let mut text = extract_text(&headers);
     if text.len() > BODY_CAP {
@@ -493,6 +511,36 @@ Content-Type: text/html\n\
         assert_eq!(draft.entities[2].name, "sam");
         assert_eq!(draft.edges.len(), 2);
         assert!(draft.body.contains("Sounds good"));
+    }
+
+    /// `message_id_ref` is the import's own key for a message, however its
+    /// Message-ID header is written; a message without one has none.
+    #[test]
+    fn test_message_id_ref_is_the_imports_key() {
+        for header in [
+            "Message-ID: <plain@x>",
+            "Message-ID: (comment) <hush1@x>",
+            "message-id:\n  <folded@x>",
+            "Message-ID: <a@x> (trailing)",
+        ] {
+            let message = format!(
+                "From: Ann <ann@x.example>\r\nSubject: s\r\n\
+                 Date: Mon, 05 Jan 2026 10:00:00 -0400\r\n{}\r\n\r\nbody\r\n",
+                header.replace('\n', "\r\n")
+            );
+            let draft = message_to_draft(&message, &[], None).unwrap();
+            assert_eq!(
+                message_id_ref(&message).as_deref(),
+                Some(draft.source_ref.as_str()),
+                "{header}"
+            );
+        }
+        let none = "From: a@x\nDate: Mon, 05 Jan 2026 10:00:00 -0400\n\nbody\n";
+        assert_eq!(message_id_ref(none), None);
+        assert!(message_to_draft(none, &[], None)
+            .unwrap()
+            .source_ref
+            .starts_with(UNKEYED_REF_PREFIX));
     }
 
     #[test]

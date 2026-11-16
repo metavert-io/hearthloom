@@ -237,6 +237,27 @@ impl Store {
         Ok(out)
     }
 
+    /// Whether any memory of `source` labelled private has a source ref
+    /// starting with `prefix` (ASCII). For an item whose memory key can't be
+    /// rebuilt from what a read sees, only the key's form is known.
+    pub fn private_ref_with_prefix(&self, source: &str, prefix: &str) -> Result<bool> {
+        // the refs in [prefix, prefix with its last character advanced) —
+        // a range the UNIQUE(source, source_ref) index answers
+        let mut upper = prefix.as_bytes().to_vec();
+        match upper.last_mut() {
+            Some(last) if prefix.is_ascii() && *last < 0x7f => *last += 1,
+            _ => return Err(anyhow!("a non-empty ASCII prefix is needed")),
+        }
+        let upper = String::from_utf8(upper)?;
+        let conn = self.lock();
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM episodes /* all-episodes: a private label holds even on a replaced memory */
+             WHERE source = ?1 AND source_ref >= ?2 AND source_ref < ?3 AND scope = 'private')",
+            rusqlite::params![source, prefix, upper],
+            |row| row.get::<_, bool>(0),
+        )?)
+    }
+
     pub fn list_privacy_rules(&self) -> Result<Vec<PrivacyRule>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(

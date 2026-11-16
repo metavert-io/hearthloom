@@ -42,11 +42,92 @@ pub const OWNER_ONLY_SOURCES: &[&str] = &[
     "facebook",
 ];
 
+/// Sources that keep the same conversation under the same id: a ChatGPT
+/// conversation imported from the full export (`openai`) and from its
+/// single `conversations.json` (`chatlog-chatgpt`).
+const SAME_RECORD_SOURCES: &[&[&str]] = &[&["openai", "chatlog-chatgpt"]];
+
+/// This record, and the copies other sources keep of it under the same id
+/// (`SAME_RECORD_SOURCES`), as (source, source ref).
+pub fn same_record(source: &str, source_ref: &str) -> Vec<(String, String)> {
+    match SAME_RECORD_SOURCES
+        .iter()
+        .find(|group| group.contains(&source))
+    {
+        Some(group) => group
+            .iter()
+            .map(|s| (s.to_string(), source_ref.to_string()))
+            .collect(),
+        None => vec![(source.to_string(), source_ref.to_string())],
+    }
+}
+
 impl Store {
     /// Apply a batch of episode drafts. Raw content is written under the
     /// home's raw dir before the row lands; idempotent on re-runs.
     pub fn apply_batch(&self, home: &Home, batch: &IngestBatch) -> Result<IngestReport> {
         self.apply_batch_from(home, batch, &[])
+    }
+
+    /// The owner's import read these drafts as private (an export's own
+    /// "do not remember" flag, or private asked for the whole import): a
+    /// copy of the same record already stored is labelled private too —
+    /// `apply_batch` leaves a stored episode as it landed, so without this a
+    /// conversation imported before it was flagged (or by a reader that
+    /// didn't know the flag) stays outside the vault. Only the label moves,
+    /// and only into the vault; the content is untouched. The label is
+    /// stamped, so the scope leg carries it to the owner's other nodes.
+    /// For the owner's own import paths only — never a peer's batch (the
+    /// scope leg settles labels between nodes) or another key's. Returns
+    /// the records relabelled.
+    /// `flagged`: (source, source ref) of records the import reads as
+    /// private whether or not it made a draft of them — a ChatGPT
+    /// conversation flagged "do not remember" whose kept branch holds no
+    /// turns gets no draft, yet a copy an earlier reader stored of it goes
+    /// into the vault all the same.
+    pub fn label_private_on_reimport(
+        &self,
+        actor: &Actor,
+        drafts: &[crate::ingest::EpisodeDraft],
+        flagged: &[(String, String)],
+    ) -> Result<usize> {
+        let mut refs: Vec<(String, String)> = drafts
+            .iter()
+            .filter(|d| d.scope.as_deref() == Some("private"))
+            .map(|d| (d.source.as_str(), d.source_ref.as_str()))
+            .chain(flagged.iter().map(|(s, r)| (s.as_str(), r.as_str())))
+            .flat_map(|(source, source_ref)| same_record(source, source_ref))
+            .collect();
+        refs.sort_unstable();
+        refs.dedup();
+        if refs.is_empty() {
+            return Ok(0);
+        }
+        let now = now_utc();
+        let conn = self.lock();
+        let tx = conn.unchecked_transaction()?;
+        let mut relabeled = Vec::new();
+        for (source, source_ref) in &refs {
+            let changed = tx.execute(
+                "UPDATE episodes SET scope = 'private', scope_changed_at = ?3
+                 WHERE source = ?1 AND source_ref = ?2 AND scope != 'private'",
+                rusqlite::params![source, source_ref, now],
+            )?;
+            if changed > 0 {
+                relabeled.push(format!("{source}:{source_ref}"));
+            }
+        }
+        if !relabeled.is_empty() {
+            record_mutation(
+                &tx,
+                actor,
+                "scope_private_on_reimport",
+                &format!("scope_private_on_reimport:{now}:{}", relabeled.len()),
+                &json!({"records": relabeled, "scope": "private"}),
+            )?;
+        }
+        tx.commit()?;
+        Ok(relabeled.len())
     }
 
     /// `apply_batch` with the sender's provenance for synced drafts
@@ -77,6 +158,21 @@ impl Store {
 
         for draft in &batch.episodes {
             let episode_id = ids::episode_id(&draft.source, &draft.source_ref);
+
+            // An episode already here keeps the text it landed with. Its
+            // raw file is what peer sync, export and friend reads serve,
+            // and its row, hash and index hold the first text — so a draft
+            // sent again (or a second one in this batch) never touches it.
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM episodes /* all-episodes: an existence check */
+                 WHERE id = ?1 OR (source = ?2 AND source_ref = ?3))",
+                rusqlite::params![episode_id, draft.source, draft.source_ref],
+                |r| r.get(0),
+            )?;
+            if exists {
+                report.episodes_existing += 1;
+                continue;
+            }
 
             // Scope resolution: explicit > known Project entity's scope >
             // author/organizer identity scope > `personal`. This is how one
@@ -121,12 +217,15 @@ impl Store {
                 scope = "private".to_string();
             }
 
-            // Raw content file, dated by local event date (fallback: today).
+            // Raw content file, dated by local event date (fallback: today,
+            // also for an event time that doesn't open with a real date).
             let date = draft
                 .event_time
                 .utc
                 .as_deref()
-                .map(|t| t[..10].to_string())
+                .and_then(|t| t.get(..10))
+                .filter(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").is_ok())
+                .map(str::to_string)
                 .unwrap_or_else(|| now_utc()[..10].to_string());
             let content_ref = home.write_raw(&episode_id, &date, &draft.body)?;
 
@@ -748,5 +847,107 @@ mod tests {
         assert!(!store.search("fix something", 10).unwrap().is_empty());
         let dossier = store.entity_dossier("Jon Hale").unwrap().unwrap();
         assert_eq!(dossier.episode_count, 2);
+    }
+
+    /// An episode keeps the text it landed with: a later draft under the
+    /// same source and ref — in another batch or later in the same one —
+    /// leaves its raw file byte-identical.
+    #[test]
+    fn test_a_draft_sent_again_leaves_the_stored_text_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path());
+        home.init().unwrap();
+        let store = Store::open(&home.db_path()).unwrap();
+        let with_body = |body: &str| EpisodeDraft {
+            body: body.into(),
+            ..draft("repo:abc123")
+        };
+        apply_as(&store, &home, "adapter:git", vec![with_body("first text")]);
+        let id = ids::episode_id("git", "repo:abc123");
+        let raw = tmp.path().join(format!("raw/2026/03/15/{id}.txt"));
+        assert_eq!(std::fs::read_to_string(&raw).unwrap(), "first text");
+
+        let report = store
+            .apply_batch(
+                &home,
+                &IngestBatch {
+                    actor: "adapter:git".into(),
+                    session_id: None,
+                    episodes: vec![with_body("second text"), with_body("third text")],
+                },
+            )
+            .unwrap();
+        assert_eq!((report.episodes_new, report.episodes_existing), (0, 2));
+        assert_eq!(std::fs::read_to_string(&raw).unwrap(), "first text");
+
+        // two drafts for one new episode in one batch: the first one lands
+        let report = store
+            .apply_batch(
+                &home,
+                &IngestBatch {
+                    actor: "adapter:git".into(),
+                    session_id: None,
+                    episodes: vec![
+                        EpisodeDraft {
+                            body: "kept".into(),
+                            ..draft("repo:def456")
+                        },
+                        EpisodeDraft {
+                            body: "dropped".into(),
+                            ..draft("repo:def456")
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        assert_eq!((report.episodes_new, report.episodes_existing), (1, 1));
+        let id = ids::episode_id("git", "repo:def456");
+        let raw = tmp.path().join(format!("raw/2026/03/15/{id}.txt"));
+        assert_eq!(std::fs::read_to_string(&raw).unwrap(), "kept");
+    }
+
+    /// An event time that doesn't open with a date files its raw text
+    /// under today instead of failing the batch.
+    #[test]
+    fn test_an_event_time_without_a_date_files_under_today() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path());
+        home.init().unwrap();
+        let store = Store::open(&home.db_path()).unwrap();
+        let odd = |source_ref: &str, utc: &str| EpisodeDraft {
+            event_time: EventTime {
+                utc: Some(utc.into()),
+                tz_offset_minutes: None,
+                uncertainty: TimeUncertainty::Exact,
+            },
+            ..draft(source_ref)
+        };
+        let day = || now_utc()[..10].replace('-', "/");
+        let before = day();
+        let report = store
+            .apply_batch(
+                &home,
+                &IngestBatch {
+                    actor: "adapter:git".into(),
+                    session_id: None,
+                    episodes: vec![
+                        odd("repo:short", "2026"),
+                        odd("repo:wide", "2026-03-1é5T00:00:00Z"),
+                        odd("repo:nodate", "yesterday afternoon"),
+                    ],
+                },
+            )
+            .unwrap();
+        assert_eq!(report.episodes_new, 3);
+        let after = day();
+        for source_ref in ["repo:short", "repo:wide", "repo:nodate"] {
+            let id = ids::episode_id("git", source_ref);
+            assert!(
+                [&before, &after]
+                    .iter()
+                    .any(|d| tmp.path().join(format!("raw/{d}/{id}.txt")).is_file()),
+                "{source_ref}"
+            );
+        }
     }
 }

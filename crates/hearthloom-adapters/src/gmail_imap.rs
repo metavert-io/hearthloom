@@ -304,6 +304,19 @@ pub struct GmailSearch {
     session: imap::Session<imap::Connection>,
 }
 
+/// Whether `id` can be a Message-ID as fetched by (without its `<>`): one
+/// token of at most 998 characters with no whitespace, control character,
+/// quote, backslash, angle bracket or parenthesis. A real Message-ID has
+/// none of them (RFC 5322 `msg-id`), and they are what would let the id
+/// read as more than one term inside a Gmail search.
+pub fn is_message_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.chars().count() <= 998
+        && !id.chars().any(|c| {
+            c.is_whitespace() || c.is_control() || matches!(c, '"' | '\\' | '<' | '>' | '(' | ')')
+        })
+}
+
 /// An IMAP quoted string (RFC 3501): backslash and double quote escaped;
 /// line breaks can't appear in one, so they become spaces.
 fn quoted(text: &str) -> String {
@@ -372,10 +385,15 @@ impl GmailSearch {
     }
 
     /// The raw message with this Message-ID (Gmail's `rfc822msgid:`), or
-    /// with this UID (`uid:<n>`), cut at `cap` bytes. None: not found.
+    /// with this UID (`uid:<n>`), cut at `cap` bytes. None: not found — or
+    /// not a Message-ID (`is_message_id`): the id goes into a Gmail search,
+    /// so anything that could read as more search terms finds nothing.
+    /// Gmail's match is a search, so a caller that needs this exact message
+    /// checks the Message-ID of what comes back.
     pub fn fetch(&mut self, id: &str, cap: usize) -> Result<Option<Vec<u8>>> {
         let uid = match id.strip_prefix("uid:").and_then(|u| u.parse::<u32>().ok()) {
             Some(uid) => Some(uid),
+            None if !is_message_id(id) => return Ok(None),
             None => self
                 .session
                 .uid_search(format!("X-GM-RAW {}", quoted(&format!("rfc822msgid:{id}"))))?
@@ -511,6 +529,30 @@ impl MailFeed for ImapFeed {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_only_a_single_message_id_is_looked_up() {
+        for id in [
+            "CAF=abc123+x@mail.example.com",
+            "p1@neutral.example",
+            "a.b-c_d$e%f!g@[192.0.2.1]",
+        ] {
+            assert!(is_message_id(id), "{id}");
+        }
+        for id in [
+            "",
+            "a@x OR from:bank.example",
+            "a@x\tfrom:bank.example",
+            "a@x\"",
+            "a@x\\",
+            "<a@x>",
+            "a@x (from:bank.example)",
+            "a@x\r\nfrom:bank.example",
+        ] {
+            assert!(!is_message_id(id), "{id:?}");
+        }
+        assert!(!is_message_id(&"a".repeat(999)));
+    }
 
     #[test]
     fn test_search_text_is_a_safe_quoted_string() {

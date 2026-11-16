@@ -378,7 +378,13 @@ workspace with `npm i playwright`) — screenshot + pageerror check.
   willingness filter `bus::offered` at fan-out — friend grants slot in
   there with federation; notes in the design log 2026-07-15);
   inbox drop-folder watcher (`~/.hearthloom/inbox/` — zips, mbox, ics,
-  conversations.json, Finder-dragged chat.db/Photos.sqlite);
+  conversations.json, Finder-dragged chat.db/Photos.sqlite; an owner's import that reads a
+  record as private (ChatGPT "do not remember", or `--scope private`)
+  relabels the copy stored before (`Store::label_private_on_reimport`:
+  label only, into the vault only; never for a peer's or another key's
+  batch; a flagged conversation counts even when no draft is made of it —
+  `openai::read_export`/`chatlog::read` report every flagged one, so a
+  kept branch with no turns still vaults what an earlier reader stored);
   `/v1/ingest/local` runs TCC-gated adapters daemon-side;
   **RLM deep-query engine** (`rlm.rs` — `hearthloom query`, POST /v1/query,
   SSE stream at /v1/query/stream; ≤8 rounds over search/recall/traverse/

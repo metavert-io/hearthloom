@@ -18,6 +18,11 @@ General rules:
 - The inbox drop folder `~/.hearthloom/inbox/` accepts zips, .mbox
   (≤250MB), .ics, conversations.json, chat.db, Photos.sqlite — dragged
   files ingest automatically.
+- Importing a ChatGPT export again (either route) moves a conversation
+  now flagged "do not remember" into the vault, even if it was stored
+  before outside it — also when the branch it ended on has no turns left
+  to import; so does any import you run with `--scope private` for the
+  records it reads. Only the label changes.
 
 ## Facebook (DYI archive)
 1. facebook.com → Settings → Download Your Information → **JSON**

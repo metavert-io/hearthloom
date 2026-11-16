@@ -120,6 +120,7 @@ fn process_file(store: &Store, home: &hearthloom_core::Home, path: &Path) -> Res
             home,
             "adapter:imessage",
             hearthloom_adapters::imessage::ingest(path, None)?,
+            &[],
         );
     }
     if name == "photos.sqlite" {
@@ -128,6 +129,7 @@ fn process_file(store: &Store, home: &hearthloom_core::Home, path: &Path) -> Res
             home,
             "adapter:photos",
             hearthloom_adapters::photos::ingest(path, None)?,
+            &[],
         );
     }
     match ext.as_str() {
@@ -137,13 +139,12 @@ fn process_file(store: &Store, home: &hearthloom_core::Home, path: &Path) -> Res
             home,
             "adapter:ics",
             hearthloom_adapters::ics::ingest(path, None)?,
+            &[],
         ),
-        "json" => ingest_drafts(
-            store,
-            home,
-            "adapter:chatlog",
-            hearthloom_adapters::chatlog::ingest(path, None)?,
-        ),
+        "json" => {
+            let read = hearthloom_adapters::chatlog::read(path, None)?;
+            ingest_drafts(store, home, "adapter:chatlog", read.drafts, &read.flagged)
+        }
         "zip" | "tgz" | "gz" => {
             let dir = extract_archive(path)?;
             // A recognizable export archive (ChatGPT full export, Facebook
@@ -284,13 +285,22 @@ fn ingest_mbox(store: &Store, home: &hearthloom_core::Home, path: &Path) -> Resu
     ))
 }
 
+/// `flagged`: records the file reads as private without a draft of them
+/// (`Store::label_private_on_reimport`).
 fn ingest_drafts(
     store: &Store,
     home: &hearthloom_core::Home,
     actor: &str,
     drafts: Vec<hearthloom_core::EpisodeDraft>,
+    flagged: &[(String, String)],
 ) -> Result<String> {
     let count = drafts.len();
+    // what the export reads as private, a copy stored before becomes too
+    let private: Vec<hearthloom_core::EpisodeDraft> = drafts
+        .iter()
+        .filter(|d| d.scope.as_deref() == Some("private"))
+        .cloned()
+        .collect();
     let mut new = 0usize;
     let mut existing = 0usize;
     for chunk in drafts.chunks(500) {
@@ -305,14 +315,189 @@ fn ingest_drafts(
         new += report.episodes_new;
         existing += report.episodes_existing;
     }
+    let relabeled =
+        store.label_private_on_reimport(&hearthloom_core::Actor::new(actor), &private, flagged)?;
     Ok(format!(
-        "{count} items parsed, {new} new episodes ({existing} already present)"
+        "{count} items parsed, {new} new episodes ({existing} already present){}",
+        if relabeled > 0 {
+            format!(", {relabeled} stored before now private")
+        } else {
+            String::new()
+        }
     ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A conversation stored outside the vault and read again as "do not
+    /// remember" goes into the vault: its label changes, its content
+    /// doesn't — the copy under the export's other source too.
+    #[test]
+    fn test_a_reimport_flagged_do_not_remember_vaults_the_stored_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::Home::at(tmp.path().join("home"));
+        home.init().unwrap();
+        let store = Store::open(&home.db_path()).unwrap();
+        let export = |flagged: bool| {
+            serde_json::json!([{
+                "conversation_id": "c9", "title": "Clinic visit",
+                "create_time": 1720992777.0, "is_do_not_remember": flagged,
+                "mapping": {"n1": {"message": {"author": {"role": "user"},
+                    "create_time": 1720992778.0, "content": {"parts": ["about the results"]}}}}
+            }])
+            .to_string()
+        };
+        let drop_dir = tmp.path().join("drop");
+        std::fs::create_dir_all(&drop_dir).unwrap();
+        let file = drop_dir.join("conversations.json");
+        let scope_and_hash = |source: &str| -> (String, String) {
+            let (_, rows) = store
+                .read_query(
+                    &format!(
+                        "SELECT scope, content_hash FROM episodes /* all-episodes: a label check */
+                         WHERE source = '{source}' AND source_ref = 'c9'"
+                    ),
+                    1,
+                )
+                .unwrap();
+            (
+                rows[0][0].as_str().unwrap().to_string(),
+                rows[0][1].as_str().unwrap().to_string(),
+            )
+        };
+
+        // stored outside the vault (unflagged, or by a reader that didn't
+        // know the flag); the full export holds the same conversation
+        std::fs::write(&file, export(false)).unwrap();
+        process_file(&store, &home, &file).unwrap();
+        let mut openai_copy = hearthloom_adapters::chatlog::ingest(&file, None).unwrap()[0].clone();
+        openai_copy.source = "openai".into();
+        store
+            .apply_batch(
+                &home,
+                &IngestBatch {
+                    actor: "adapter:openai".into(),
+                    session_id: None,
+                    episodes: vec![openai_copy],
+                },
+            )
+            .unwrap();
+        let (scope, hash) = scope_and_hash("chatlog-chatgpt");
+        assert_ne!(scope, "private");
+        store.vault_unlock(15); // the read below sees private rows too
+
+        std::fs::write(&file, export(true)).unwrap();
+        let summary = process_file(&store, &home, &file).unwrap();
+        assert!(summary.contains("2 stored before now private"), "{summary}");
+        assert_eq!(scope_and_hash("chatlog-chatgpt"), ("private".into(), hash));
+        assert_eq!(scope_and_hash("openai").0, "private");
+
+        // an import that reads nothing as private changes no label
+        store.vault_lock();
+        let other = store
+            .label_private_on_reimport(
+                &hearthloom_core::Actor::new("adapter:chatlog"),
+                &hearthloom_adapters::chatlog::ingest(&drop_dir.join("conversations.json"), None)
+                    .unwrap()
+                    .into_iter()
+                    .map(|mut d| {
+                        d.scope = None;
+                        d
+                    })
+                    .collect::<Vec<_>>(),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(other, 0);
+    }
+
+    /// A conversation flagged "do not remember" whose kept branch holds no
+    /// turns gets no draft — and a copy an earlier reader stored of it
+    /// (from another branch) still goes into the vault, under both of the
+    /// export's sources, while the file's other conversations import.
+    #[test]
+    fn test_a_flagged_conversation_without_turns_still_vaults_the_stored_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::Home::at(tmp.path().join("home"));
+        home.init().unwrap();
+        let store = Store::open(&home.db_path()).unwrap();
+        // what an earlier reader stored: every node's turns, outside the vault
+        let stored = |source: &str| hearthloom_core::EpisodeDraft {
+            source: source.into(),
+            source_ref: "c9".into(),
+            kind: "conversation".into(),
+            title: "Clinic visit".into(),
+            body: "conversation: Clinic visit\nprovider: chatgpt\n\nyou: about the results\n\n"
+                .into(),
+            event_time: hearthloom_core::EventTime::unknown(),
+            trust: "self".into(),
+            scope: None,
+            entities: vec![],
+            edges: vec![],
+        };
+        store
+            .apply_batch(
+                &home,
+                &IngestBatch {
+                    actor: "adapter:chatlog".into(),
+                    session_id: None,
+                    episodes: vec![stored("chatlog-chatgpt"), stored("openai")],
+                },
+            )
+            .unwrap();
+        let scope_of = |source: &str, id: &str| -> Option<String> {
+            store.vault_unlock(15);
+            let (_, rows) = store
+                .read_query(
+                    &format!(
+                        "SELECT scope FROM episodes /* all-episodes: a label check */
+                         WHERE source = '{source}' AND source_ref = '{id}'"
+                    ),
+                    1,
+                )
+                .unwrap();
+            store.vault_lock();
+            rows.first().map(|r| r[0].as_str().unwrap().to_string())
+        };
+        assert!(scope_of("chatlog-chatgpt", "c9").is_some_and(|s| s != "private"));
+
+        // the export now flags it, and the branch it ended on is only the
+        // system's turn; another conversation sits beside it
+        let export = serde_json::json!([
+            {
+                "conversation_id": "c9", "title": "Clinic visit",
+                "create_time": 1720992777.0, "is_do_not_remember": true,
+                "current_node": "sys",
+                "mapping": {
+                    "sys": {"message": {"author": {"role": "system"},
+                        "content": {"parts": ["You are a helpful assistant."]}}},
+                    "n1": {"parent": "sys", "message": {"author": {"role": "user"},
+                        "content": {"parts": ["about the results"]}}}
+                }
+            },
+            {
+                "conversation_id": "c10", "title": "Garden plans",
+                "create_time": 1720992800.0,
+                "mapping": {"m1": {"message": {"author": {"role": "user"},
+                    "content": {"parts": ["what to plant in spring"]}}}}
+            }
+        ]);
+        let drop_dir = tmp.path().join("drop");
+        std::fs::create_dir_all(&drop_dir).unwrap();
+        let file = drop_dir.join("conversations.json");
+        std::fs::write(&file, export.to_string()).unwrap();
+        let summary = process_file(&store, &home, &file).unwrap();
+        assert!(summary.contains("1 new episodes"), "{summary}");
+        assert!(summary.contains("2 stored before now private"), "{summary}");
+        assert_eq!(
+            scope_of("chatlog-chatgpt", "c9").as_deref(),
+            Some("private")
+        );
+        assert_eq!(scope_of("openai", "c9").as_deref(), Some("private"));
+        assert!(scope_of("chatlog-chatgpt", "c10").is_some_and(|s| s != "private"));
+    }
 
     #[test]
     fn test_oversized_mbox_refused_before_parsing() {

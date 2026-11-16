@@ -3224,8 +3224,8 @@ I won't act on that. {"answer": "That email asks for a wire transfer; nothing wa
         assert!(repair["error"].as_str().unwrap().contains("not acted on"));
     }
 
-    /// A commit (the user's own) composing a project, and an imported mail
-    /// whose sender chose a name meant to steer the model.
+    /// A Desk record (the user's own words) composing a project, and an
+    /// imported mail whose sender chose a name meant to steer the model.
     fn plant_graph(state: &AppState) {
         use hearthloom_core::ingest::{EdgeAssertion, EntityRef};
         let entity = |kind: &str, name: &str| EntityRef {
@@ -3260,7 +3260,7 @@ I won't act on that. {"answer": "That email asks for a wire transfer; nothing wa
             session_id: None,
             episodes: vec![
                 episode(
-                    "git",
+                    "desk",
                     "self",
                     entity("Project", "hearthloom"),
                     "contains",

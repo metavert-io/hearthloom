@@ -33,8 +33,10 @@ pub fn ingest(repo_path: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>
         .to_string();
 
     // Repo identity: origin URL if there is one, else the canonical path.
+    // A credential saved in the URL never enters the identity, the body or
+    // the Project's attribute.
     let (attr_kind, repo_identity) = match git(&repo_path, &["remote", "get-url", "origin"]) {
-        Ok(url) if !url.trim().is_empty() => ("repo-url", url.trim().to_string()),
+        Ok(url) if !url.trim().is_empty() => ("repo-url", without_credentials(url.trim())),
         _ => ("repo-path", repo_path.display().to_string()),
     };
 
@@ -52,6 +54,42 @@ pub fn ingest(repo_path: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>
         return Err(anyhow!("no commits found in {}", repo_path.display()));
     }
     Ok(drafts)
+}
+
+/// A remote URL without the credentials a URL can carry. A `scheme://` URL
+/// loses its user-info (a token can sit in the user name as well as the
+/// password) — except over ssh, where the user name (`git@`) is part of
+/// the address and only a password goes. An scp-style `user@host:path`
+/// keeps its user name and loses a `:password`. Anything else (a local
+/// path, a URL without user-info) is returned as it is.
+fn without_credentials(url: &str) -> String {
+    if let Some((scheme, rest)) = url.split_once("://") {
+        let (authority, tail) = match rest.find(['/', '?', '#']) {
+            Some(i) => rest.split_at(i),
+            None => (rest, ""),
+        };
+        let Some((userinfo, host)) = authority.rsplit_once('@') else {
+            return url.to_string();
+        };
+        let ssh = ["ssh", "git+ssh", "ssh+git"]
+            .iter()
+            .any(|s| scheme.eq_ignore_ascii_case(s));
+        let user = userinfo.split(':').next().unwrap_or("");
+        return if ssh && !user.is_empty() {
+            format!("{scheme}://{user}@{host}{tail}")
+        } else {
+            format!("{scheme}://{host}{tail}")
+        };
+    }
+    // scp-style: [user@]host:path
+    if let Some((userinfo, rest)) = url.split_once('@') {
+        if !userinfo.contains('/') {
+            if let Some((user, _)) = userinfo.split_once(':') {
+                return format!("{user}@{rest}");
+            }
+        }
+    }
+    url.to_string()
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
@@ -170,7 +208,10 @@ fn parse_commit(
         title: subject,
         body,
         event_time,
-        trust: "self".into(),
+        // A history holds every contributor's messages, and an author line
+        // is whatever its writer typed: commits are not taken as the
+        // owner's own words (core `OTHERS_WORDS_SOURCES`).
+        trust: "imported".into(),
         scope: scope.map(String::from),
         entities,
         edges,
@@ -219,7 +260,7 @@ mod tests {
         assert_eq!(newest.title, "add b");
         assert!(newest.body.contains("longer body here"));
         assert!(newest.body.contains("b.txt"));
-        assert_eq!(newest.trust, "self");
+        assert_eq!(newest.trust, "imported");
         assert_eq!(newest.event_time.tz_offset_minutes, Some(-240));
         assert_eq!(newest.entities[0].entity_type, "Person");
         assert_eq!(
@@ -237,5 +278,71 @@ mod tests {
 
         // source_ref is unique per commit.
         assert_ne!(drafts[0].source_ref, drafts[1].source_ref);
+
+        // A credential saved in the origin URL is stored nowhere.
+        run(&[
+            "remote",
+            "add",
+            "origin",
+            "https://someone:tok-SECRET-123@git.example.com/team/repo.git",
+        ]);
+        let drafts = ingest(repo, None).unwrap();
+        for d in &drafts {
+            assert!(!d.body.contains("SECRET"), "{}", d.body);
+            assert!(!d.source_ref.contains("SECRET"), "{}", d.source_ref);
+            for e in &d.entities {
+                assert!(e.attributes.iter().all(|(_, v)| !v.contains("SECRET")));
+            }
+        }
+        assert!(drafts[0]
+            .source_ref
+            .starts_with("https://git.example.com/team/repo.git#"));
+        assert_eq!(
+            drafts[0].entities[1].attributes[0],
+            (
+                "repo-url".to_string(),
+                "https://git.example.com/team/repo.git".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_remote_urls_lose_their_credentials_only() {
+        for (given, kept) in [
+            (
+                "https://user:tok@github.example/o/r.git",
+                "https://github.example/o/r.git",
+            ),
+            (
+                "https://tok@github.example/o/r.git",
+                "https://github.example/o/r.git",
+            ),
+            (
+                "https://u:p@ss@host.example:8443/r",
+                "https://host.example:8443/r",
+            ),
+            (
+                "https://host.example/@team/r.git",
+                "https://host.example/@team/r.git",
+            ),
+            (
+                "ssh://git:pw@host.example/r.git",
+                "ssh://git@host.example/r.git",
+            ),
+            (
+                "ssh://git@host.example/r.git",
+                "ssh://git@host.example/r.git",
+            ),
+            ("git@github.example:o/r.git", "git@github.example:o/r.git"),
+            (
+                "git:pw@github.example:o/r.git",
+                "git@github.example:o/r.git",
+            ),
+            ("/Users/you/code/r", "/Users/you/code/r"),
+            ("/srv/repos/r@v2", "/srv/repos/r@v2"),
+            ("file:///srv/repos/r.git", "file:///srv/repos/r.git"),
+        ] {
+            assert_eq!(without_credentials(given), kept, "{given}");
+        }
     }
 }

@@ -20,8 +20,31 @@ pub fn ingest(path: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
     // Claude exports ship a sibling users.json naming the account owner;
     // attaching them as author makes identity-based scope inference work
     // (a work-email account's conversations default to `work`).
-    let owner = path
-        .parent()
+    ingest_with_owner(path, scope, owner_of(path).as_ref())
+}
+
+pub fn ingest_with_owner(
+    path: &Path,
+    scope: Option<&str>,
+    owner: Option<&(String, String)>,
+) -> Result<Vec<EpisodeDraft>> {
+    let read = read_with_owner(path, scope, owner)?;
+    if read.drafts.is_empty() {
+        return Err(anyhow!("no conversations found in {}", path.display()));
+    }
+    Ok(read.drafts)
+}
+
+/// `ingest`, with every ChatGPT conversation the owner flagged "do not
+/// remember" (`openai::ExportRead`): one with no turns on the branch it
+/// ended on gets no draft, but a copy stored before is still vaulted.
+pub fn read(path: &Path, scope: Option<&str>) -> Result<crate::openai::ExportRead> {
+    read_with_owner(path, scope, owner_of(path).as_ref())
+}
+
+/// The account owner a Claude export names in the `users.json` beside it.
+fn owner_of(path: &Path) -> Option<(String, String)> {
+    path.parent()
         .map(|dir| dir.join("users.json"))
         .filter(|p| p.exists())
         .and_then(|p| std::fs::read_to_string(p).ok())
@@ -35,15 +58,16 @@ pub fn ingest(path: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
                     .unwrap_or("me")
                     .to_string(),
             ))
-        });
-    ingest_with_owner(path, scope, owner.as_ref())
+        })
 }
 
-pub fn ingest_with_owner(
+/// An error only when the file holds neither a conversation to store nor
+/// a flagged one.
+fn read_with_owner(
     path: &Path,
     scope: Option<&str>,
     owner: Option<&(String, String)>,
-) -> Result<Vec<EpisodeDraft>> {
+) -> Result<crate::openai::ExportRead> {
     let raw =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let value: Value = serde_json::from_str(&raw)
@@ -53,11 +77,12 @@ pub fn ingest_with_owner(
         .ok_or_else(|| anyhow!("expected a top-level array of conversations"))?;
 
     let mut drafts = Vec::new();
+    let mut flagged = Vec::new();
     for conversation in conversations {
         let result = if conversation.get("chat_messages").is_some() {
             claude_conversation(conversation, scope, owner)
         } else if conversation.get("mapping").is_some() {
-            chatgpt_conversation(conversation, scope, owner)
+            chatgpt_conversation(conversation, scope, owner, &mut flagged)
         } else {
             Err(anyhow!("unrecognized conversation shape"))
         };
@@ -67,10 +92,10 @@ pub fn ingest_with_owner(
             Err(err) => tracing::warn!("skipping conversation: {err}"),
         }
     }
-    if drafts.is_empty() {
+    if drafts.is_empty() && flagged.is_empty() {
         return Err(anyhow!("no conversations found in {}", path.display()));
     }
-    Ok(drafts)
+    Ok(crate::openai::ExportRead { drafts, flagged })
 }
 
 fn cap(text: &str, limit: usize) -> &str {
@@ -84,15 +109,28 @@ fn cap(text: &str, limit: usize) -> &str {
     &text[..cut]
 }
 
-fn build_draft(
-    provider: &str,
-    id: &str,
+/// One conversation's transcript, whichever provider exported it.
+struct Transcript {
+    id: String,
     title: String,
     event_time: EventTime,
     turns: Vec<(String, String)>,
+    starred: bool,
+}
+
+fn build_draft(
+    provider: &str,
+    transcript: Transcript,
     scope: Option<&str>,
     owner: Option<&(String, String)>,
 ) -> Option<EpisodeDraft> {
+    let Transcript {
+        id,
+        title,
+        event_time,
+        turns,
+        starred,
+    } = transcript;
     if turns.is_empty() {
         return None;
     }
@@ -106,7 +144,11 @@ fn build_draft(
             }]
         })
         .unwrap_or_default();
-    let mut body = format!("conversation: {title}\nprovider: {provider}\n\n");
+    let mut body = format!("conversation: {title}\nprovider: {provider}\n");
+    if starred {
+        body.push_str("starred: true\n");
+    }
+    body.push('\n');
     for (speaker, text) in &turns {
         let entry = format!("{speaker}: {}\n\n", cap(text.trim(), MESSAGE_CAP));
         if body.len() + entry.len() > BODY_CAP {
@@ -117,7 +159,7 @@ fn build_draft(
     }
     Some(EpisodeDraft {
         source: format!("chatlog-{provider}"),
-        source_ref: id.to_string(),
+        source_ref: id,
         kind: "conversation".into(),
         title,
         body,
@@ -185,81 +227,50 @@ fn claude_conversation(
         }
     }
     Ok(build_draft(
-        "claude", id, title, event_time, turns, scope, owner,
+        "claude",
+        Transcript {
+            id: id.to_string(),
+            title,
+            event_time,
+            turns,
+            starred: false,
+        },
+        scope,
+        owner,
     ))
 }
 
+/// A ChatGPT conversation, read by the export adapter's reader
+/// (`openai::read_chatgpt`) so its flags mean the same on both routes:
+/// "do not remember" lands private over any scope passed, and is noted in
+/// `flagged` whether or not a transcript is left. Image parts are left out
+/// (this route has no home to copy them into).
 fn chatgpt_conversation(
     conversation: &Value,
     scope: Option<&str>,
     owner: Option<&(String, String)>,
+    flagged: &mut Vec<(String, String)>,
 ) -> Result<Option<EpisodeDraft>> {
-    let id = conversation
-        .get("conversation_id")
-        .or_else(|| conversation.get("id"))
-        .and_then(|i| i.as_str())
-        .ok_or_else(|| anyhow!("chatgpt conversation without id"))?;
-    let title = conversation
-        .get("title")
-        .and_then(|t| t.as_str())
-        .filter(|t| !t.is_empty())
-        .unwrap_or("(untitled conversation)")
-        .to_string();
-    let event_time = conversation
-        .get("create_time")
-        .and_then(|c| c.as_f64())
-        .and_then(|epoch| DateTime::from_timestamp(epoch as i64, 0))
-        .map(|dt| EventTime {
-            utc: Some(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
-            tz_offset_minutes: None, // export carries no timezone
-            uncertainty: TimeUncertainty::Exact,
-        })
-        .unwrap_or_else(EventTime::unknown);
-
-    // The mapping is a tree; message create_time orders the turns.
-    let mut messages: Vec<(f64, String, String)> = Vec::new();
-    for node in conversation
-        .get("mapping")
-        .and_then(|m| m.as_object())
-        .map(|m| m.values().collect::<Vec<_>>())
-        .unwrap_or_default()
-    {
-        let Some(message) = node.get("message") else {
-            continue;
-        };
-        let role = message
-            .pointer("/author/role")
-            .and_then(|r| r.as_str())
-            .unwrap_or("unknown");
-        if role != "user" && role != "assistant" {
-            continue;
-        }
-        let speaker = if role == "user" { "you" } else { "chatgpt" };
-        let mut text = String::new();
-        for part in message
-            .pointer("/content/parts")
-            .and_then(|p| p.as_array())
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-        {
-            if let Some(t) = part.as_str() {
-                text.push_str(t);
-                text.push('\n');
-            }
-        }
-        if text.trim().is_empty() {
-            continue;
-        }
-        let at = message
-            .get("create_time")
-            .and_then(|c| c.as_f64())
-            .unwrap_or(0.0);
-        messages.push((at, speaker.to_string(), text));
+    let read = crate::openai::read_chatgpt(conversation, None)?;
+    if read.do_not_remember {
+        flagged.push(("chatlog-chatgpt".to_string(), read.id.clone()));
     }
-    messages.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    let turns = messages.into_iter().map(|(_, s, t)| (s, t)).collect();
+    let scope = if read.do_not_remember {
+        Some("private")
+    } else {
+        scope
+    };
     Ok(build_draft(
-        "chatgpt", id, title, event_time, turns, scope, owner,
+        "chatgpt",
+        Transcript {
+            id: read.id,
+            title: read.title,
+            event_time: read.event_time,
+            turns: read.turns,
+            starred: read.starred,
+        },
+        scope,
+        owner,
     ))
 }
 
@@ -326,5 +337,83 @@ mod tests {
         assert!(!draft.body.contains("ignored"));
         // No timezone in ChatGPT exports: offset honestly absent.
         assert_eq!(draft.event_time.tz_offset_minutes, None);
+    }
+
+    /// A lone `conversations.json` reads the owner's flags as the export
+    /// adapter does: "do not remember" lands private over the scope
+    /// passed, and a starred conversation says so.
+    #[test]
+    fn test_chatgpt_flags_hold_on_the_single_file_route() {
+        let json = serde_json::json!([
+            {
+                "id": "gpt-forget",
+                "title": "Forget this",
+                "create_time": 1751378400.0,
+                "is_do_not_remember": true,
+                "is_starred": true,
+                "mapping": {
+                    "n1": {"message": {"author": {"role": "user"}, "create_time": 1751378400.0,
+                            "content": {"parts": ["keep this between us"]}}}
+                }
+            },
+            {
+                "id": "gpt-plain",
+                "title": "Plain",
+                "create_time": 1751378400.0,
+                "mapping": {
+                    "n1": {"message": {"author": {"role": "user"}, "create_time": 1751378400.0,
+                            "content": {"parts": ["hello"]}}}
+                }
+            }
+        ]);
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("conversations.json");
+        std::fs::write(&path, json.to_string()).unwrap();
+
+        let drafts = ingest(&path, Some("work")).unwrap();
+        let forget = drafts
+            .iter()
+            .find(|d| d.source_ref == "gpt-forget")
+            .unwrap();
+        assert_eq!(forget.source, "chatlog-chatgpt");
+        assert_eq!(forget.scope.as_deref(), Some("private"));
+        assert!(forget.body.contains("starred: true"));
+        let plain = drafts.iter().find(|d| d.source_ref == "gpt-plain").unwrap();
+        assert_eq!(plain.scope.as_deref(), Some("work"));
+        assert!(!plain.body.contains("starred"));
+    }
+
+    /// The transcript follows the branch the conversation ended on: an
+    /// answer the owner regenerated away from isn't part of it.
+    #[test]
+    fn test_chatgpt_transcript_follows_the_kept_branch() {
+        let json = serde_json::json!([{
+            "id": "gpt-branch",
+            "title": "Branches",
+            "create_time": 1751378400.0,
+            "current_node": "a2",
+            "mapping": {
+                "root": {"message": null, "parent": null, "children": ["u1"]},
+                "u1": {"parent": "root", "children": ["a1", "a2"],
+                       "message": {"author": {"role": "user"}, "create_time": 1751378400.0,
+                                   "content": {"parts": ["Which route?"]}}},
+                "a1": {"parent": "u1", "children": [],
+                       "message": {"author": {"role": "assistant"}, "create_time": 1751378500.0,
+                                   "content": {"parts": ["The discarded answer."]}}},
+                "a2": {"parent": "u1", "children": [],
+                       "message": {"author": {"role": "assistant"}, "create_time": 1751378450.0,
+                                   "content": {"parts": ["The kept answer."]}}}
+            }
+        }]);
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("conversations.json");
+        std::fs::write(&path, json.to_string()).unwrap();
+
+        let drafts = ingest(&path, None).unwrap();
+        let body = &drafts[0].body;
+        let you = body.find("you: Which route?").unwrap();
+        let kept = body.find("chatgpt: The kept answer.").unwrap();
+        assert!(you < kept);
+        assert!(!body.contains("discarded"), "{body}");
     }
 }
