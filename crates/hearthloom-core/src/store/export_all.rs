@@ -124,6 +124,11 @@ pub const TABLE_CLASSES: &[(&str, TableClass)] = &[
     ("retirements", TableClass::Exported),
     ("retirement_rows", TableClass::Exported),
     ("summary_inputs", TableClass::Exported),
+    // owner repairs (v69): the runs and their undo stamps; v71 the copies
+    // each run made; v72 the undone runs' copies a later read put back
+    ("repairs", TableClass::Exported),
+    ("repair_copies", TableClass::Exported),
+    ("repair_revived", TableClass::Exported),
     ("entity_renames", TableClass::Exported),
     ("notifications", TableClass::Exported),
     ("plugins", TableClass::Exported),

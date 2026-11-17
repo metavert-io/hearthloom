@@ -17,13 +17,29 @@ use hearthloom_core::IngestBatch;
 
 use crate::AppState;
 
-/// Adapter records → the durable store (the Mac-scan feed).
+/// Adapter records → the durable store (the Mac-scan feed); the days they
+/// change are settled (`Store::photos_add_points_and_settle`).
 pub(crate) fn store_scan_points(
     state: &AppState,
     device: &str,
     points: &[photos_adapter::PhotoPoint],
 ) -> anyhow::Result<(usize, usize)> {
-    state.store.photos_add_points(device, &scan_rows(points))
+    state
+        .store
+        .photos_add_points_and_settle(&state.home, device, &scan_rows(points))
+}
+
+/// A peer's photo-point page, applied and its days settled
+/// (`Store::photo_points_apply_and_settle`) on the blocking pool: settling
+/// reads day texts and pauses between batches, so it never runs on a
+/// runtime worker. Outside a request (the sync leg) it reads as no viewer.
+pub(crate) async fn apply_peer_points(
+    state: &AppState,
+    batch: serde_json::Value,
+) -> anyhow::Result<usize> {
+    let (store, home) = (state.store.clone(), state.home.clone());
+    crate::scoped::spawn_blocking(move || store.photo_points_apply_and_settle(&home, &batch))
+        .await?
 }
 
 /// A Mac scan's records as store rows: keyed by original file name, each
@@ -48,7 +64,7 @@ pub(crate) fn scan_rows(points: &[photos_adapter::PhotoPoint]) -> Vec<PhotoPoint
         .collect()
 }
 
-fn stored_to_adapter(p: &StoredPhotoPoint) -> photos_adapter::PhotoPoint {
+pub(crate) fn stored_to_adapter(p: &StoredPhotoPoint) -> photos_adapter::PhotoPoint {
     photos_adapter::PhotoPoint {
         at_unix: p.at_unix,
         tz_offset_minutes: p.tz_offset_minutes,
@@ -86,6 +102,11 @@ fn finalize_photo_days_inner(
         let count = keys.len() as i64;
         let hash = hearthloom_core::store::photo_keys_hash(&mut keys);
         let current = store.current_photo_episode(home, &day)?;
+        // a new revision goes past every one stored: another node's (a
+        // repair's, or its own finalize's) can be past this ledger's, and a
+        // ref already taken would never land — but only over a day these
+        // points hold (below)
+        let stored = store.photo_day_max_revision(&day)?;
         let (revision, is_supersede) = match &current {
             None => (1u32, false),
             Some((_, source_ref, episode_count)) => {
@@ -107,7 +128,15 @@ fn finalize_photo_days_inner(
                         if count <= minted_count {
                             continue;
                         }
-                        ((rev + 1) as u32, true)
+                        // a revision this ledger didn't mint is stored (a
+                        // peer's, or a repair's): the count above says
+                        // nothing about it, and minting past it takes its
+                        // place, so only a union holding every photo the
+                        // day in view shows does
+                        if stored > rev && !store.photo_points_hold_day(home, &day)? {
+                            continue;
+                        }
+                        ((rev.max(stored) + 1) as u32, true)
                     }
                     None => {
                         // legacy day (minted before v47): adopt via the
@@ -120,7 +149,18 @@ fn finalize_photo_days_inner(
                             .rsplit_once("#r")
                             .and_then(|(_, r)| r.parse::<u32>().ok())
                             .unwrap_or(1);
-                        (rev + 1, true)
+                        // no ledger here says what the copy in view was
+                        // minted with (another node's, a correction, a day
+                        // from before the ledger): its count says nothing
+                        // about which photos it shows — a correction's line
+                        // can stand for a photo no point here is — and
+                        // minting past it (and past a correction waiting
+                        // behind it) takes its place, so only a union
+                        // holding every photo the day in view shows does
+                        if !store.photo_points_hold_day(home, &day)? {
+                            continue;
+                        }
+                        (rev.max(stored as u32) + 1, true)
                     }
                 }
             }
@@ -372,6 +412,41 @@ mod tests {
             r.episodes_new, 0,
             "base ref already exists — never duplicates"
         );
+    }
+
+    /// A peer's photo page is applied and settled off the runtime's
+    /// threads: on a one-thread runtime, another task runs while it is.
+    #[tokio::test]
+    async fn test_a_peer_photo_page_is_applied_on_the_blocking_pool() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (store, home, _tmp) = node();
+        let state = AppState {
+            store: std::sync::Arc::new(store),
+            home,
+            embedder: None,
+            llm: None,
+            auth_locked: Default::default(),
+            bus: Default::default(),
+            killswitch: Default::default(),
+            running: Default::default(),
+        };
+        let ran = std::sync::Arc::new(AtomicBool::new(false));
+        let other = tokio::spawn({
+            let ran = ran.clone();
+            async move { ran.store(true, Ordering::SeqCst) }
+        });
+        let page = serde_json::json!({"points": [{
+            "key": "1752998400|IMG_1.HEIC",
+            "filename": "IMG_1.HEIC",
+            "at_unix": 1_752_998_400,
+            "tz_offset_minutes": 0,
+        }]});
+        assert_eq!(apply_peer_points(&state, page).await.unwrap(), 1);
+        assert!(
+            ran.load(Ordering::SeqCst),
+            "the other task waited until the page was applied"
+        );
+        other.await.unwrap();
     }
 
     /// The day body photos.rs really writes reaches the Atlas whole — and

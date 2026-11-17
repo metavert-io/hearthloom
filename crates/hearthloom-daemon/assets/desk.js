@@ -1187,7 +1187,10 @@ async function paintMail(host) {
   if (pending) mailPoll = setTimeout(() => { if (host.isConnected) paintMail(host); }, 4000);
   const threads = data.threads || [];
   const err = data.triage?.last?.error;
-  if (!threads.length && !err) { host.hidden = true; host.innerHTML = ""; return; }
+  // mail held for a private memory an earlier version kept (sent only to a
+  // viewer whose vault is open — virtual_source.rs MailHold)
+  const held = data.triage?.held;
+  if (!threads.length && !err && !held) { host.hidden = true; host.innerHTML = ""; return; }
   host.hidden = false;
   const label = { needs_reply: "reply", scheduling: "a time", opportunity: "a look" };
   const gmail = (id, account) => id
@@ -1195,6 +1198,11 @@ async function paintMail(host) {
   host.innerHTML = `
     <div class="section-title">Waiting on you <span class="meta">· ${threads.length} email${threads.length === 1 ? "" : "s"}</span></div>
     ${err ? `<p class="meta">Sorting new mail failed last time: ${esc(err)}</p>` : ""}
+    ${held ? `<p class="meta">New mail is on hold: a private memory an earlier version saved
+      (${esc(held.source)} ${esc(held.source_ref)}) can't be matched to its message, so with the
+      vault locked no mail shows, and none is sorted, given to embers or drafted from. Take that
+      memory out of the vault (promote the message again first to keep it private) and mail
+      flows again.</p>` : ""}
     ${threads.map((t) => `
       <div class="mail-row" data-thread="${esc(t.id)}" style="padding:var(--s2) 0; border-bottom:1px solid var(--line)">
         <div class="task-row" style="flex-wrap:wrap; align-items:baseline">

@@ -92,7 +92,21 @@ workspace with `npm i playwright`) — screenshot + pageerror check.
 ## Layout
 
 - `crates/hearthloom-core` — schema (migrations via `PRAGMA user_version`,
-  **currently v68**: v68 `owned_sources` ("this source is mine": the
+  **currently v72**: v72 `repair_revived` (the copies an undone owner
+  repair run made that a later read of the owner's files put back in view
+  — a set every node unions, carried with each run on /v1/sync/repairs, so
+  every node puts the copy back; see OWNER REPAIRS), v71 `repair_copies`
+  (the copies each owner repair
+  run made, on any node — a set every node unions, carried with each run
+  on /v1/sync/repairs; an undo reaches a copy through any run that made
+  it — see OWNER REPAIRS), v70 `mail_thread_messages.memory_refs` (the keys
+  each message's memory can be stored under, kept in the observing node's
+  thread index so triage's last look before a model finds a private
+  memory by the import's key, as `observe` does — see MAIL TRIAGE), v69
+  `repairs` (owner repair runs — synced on
+  /v1/sync/repairs, LWW by updated_at, an undo stays undone — plus the
+  partial index `idx_episode_origin_repair` that finds a run's corrected
+  copies; see OWNER REPAIRS), v68 `owned_sources` ("this source is mine": the
   repositories and publications the owner says are theirs, keyed per
   source — git by remote host/path, substack by host; mirrored +
   journaled like mail_rules, deterministic id from source + key; read
@@ -471,7 +485,14 @@ workspace with `npm i playwright`) — screenshot + pageerror check.
   nobody named; exit codes 0/3/4/5/1 and the `--json` `status` strings
   are a contract scripts (minidash) depend on: don't renumber them),
   `ember enable|disable|config`, `mine list|add|remove` ("this source is
-  mine", v68 — `add` needs the vault unlocked),
+  mine", v68 — `add` needs the vault unlocked), `repair mail|calendar
+  --file <ics>…|chatgpt --export <path>|health --export <path>|copies|
+  photo-days|list|undo <run> --yes` (v69, cli repair.rs — owner + vault
+  open; a dry run unless `--apply`, refused while a node of yours doesn't
+  know repairs unless `--allow-older-nodes`; `undo` explains itself
+  unless `--yes`; prints ids and short reasons, never
+  content; `chatgpt`/`health` name an export on this machine that the
+  node reads in place, so they refuse `--url`),
   `notify`, `logs -f`, `completions`. **A command that talks to a node
   builds its client with `Client::with_url(home, url.clone())`** —
   `Client::new` ignores `--url` (query and a dozen others did until
@@ -718,13 +739,28 @@ makes its memory after reading it, and the memory can arrive private
 joined — that thread's privacy and class decide what the watches see
 (`observe`, `Store::mail_thread_of_message`); found private now, it
 makes that thread private (`Store::mail_observe`, journaled; nothing
-there makes a thread un-private), so triage never takes it. A pull that
-stopped (or failed a read) between making a private memory and seeing
-its message again leaves the thread as it was, so triage also looks up
-the memories of each thread's messages right before a model reads it
-(`mail_triage::for_model`; an error fails the round): a thread with a
+there makes a thread un-private), so triage never takes it. The label
+re-read makes the threads of the memories it just made private at once,
+from the record alone (`mail_triage::close_private_threads`, before it
+reads the index again — a sorted thread is never looked at by triage
+again). A memory that turns private some other way (a copy from another
+node, the owner's label) leaves the thread as it was, so triage also
+looks up the memories of each thread's messages right before a model
+reads it, by the keys the thread index kept (`memory_refs`, v70;
+`mail_triage::for_model`; an error fails the round): a thread with a
 private one is made private (`Store::mail_thread_make_private`) and left
-out — and whatever reads a
+out. A message recorded before v70 (keys NULL) has them read again from
+the live archive that holds it under its id (`keys_from_archive`,
+`mbox_index::head_of`) and kept; so does a thread's latest message this
+node's index doesn't hold (another node recorded it — threads mirror, the
+index doesn't). One no live archive holds under that id (the import keyed
+it otherwise — a second Message-ID header — this node hasn't pulled it,
+or the archive is gone) can't be checked, so its thread WAITS — never
+sent on its id alone, its label left as it is (a node that took over
+another's mailbox holds none of its archive, and a private label is for
+good and syncs back), checked again each round; triage pages past
+waiting threads (`Store::mail_threads_to_triage_from`) so they never
+hold up the rest. And whatever reads a
 thread's message later (class-waiting watches, drafts) takes its labels
 from the index (`mailboxes::labels_now`), never the archived header. A
 memory keeps the labels it was made under (episodes are append-only; mail
@@ -861,7 +897,11 @@ the design log 2026-07-14.
   (`http.rs::owner_addresses_turn`, held from the last check until the
   change is saved, published and journaled, never across an await): a
   new route that changes the owner's addresses takes the turn too, or an
-  address taken off between a check and its save comes back. The list shows how many
+  address taken off between a check and its save comes back. Stamps
+  have whole seconds and a tombstone at or after a row's stamp removes
+  it on every node, so a re-add is stamped after the entry's last
+  tombstone and a removal's tombstone never before the row's stamp
+  (`journal_op_at`). The list shows how many
   stored memories each entry names (`owned_source_stored`), so an entry
   that names none is visible. No MCP tool, ember route (it's on the ember
   deny list) or scoped key reaches it (`test_no_key_but_the_owners_
@@ -1090,11 +1130,13 @@ the design log 2026-07-14.
   (`Store::private_refs_anywhere`), never only the registered ones: a
   promotion keeps the name of a source that may since be unregistered, or
   never registered on this node (it synced) — silently, and a held-back
-  fetch reads as not there. Triage (`mail_memory_private`) and ember
-  delivery (`private_mail_ids`) make the same lookups, and all three match
+  fetch reads as not there. Triage and ember delivery make the same
+  lookups — all three through `virtual_source::MailPrivacy` (made once per
+  batch: the private set's not-bare keys and the legacy promotions are
+  read once, not per message) — and all three match
   a message by IDENTITY, never by header spelling: a reader's key carries
   the import's key AND a MIME parser's reading of the Message-ID
-  (`mail_key`), and `mail_memory_private` goes through `private_mail_ids`
+  (`mail_key`), matched by `MailPrivacy::found`
   (`id_in_key`: a comment beside the id on either copy still matches). Archive search is owner-only (`search_virtual`) and on the
   ember deny list. `test_archive_readers_go_through_the_vault_check` scans
   rlm/http/mcp/network_out for raw calls. The rules read a message WHOLE
@@ -1114,10 +1156,39 @@ the design log 2026-07-14.
   counts as a private message without a Message-ID. One kept under a Gmail
   `uid:` path CAN'T be identified (the old fetch took a uid for any
   message and the promotion stored only the rendered text, no
-  Message-ID), so while one is private EVERY message counts as private —
-  archive reads and Gmail held back while locked, no triage, no ember
-  delivery; likewise a legacy row whose text can't be read. Never narrow
-  this by guessing which message it was.
+  Message-ID), so while one is private mail is HELD — every message
+  counts as private for a reader (archive reads and Gmail held back while
+  locked, no triage, no ember delivery, no drafts); likewise a legacy row
+  whose text can't be read. Never narrow this by guessing which message it
+  was. Only a promotion holds: a row whose RECORDED writer is a person's
+  (`human:…`, `promoted_by_a_person`; a peer's from the origin it sent)
+  or not known (a peer sent no origin; a row synced before v61, whose
+  actor names only the peer, `peer:…`) — never an importer's
+  (`adapter:…`: a calendar UID can read `uid:7`) or one the server names
+  for a key that isn't the owner's (`agent:key:…`, `plugin:…`), or else
+  any ingest key could stop all mail. It holds under ANY source name —
+  `gmail`, an alias, one unregistered since or only registered on another
+  node, one registered here as a mount of files — whatever is registered
+  now: a registration says what a name reads today, not what it read when
+  the promotion was made, and a key that may register a source (an
+  ember's `ingest`) could otherwise end a hold. While mail is held a
+  viewer whose vault is locked reads NO mail thread (list, a thread,
+  counts), no draft (of a thread or an ember's) and none of these, nor an
+  ember's queued matches, through raw SQL (`Store::mail_held` — the
+  daemon sets it on every read of the hold, at boot, and before the mail
+  routes and raw SQL naming a mail table; `MAIL_HELD_SHADOW_VIEWS`): any
+  thread or queued message could be the held message, and the threads
+  keep their labels.
+  A hold is never a label (`virtual_source::MailHold`; readers use
+  `MailPrivacy::key_private`, writers `found`/`key_found` and `hold`
+  apart): nothing records a message's privacy on its strength, because a
+  thread made private stays private for good — `observe` leaves the
+  message to be observed later (`MailSeen::held`; `mail_observe` refuses
+  it), triage skips its round without writing, an ember's queue waits
+  with its cursor where it was, the backfill waits. The hold is logged
+  when it begins and ends, naming the memory (never its text), and the
+  triage status (`held`) names it to an owner whose vault is open — only
+  then (a locked view says nothing of what the vault holds).
 - **ARCHIVED MAIL TEXT LIVES BESIDE THE HEADER INDEX (0.5.87,
   `mbox_text.rs`).** `texts_fts(id, body, links)` in the same sidecar,
   filled by a background pass behind the `text_rowid` meta watermark over
@@ -1331,12 +1402,18 @@ the design log 2026-07-14.
   `<thread>` fences, and a label whose quoted span isn't in the thread is
   only `fyi` (`checked`). Private threads (a privacy rule, or a private
   memory of the message) never reach a model (`mail_threads_to_triage`),
-  and each batch's memories are looked up again just before
-  (`mail_triage::for_model`, which makes such a thread private).
+  and each batch's memories are looked up again just before, by every key
+  `observe` used (the thread index's `memory_refs`, v70;
+  `mail_triage::for_model`, which makes such a thread private; a message
+  recorded before v70, or a latest message another node recorded, gets
+  its keys from its live archive, and a thread whose keys can't be read
+  there waits, unsorted and unlabelled; while mail is held
+  it sorts nothing and writes nothing).
   `mail_triage::seen` makes the checks a message read in place meets: the
   memory looked up by the import's key (`virtual_source::mail_key` — a
-  parser's reading of a Message-ID with a comment beside it differs from
-  it) in every mail source (`mail_memory_private`), and the rules over the
+  parser's reading of a Message-ID with a comment beside it, or of the
+  last of two Message-ID headers, differs from it) in every mail source
+  (`MailPrivacy::key_found`), and the rules over the
   whole decoded message (`mbox_text::privacy_text`); errors count as
   private.
   Rules are owner-only (`require_owner`; mail never writes one). Threads
@@ -1358,7 +1435,9 @@ the design log 2026-07-14.
   change reaches what's queued; delivery re-checks privacy (a rule or a
   private memory added since holds a match back, failing closed; a match
   keeps only the parsed Message-ID, so the memory is found under any key
-  the import can have given it — `virtual_source::private_mail_ids`). Private
+  the import can have given it — `virtual_source::MailPrivacy::found`);
+  while that can't be told (mail held, the record unreadable) it delivers
+  nothing and the cursor stays, so nothing is passed over for good. Private
   or from-the-owner mail never queues, and neither does mail of a mailbox
   the owner hasn't let embers see (`mailboxes::embers_see`,
   `mail.embers.<id>`: on for the first mailbox, OFF for an added one —
@@ -1575,6 +1654,208 @@ the design log 2026-07-14.
   day stays. Their adapters keep every base
   ending in a part they write (`#<date>`, a session id with `#` escaped)
   so no outside string reads as a revision.
+- **OWNER REPAIRS: A CORRECTED COPY REPLACES ONLY WHAT ITS RECORDED WRITER
+  SAYS (v69, core `store/repair.rs`, daemon `repair.rs`).** A memory an
+  earlier version stored wrongly (mail left encoded, an event holding its
+  alarm's text) can't be imported again — the ref keeps its first text,
+  and a retired ref never lands again — so the owner replaces it: the
+  corrected copy lands as `<base>#repair:<16 hex of hash(title\nbody)>`
+  (`replacement_ref`) and the base goes behind it. A replacement is an
+  episode of a `REPAIRABLE_SOURCES` source (mbox, ics, openai,
+  chatlog-chatgpt, apple-health) whose RECORDED
+  writer (`episode_origin.writer`; a peer's from the origin it sent) is
+  `REPAIR_WRITER` = `repair:owner` (`repair_of`) — NEVER the ref's shape:
+  Message-IDs and UIDs are senders' choices, so a look-alike ref from an
+  importer, another key, an ember, a peer's other writer or a peer that
+  sends no origin replaces nothing (fail closed). Only
+  `Store::repair_apply` writes as that writer: `apply_batch` refuses any
+  `repair:` actor from every other caller (`apply_batch_as`), and
+  `/v1/ingest` refuses it with 400 — keep both. It supersedes only the
+  exact base it names (a range on the unique index plus an exact
+  `replacement_base` check, never LIKE), and refuses a base that is
+  itself a replacement. A REPAIRED RECORD is the base plus its
+  replacements; every node settles it from what it holds (`settle`, on
+  every arrival of a copy or of the base, and per run): the newest
+  replacement (origin `at`, then ref) whose run isn't undone stands, the
+  others behind it; with none, the base stands and the replacements stand
+  behind it — behind the base's id even when the base hasn't reached the
+  node (an undone correction never stands in its place). Arrival order, a
+  second repair and an undo converge. It is
+  one record like a growing source's: a copy takes the record's label
+  first (`RecordArrival`; private with the record's stamp), a private
+  label on any copy spreads (`growing::other_copies` delegates to
+  `repair::other_copies`, `spread_private` covers repairable sources,
+  `label_private_on_reimport` too — so Message-ID lookups that read every
+  row still find the old copy private) — and, unlike a growing source's,
+  a label the owner takes OUT of the vault (vault open,
+  `set_episode_scopes`) comes out for the whole record with its stamp
+  (`repair::spread_unvault`: the copies are one item, and a hidden private
+  copy would keep the message held). Retiring one retires all, a copy
+  of a retired record lands retired, a run settled on a node that held a
+  copy from before it knew the rule retires that copy too
+  (`retire_with_record`, in `repair_settle_run`), and a settle on a
+  retired copy rewrites what its undo restores
+  (`retire::set_prior_superseded`).
+  Settling deletes the map points of a copy that goes behind (the
+  supersession rule), re-queues one that comes back
+  (`location_scanned = 0`), and carries the extraction pass's
+  `mentioned` links to a standing replacement; structural links come from
+  the corrected draft, so a leaked alarm attendee drops out. A run's
+  copies are the set `repair_copies` (v71): every copy the owner repair
+  lands is recorded under the run its origin names (`apply_batch_as`),
+  each run row carries its set on the repairs leg, and every node unions
+  it (`repairs_sync_apply`; an undone run that brings copies a node didn't
+  know of is settled there again). Never go back to the origin's
+  `session` alone: two nodes that make the same correction before they
+  sync hold one copy (its id is its content's) whose first-arrival origin
+  names a different run on each, and an undo of either must reach it
+  everywhere. A copy is undone when ANY run that made it is undone
+  (`undone_arrival`, `undone_copy`). Undo stamps the run
+  (`stamp_after` — whole-second stamps), each node settles the
+  run again (`repairs_pending_here` / `repair_settle_run`, daemon
+  `repair::catch_up` every cycle and after the leg), and what a run ADDED
+  (a missing calendar occurrence, an ordinary `adapter:ics` import) stays.
+  An undone correction is never made again by asking for it again (same
+  ref), so the CLI's `repair undo` only explains that unless `--yes`.
+  Routes `/v1/repair/{mail,calendar,chatgpt,health,copies,
+  photo-days}`, `/v1/repairs`, `/v1/repairs/{id}/undo`: `require_owner` +
+  vault open (`repair_allowed`), on the ember deny list, not in
+  KEY_ROUTES; one run OR UNDO at a time per node (`repair::try_start`,
+  409), and `catch_up` waits while one runs (it would settle a run still
+  landing); a run lands through `Store::repair_apply_work` (`repair_apply`
+  wraps it; a record whose base never reached this node is repaired over
+  its stored copies). The repairs pull leg moves its cursor only past a
+  page that applied (`sync.rs::take_repairs_page`: the row is the only
+  carrier of an undo). Reports list episode ids, statuses and short
+  reasons — never subjects, names or text. The mail scan reads EVERY
+  archived copy under a Message-ID (`mbox_index::copies_of` +
+  `offset_keyed_ids` — the index keeps later copies under `at:<offset>`)
+  and takes only one outside Spam/Trash with the memory's event time and
+  sender address; copies that pass and read differently → `ambiguous`; while
+  ANY archive can't be read — index unreadable, out of date or missing, an
+  enabled mount that doesn't answer (`mail_archives`) — every message is
+  `archive_error` (never "not in archive", never a reading from the
+  others: the unread one may hold the original or a second copy). Which
+  memories it reads again is a heuristic (`still_encoded`, generous on
+  purpose — short base64, a QP escape or two); the decoded original
+  decides, and one that reads the same is only `unchanged`.
+  The calendar scan replaces only a record whose original's recorded
+  writer is `adapter:ics` (`RepairTarget::base_writer`; the phone's
+  `/v1/ingest/calendar` writes the same source and UIDs in its own shape).
+  An event stored under an earlier ref is found by UID and start
+  (`Store::repair_same_event`), and a ref that begins `<uid>#` counts only
+  when its tail is a start (`occurrence_shaped`) and the copy's Event
+  entity holds `ics-uid` = that UID and not the whole ref
+  (`event_is_uid`): UIDs are senders' choices (`meeting#other`). One
+  that can't tell is `unmatched` — neither replaced nor imported. A file
+  that can't be read is reported by name only (the importer's error can
+  quote an event's title).
+  A node older than v69 stores a replacement as a separate live episode
+  — in view even where the base is retired, or private there alone, and as
+  a hub it 404s the repairs leg so an undo doesn't pass — until it
+  upgrades; the run row then reaches it and the catch-up settles it,
+  labels and retirement included. So every node publishes `roles.repairs`
+  = true (`agents::publish_self`, `repair::REPAIRS_ROLE`), the dry run
+  names nodes seen in the last 30 days without it (`older_nodes`), and
+  applying is refused (409) while one exists unless the request says
+  `allow_older_nodes` (CLI `--allow-older-nodes`).
+  **Sources with a revision rule of their own get no `#repair:` copy**: a
+  run RE-MINTS them under that rule (`RepairWork::revisions`,
+  `revision_of`: a growing source's `<base>#r<n>`, a photo day's
+  `photos#<day>#r<n>`), still written as `REPAIR_WRITER` under the run's
+  session so the run finds them. `copies` re-mints each day or session an
+  earlier version stored under an unversioned base from its STORED text
+  (`repair_copies_scan`; never the original files), named by its count; a
+  base a copy holding as much already covers, one standing behind a copy
+  that holds it, or one an undone run re-minted is left. Two nodes hold
+  different texts under one such base, so each node re-mints ITS OWN when
+  a `copies` run reaches it (`repair_settle_run`, kind `COPIES_KIND`) and
+  the growing rule keeps the fullest in view everywhere — a re-mint keeps
+  the base's links (`land_revisions`; extraction reads iMessage days
+  again). Equal counts with different texts can't be told apart by the
+  growing rule and stay as each node has them. A copy an undone run
+  re-minted holds its `<base>#r<n>` ref for good, so it never counts as
+  the fullest for a local read (`growing_latest` skips it), and a local
+  read that names its ref puts it back in view by the growing rule
+  (`growing::revive_undone_copy`, from `apply_batch`'s already-stored
+  branch; never for a peer's or a repair's batch). That read is recorded
+  (`repair::record_revived`, `repair_revived`) and travels with the runs
+  that made the copy (`revived` on the repairs leg), and a copy in it is
+  the read's, not the undone run's, on every node (`undone_arrival`): each
+  node puts it back by the growing rule when the run settles
+  (`growing::restore_revived`; a copy waiting behind the id of a base the
+  node doesn't hold yet too, so the base arriving later lands behind it)
+  — the other nodes can't read those files, and the read lands no episode
+  of its own. `photo-days` re-mints
+  ONLY an inflated count — the day shows a photo more than once, or the
+  count it was minted with here is above the photos stored and keeps the
+  finalize pass from adding the ones it lacks (a day that reads otherwise
+  for another reason is counted `reads_otherwise` and left) — and ONLY when
+  the points here — each by its own name and every replaced key's
+  (`photo_replaced_into`) — cover every photo the standing copy shows (a
+  cut list fails closed; `photos_missing` lets a point answer for one line
+  per name it has had, so two lines of one name in one minute are two
+  photos, never one point's duplicate) and name every place its `places:`
+  line names;
+  at a revision past every one stored, carrying the day's label; never
+  again with the text an undone run re-minted (`PhotoDayRecord::undone`);
+  and sets the ledger (`PhotoLedger`; the row before is kept under
+  `repair.photo_days.<run>` and put back by the undo only while it still
+  says what the run set — at the run's revision when that is higher, since
+  the run's copy keeps its ref and the finalize pass mints at the ledger's
+  revision + 1; a day with no ledger before gets the one the finalize pass
+  adopts, `legacy` with the count in view). Every node checks coverage
+  for itself: unlike a finalize revision (a superset of the union), a
+  correction drops lines, so a peer's (writer `REPAIR_WRITER`) supersedes
+  only the copies of the day in view there that it holds by THAT node's
+  points and replaced keys (`photo::unheld_live_copy`; else it lands
+  behind the copy in view — a node whose copy shows a photo the correction
+  lacks keeps it), and is checked again when the run settles there and
+  whenever the photos leg brings points of the day
+  (`photo::settle_repair_copy`, from `photo_points_apply_and_settle` — the
+  points and replaced keys come on their own leg, and a paged or failed
+  one brings them after the run; the photos leg applies through that
+  method, never `photo_points_apply`, on the blocking pool —
+  `live_photos::apply_peer_points`; the day checked is the one the point
+  stored here keeps, which a peer's time zone can put elsewhere) or this
+  node's own feeds name points of the day (its Mac scan, the phone's
+  stream: `photos_add_points_and_settle`, never `photos_add_points`; every
+  point named that is stored here counts, changed or not, so a read again
+  after a stop before the settling settles what that read changed). A photo day's base and revisions are
+  one record for the private label: a copy arriving takes the day's
+  (`photo::day_private` — a correction carries the label of the node that
+  made it) and `spread_private` reaches every copy of the day
+  (`photo::other_day_copies`). The finalize pass mints past every revision
+  stored (`photo_day_max_revision`), never at a ref another node's
+  revision already took — and past a revision its ledger didn't mint (with
+  no ledger, past any copy, the one in view too) only when the points here hold
+  every photo the day in view shows (`photo_points_hold_day`): the
+  ledger's count says nothing about another node's copy, which can hold
+  more. UNDOING A RE-MINT (`settle_revisions`): the copy
+  that stood before stands again and the run's copies go behind it, and a
+  copy of an undone run that arrives later lands behind the copy in view
+  (`ingest_apply`: `undone_copy` → `Arriving::settle(…, true)`, or the
+  revisioned branch) — or, no copy of the record being here yet, behind
+  the base's id, so the base arriving later stands (`settle_revisions`
+  does the same when only undone copies are here) — never let one
+  supersede on arrival. `chatgpt`
+  replaces per route (`openai` and `chatlog-chatgpt` copies compared with
+  `openai::read_routes`) ONLY a transcript that holds turns off the branch
+  it ended on (or in another order) and whose every turn is one of the
+  export's (`transcript_verdict` against `every_turn_*`): a transcript from
+  a later export, one with images the export names otherwise, or one that
+  differs only in title is left (`other_export`). It puts "do not
+  remember" records into the vault BEFORE the run through
+  `label_private_on_reimport`, so their corrected copies land private (an
+  undo doesn't take them out); `health` streams `export.xml` (from the zip
+  in place, `apple_health::scan_reader`), leaves the day the export was
+  made on, and replaces a day only when the export holds every tracker and
+  every measure the stored day shows (`day_keeps` over `day_measures`:
+  `body/body fat`, `heart/hrv`, `activity/min exercise`… one by one — a
+  weight or a distance is one measure in any unit, since units are what
+  the repair corrects; a sleep stage the corrected day leaves out is held
+  when the export holds it from any tracker, `HealthReading::sleep_stages`
+  — the night shown is one tracker's, so another's stages drop out).
 - **Source and kind names in prompts and BRAIN.md go through
   `printable_name`** (`[a-z0-9_.-]{1,40}`): whoever ingests chooses them,
   and Ask's inventory sits in the system prompt. `source_lines` counts an

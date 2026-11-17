@@ -209,9 +209,18 @@ pub fn held_back(state: &AppState, m: &MailMatch) -> bool {
 /// The Message-IDs among these whose memory is labelled private, under
 /// any key a mail import can have given it (a match keeps only the parsed
 /// Message-ID, which the import's key can differ from); None when that
-/// can't be read.
+/// can't be told — unreadable, or mail is held (virtual_source::MailHold).
 fn private_memories(state: &AppState, ids: &[String]) -> Option<std::collections::HashSet<String>> {
-    match crate::virtual_source::private_mail_ids(state, ids) {
+    let privacy = crate::virtual_source::MailPrivacy::new(state);
+    match privacy.hold() {
+        Ok(None) => {}
+        Ok(Some(_)) => return None,
+        Err(err) => {
+            tracing::warn!("mail: private memories unreadable: {err:#}");
+            return None;
+        }
+    }
+    match privacy.found(ids) {
         Ok(found) => Some(found),
         Err(err) => {
             tracing::warn!("mail: private memories unreadable: {err:#}");
@@ -267,18 +276,24 @@ pub fn shown(m: &MailMatch, view: &EmberView) -> Value {
     v
 }
 
-/// An ember reads its queue past its cursor.
+/// An ember reads its queue past its cursor. While what is private can't
+/// be told (mail is held, or the record unreadable) it gets nothing and its
+/// cursor stays: the matches wait rather than being passed over for good.
 pub fn deliver(state: &AppState, plugin: &str, after: i64, limit: usize) -> anyhow::Result<Value> {
     let view = state.store.mail_ember_view(plugin)?;
     let rows = state.store.mail_matches_after(plugin, after, limit)?;
-    let next = rows.last().map(|m| m.seq).unwrap_or(after);
     let ids: Vec<String> = rows.iter().map(|m| m.message_id.clone()).collect();
     let private = private_memories(state, &ids);
-    let matches: Vec<Value> = rows
-        .iter()
-        .filter(|m| !held_back_by(state, m, private.as_ref()))
-        .map(|m| shown(m, &view))
-        .collect();
+    let (matches, next): (Vec<Value>, i64) = match &private {
+        Some(private) => (
+            rows.iter()
+                .filter(|m| !held_back_by(state, m, Some(private)))
+                .map(|m| shown(m, &view))
+                .collect(),
+            rows.last().map(|m| m.seq).unwrap_or(after),
+        ),
+        None => (Vec::new(), after),
+    };
     Ok(json!({
         "matches": matches,
         "next": next,

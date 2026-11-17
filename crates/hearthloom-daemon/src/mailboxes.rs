@@ -227,6 +227,32 @@ pub(crate) fn is_live_archive(source_name: &str) -> bool {
     source_name == LIVE_SOURCE || source_name.starts_with(&format!("{LIVE_SOURCE}-"))
 }
 
+/// Every live archive this node holds (`archives/gmail-live*.mbox`): of
+/// the mailboxes connected now, and of any disconnected since — what the
+/// pull read of every message this node's thread index records.
+pub(crate) fn live_archives(state: &AppState) -> std::io::Result<Vec<PathBuf>> {
+    let dir = state.home.root().join("archives");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        let live = path.extension().is_some_and(|x| x == "mbox")
+            && path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .is_some_and(is_live_archive);
+        if live {
+            out.push(path);
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 /* ————— per-mailbox settings ————— */
 
 fn list_setting(raw: Option<String>) -> Vec<String> {

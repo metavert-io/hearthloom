@@ -277,18 +277,39 @@ fn record_to_sample(line: &str) -> Option<Sample> {
 
 /// Stream the export once; every Record/Workout goes to `sink`.
 /// Returns (samples, workouts) counts.
-pub fn scan(path: &Path, mut sink: impl FnMut(Item) -> Result<()>) -> Result<(usize, usize)> {
+pub fn scan(path: &Path, sink: impl FnMut(Item) -> Result<()>) -> Result<(usize, usize)> {
     let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let reader = std::io::BufReader::with_capacity(1 << 20, file);
+    let summary = scan_reader(std::io::BufReader::with_capacity(1 << 20, file), sink)?;
+    Ok((summary.samples, summary.workouts))
+}
 
+/// What a scan read.
+#[derive(Debug, Clone, Default)]
+pub struct ScanSummary {
+    pub samples: usize,
+    pub workouts: usize,
+    /// When the export was made (`<ExportDate value=…>`, the export's own
+    /// timestamp form): the day it names is only partly in the export.
+    pub export_date: Option<String>,
+}
+
+/// [`scan`] over any reader of an `export.xml` (a file, or the entry of an
+/// `export.zip`).
+pub fn scan_reader(
+    reader: impl BufRead,
+    mut sink: impl FnMut(Item) -> Result<()>,
+) -> Result<ScanSummary> {
     let mut samples = 0usize;
     let mut workouts = 0usize;
+    let mut export_date = None;
     let mut workout: Option<WorkoutRec> = None;
     for line in reader.split(b'\n') {
         let line = line?;
         let line = String::from_utf8_lossy(&line);
         let line = line.trim_start();
-        if line.starts_with("<Record ") {
+        if export_date.is_none() && line.starts_with("<ExportDate ") {
+            export_date = attr(line, "value");
+        } else if line.starts_with("<Record ") {
             if let Some(sample) = record_to_sample(line) {
                 samples += 1;
                 sink(Item::Sample(sample))?;
@@ -340,7 +361,11 @@ pub fn scan(path: &Path, mut sink: impl FnMut(Item) -> Result<()>) -> Result<(us
             }
         }
     }
-    Ok((samples, workouts))
+    Ok(ScanSummary {
+        samples,
+        workouts,
+        export_date,
+    })
 }
 
 /* ————— day aggregation ————— */

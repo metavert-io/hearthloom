@@ -1622,6 +1622,10 @@ impl Store {
         // a day or session made private is private in every copy of it
         if scope == "private" {
             relabeled += super::growing::spread_private(&conn, actor, episode_ids)?;
+        } else if keep_vaulted.is_empty() {
+            // taken out of the vault (only with it open): a repaired
+            // record comes out whole
+            relabeled += super::repair::spread_unvault(&conn, actor, episode_ids, scope)?;
         }
         Ok(relabeled)
     }

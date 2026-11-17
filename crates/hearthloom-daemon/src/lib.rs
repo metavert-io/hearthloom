@@ -48,6 +48,7 @@ pub mod plugins;
 mod provenance;
 mod provisioner;
 pub mod registry_client;
+mod repair;
 mod retire;
 mod rlm;
 mod scoped;
@@ -357,6 +358,13 @@ pub async fn run(home: Home) -> Result<()> {
     tokio::spawn(mbox_text::run_loop(state.clone()));
     tokio::spawn(mail_triage::run_loop(state.clone()));
     tokio::spawn(mail_drafts::run_loop(state.clone()));
+    // whether mail is held, from the start: the store's thread readers
+    // (the raw-sql view among them) hide threads from a locked viewer while
+    // it is; every later read of the hold keeps it current
+    {
+        let st = state.clone();
+        tokio::task::spawn_blocking(move || virtual_source::refresh_mail_hold(&st));
+    }
     tokio::spawn(archives_place::run_loop(state.clone()));
     // Hybrid peer sync: dormant until a peer is paired (Integrations).
     tokio::spawn(sync::run_loop(state.clone()));

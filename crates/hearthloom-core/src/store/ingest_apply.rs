@@ -3,7 +3,7 @@
 //! episode/entity/edge write lands in the mutations log.
 
 use anyhow::Result;
-use rusqlite::TransactionBehavior;
+use rusqlite::{OptionalExtension, TransactionBehavior};
 use serde_json::json;
 
 use super::episodes::{insert_episode, EpisodeRow};
@@ -136,7 +136,9 @@ impl Store {
             if !changed.is_empty() {
                 relabeled.push(format!("{source}:{source_ref}"));
             }
-            if growing.is_some() {
+            // a day or session's copies, or a repaired memory's corrected
+            // copies (store/repair.rs), follow the label
+            if growing.is_some() || super::repair::REPAIRABLE_SOURCES.contains(&source.as_str()) {
                 private_ids.extend(changed);
                 // already private: its record still follows
                 private_ids.push(ids::episode_id(source, source_ref));
@@ -166,6 +168,28 @@ impl Store {
         batch: &IngestBatch,
         origins: &[super::provenance::Origin],
     ) -> Result<IngestReport> {
+        self.apply_batch_as(home, batch, origins, false)
+    }
+
+    /// `apply_batch_from`; `repair` only from `Store::repair_apply`, the one
+    /// caller that writes as the owner repair (store/repair.rs) — every
+    /// other batch claiming that writer is refused, so no import, key or
+    /// tool can make an episode that replaces another.
+    pub(crate) fn apply_batch_as(
+        &self,
+        home: &Home,
+        batch: &IngestBatch,
+        origins: &[super::provenance::Origin],
+        repair: bool,
+    ) -> Result<IngestReport> {
+        if super::repair::is_repair_actor(&batch.actor) != repair
+            || (repair && batch.actor != super::repair::REPAIR_WRITER)
+        {
+            anyhow::bail!(
+                "only an owner repair writes as {} (hearthloom repair)",
+                super::repair::REPAIR_WRITER
+            );
+        }
         let origins: std::collections::HashMap<(&str, &str), &super::provenance::Origin> = origins
             .iter()
             .map(|o| ((o.source.as_str(), o.source_ref.as_str()), o))
@@ -200,9 +224,43 @@ impl Store {
                 |r| r.get(0),
             )?;
             if exists {
+                // ...but a read of this node's own files naming a copy an
+                // undone repair run re-minted puts that copy back in view
+                // (store/growing.rs)
+                if !repair && !actor.actor.starts_with("peer:") {
+                    super::growing::revive_undone_copy(&tx, home, draft)?;
+                }
                 report.episodes_existing += 1;
                 continue;
             }
+
+            // Who wrote this draft: the batch's actor here, or — synced —
+            // the writer its sender recorded (provenance, v61).
+            let writer: Option<String> = if actor.actor.starts_with("peer:") {
+                origins
+                    .get(&(draft.source.as_str(), draft.source_ref.as_str()))
+                    .and_then(|o| o.writer.clone())
+            } else {
+                Some(actor.actor.clone())
+            };
+            // A copy an owner repair run wrote (store/repair.rs), and the
+            // run its origin names. When a run that made it was undone — that
+            // one, or another node's that made the same copy — it lands
+            // behind the copy in view, whatever it holds: the undo stands on
+            // every node, in any order.
+            let repair_run = (writer.as_deref() == Some(super::repair::REPAIR_WRITER))
+                .then(|| {
+                    if actor.actor.starts_with("peer:") {
+                        origins
+                            .get(&(draft.source.as_str(), draft.source_ref.as_str()))
+                            .and_then(|o| o.session.clone())
+                    } else {
+                        actor.session_id.clone()
+                    }
+                })
+                .flatten();
+            let undone_copy = writer.as_deref() == Some(super::repair::REPAIR_WRITER)
+                && super::repair::undone_arrival(&tx, &episode_id, repair_run.as_deref())?;
 
             // A copy of a growing source's day or session: measured against
             // the copies already here (see store/growing.rs).
@@ -213,17 +271,53 @@ impl Store {
                 &draft.source_ref,
                 &draft.body,
             )?;
+            // An owner repair's corrected copy names the memory it replaces
+            // (store/repair.rs) — decided by its recorded writer, never by
+            // the ref alone; it and that memory are one record, and so is a
+            // memory arriving after a copy that replaced it.
+            let repair_base =
+                super::repair::repair_of(&draft.source, &draft.source_ref, writer.as_deref());
+            let repaired = match &growing {
+                Some(_) => None,
+                None => super::repair::RecordArrival::read(
+                    &tx,
+                    &draft.source,
+                    repair_base.unwrap_or(&draft.source_ref),
+                    &draft.source_ref,
+                )?,
+            };
+            // A copy of a photo day (its base or a revision): the day's other
+            // copies stored here, whose private label it takes.
+            let photo_day = if draft.source == "photos" {
+                match super::photo::day_base(&draft.source_ref) {
+                    Some(base) => Some(
+                        super::photo::day_copies(&tx, base)?
+                            .into_iter()
+                            .filter(|c| c.id != episode_id)
+                            .collect::<Vec<_>>(),
+                    ),
+                    None => None,
+                }
+            } else {
+                None
+            };
 
             // Scope resolution: explicit > the label of the record this is
             // a copy of > known Project entity's scope > author/organizer
             // identity scope > `personal`. This is how one human keeps
-            // personal projects and client/company work apart.
-            let mut scope = draft.scope.clone().or_else(|| {
-                growing
-                    .as_ref()
-                    .and_then(|g| g.inherited_scope())
-                    .map(String::from)
-            });
+            // personal projects and client/company work apart. A corrected
+            // copy takes its record's label first: the memory it replaces
+            // may be labelled otherwise here than where it was corrected.
+            let record_scope = growing
+                .as_ref()
+                .and_then(|g| g.inherited_scope())
+                .or_else(|| repaired.as_ref().and_then(|r| r.inherited_scope()))
+                .map(String::from);
+            let mut scope = if repair_base.is_some() {
+                record_scope.or_else(|| draft.scope.clone())
+            } else {
+                draft.scope.clone().or(record_scope)
+            };
             if scope.is_none() {
                 for entity_ref in &draft.entities {
                     if entity_ref.entity_type != "Project" {
@@ -269,8 +363,16 @@ impl Store {
             // travels on the scope leg to a node that minted this copy, or
             // holds another copy of the record, under another label.
             let mut private_since: Option<String> = None;
-            if let Some(g) = &growing {
-                let record = g.private();
+            // A photo day's copy takes the day's private label too: another
+            // node's revision carries that node's label, and must not bring
+            // a day private here out of the vault.
+            let record_private = match (&growing, &repaired, &photo_day) {
+                (Some(g), _, _) => Some(g.private()),
+                (None, Some(r), _) => Some(r.private()),
+                (None, None, Some(copies)) => Some(super::photo::day_private(copies)),
+                (None, None, None) => None,
+            };
+            if let Some(record) = record_private {
                 if record.is_some() {
                     scope = "private".to_string();
                 }
@@ -325,6 +427,9 @@ impl Store {
                     .get(&(draft.source.as_str(), draft.source_ref.as_str()))
                     .copied(),
             )?;
+            if let Some(run) = &repair_run {
+                super::repair::record_copy(&tx, run, &episode_id)?;
+            }
             // THE SUPERSESSION PATTERN (v47, CLAUDE.md): an episode whose
             // source_ref carries a revision suffix (`<base>#r<n>`) marks
             // every prior revision of the same base superseded — a pure
@@ -337,15 +442,6 @@ impl Store {
             // UID — both chosen by the SENDER — so honouring the suffix
             // everywhere let anyone hide a known message or event by
             // sending one whose id ended in `#r2`.
-            // Who wrote this draft: the batch's actor here, or — synced —
-            // the writer its sender recorded (provenance, v61).
-            let writer: Option<String> = if actor.actor.starts_with("peer:") {
-                origins
-                    .get(&(draft.source.as_str(), draft.source_ref.as_str()))
-                    .and_then(|o| o.writer.clone())
-            } else {
-                Some(actor.actor.clone())
-            };
             // An ember revises what IT wrote, never anyone else's (0.5.82):
             // a `<base>#r<n>` from `plugin:<name>` supersedes the base and
             // lower revisions only where their recorded writer is the same.
@@ -378,17 +474,54 @@ impl Store {
                 .filter(|(_, r)| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit()))
                 .filter(|_| REVISIONED_SOURCES.contains(&draft.source.as_str()))
             {
-                tx.execute(
-                    "UPDATE episodes SET superseded_by = ?1
-                     WHERE source = ?2 AND superseded_by IS NULL AND id != ?1
-                       AND (source_ref = ?3 OR source_ref LIKE ?3 || '#r%')",
-                    rusqlite::params![episode_id, draft.source, base],
-                )?;
-                tx.execute(
-                    "DELETE FROM location_points WHERE episode_id IN (
-                         SELECT id FROM episodes WHERE superseded_by = ?1)",
-                    [&episode_id],
-                )?;
+                // Where a copy an owner repair run wrote stands instead of in
+                // view: an undone run's, behind the revision in view — or,
+                // none being here yet, behind the base's id, so the base
+                // arriving later stands and the undone copy never does; and
+                // a peer's photo day that doesn't hold the copy in view here,
+                // behind that copy (store/photo.rs).
+                let behind: Option<String> = if undone_copy {
+                    let in_view: Option<String> = tx
+                        .query_row(
+                            "SELECT id FROM episodes
+                             WHERE source = ?2 AND superseded_by IS NULL AND id != ?1
+                               AND (source_ref = ?3 OR source_ref LIKE ?3 || '#r%')
+                             ORDER BY source_ref DESC LIMIT 1",
+                            rusqlite::params![episode_id, draft.source, base],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    Some(in_view.unwrap_or_else(|| ids::episode_id(&draft.source, base)))
+                } else if draft.source == "photos"
+                    && actor.actor.starts_with("peer:")
+                    && writer.as_deref() == Some(super::repair::REPAIR_WRITER)
+                {
+                    super::photo::unheld_live_copy(&tx, home, base, &episode_id, &draft.body)?
+                } else {
+                    None
+                };
+                if let Some(ahead) = behind {
+                    tx.execute(
+                        "UPDATE episodes SET superseded_by = ?2 WHERE id = ?1",
+                        rusqlite::params![episode_id, ahead],
+                    )?;
+                    tx.execute(
+                        "DELETE FROM location_points WHERE episode_id = ?1",
+                        [&episode_id],
+                    )?;
+                } else {
+                    tx.execute(
+                        "UPDATE episodes SET superseded_by = ?1
+                         WHERE source = ?2 AND superseded_by IS NULL AND id != ?1
+                           AND (source_ref = ?3 OR source_ref LIKE ?3 || '#r%')",
+                        rusqlite::params![episode_id, draft.source, base],
+                    )?;
+                    tx.execute(
+                        "DELETE FROM location_points WHERE episode_id IN (
+                             SELECT id FROM episodes WHERE superseded_by = ?1)",
+                        [&episode_id],
+                    )?;
+                }
             }
             if let Some(since) = &private_since {
                 tx.execute(
@@ -399,10 +532,29 @@ impl Store {
             // A growing source keeps the copy holding the most live, and a
             // copy that lands private makes the copies stored before private.
             if let Some(g) = &growing {
-                g.settle(&tx, &episode_id)?;
+                g.settle(&tx, &episode_id, undone_copy)?;
                 if scope == "private" {
                     super::growing::spread_private(&tx, &actor, std::slice::from_ref(&episode_id))?;
                 }
+            }
+            // A repaired record: the copy that stands for it in view, the
+            // others behind it (store/repair.rs) — and a copy landing private
+            // (a corrected text a privacy rule now reads, say) takes the
+            // others with it.
+            if repair_base.is_some() || repaired.is_some() {
+                super::repair::settle(
+                    &tx,
+                    &draft.source,
+                    repair_base.unwrap_or(&draft.source_ref),
+                )?;
+                if scope == "private" {
+                    super::growing::spread_private(&tx, &actor, std::slice::from_ref(&episode_id))?;
+                }
+            }
+            // A photo day's copy landing private takes the day's other copies
+            // with it (they are one day).
+            if photo_day.is_some() && scope == "private" {
+                super::growing::spread_private(&tx, &actor, std::slice::from_ref(&episode_id))?;
             }
             let mut arrival = arrivals.covering(
                 &tx,
@@ -414,10 +566,12 @@ impl Store {
             // ...and a copy of a retired day or session lands retired: the
             // person retired the record, not one copy of it.
             if matches!(arrival, super::retire::Arrival::Live) {
-                if let Some(rid) = growing
-                    .as_ref()
-                    .and_then(|g| g.retired_marks().find_map(|m| arrivals.live_retirement(m)))
-                {
+                let retired = match (&growing, &repaired) {
+                    (Some(g), _) => g.retired_marks().find_map(|m| arrivals.live_retirement(m)),
+                    (None, Some(r)) => r.retired_marks().find_map(|m| arrivals.live_retirement(m)),
+                    (None, None) => None,
+                };
+                if let Some(rid) = retired {
                     arrival = super::retire::Arrival::Retire(rid);
                 }
             }
@@ -504,9 +658,11 @@ impl Store {
                     // copies here that aren't retired yet go with it
                     // (gathered first — retiring a copy replaces the mark
                     // that says which copy it stands behind)
-                    let copies = match &growing {
-                        Some(_) => super::growing::other_copies(&tx, &episode_id)?,
-                        None => Vec::new(),
+                    let copies = if growing.is_some() || repaired.is_some() || repair_base.is_some()
+                    {
+                        super::growing::other_copies(&tx, &episode_id)?
+                    } else {
+                        Vec::new()
                     };
                     arrivals.retire(&tx, &rid, &episode_id)?;
                     for copy in &copies {

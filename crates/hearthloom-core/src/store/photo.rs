@@ -232,6 +232,31 @@ fn take_over(conn: &rusqlite::Connection, earlier: &str, p: &PhotoPointIn) -> Re
 /// The minted ledger row: (count, keys_hash, episode_id, revision).
 pub type PhotoDayState = (i64, String, Option<String>, i64);
 
+/// One photo day as the photo-day repair reads it
+/// ([`Store::photo_days_for_repair`]).
+#[derive(Debug, Clone)]
+pub struct PhotoDayRecord {
+    pub day: String,
+    /// The standing copy: in view, or retired.
+    pub id: String,
+    pub source_ref: String,
+    /// Its revision (the base `photos#<day>` is 1).
+    pub revision: i64,
+    pub title: String,
+    pub scope: String,
+    pub retired: bool,
+    /// Its text (None: unreadable).
+    pub body: Option<String>,
+    /// The highest revision stored of the day, in any state.
+    pub max_revision: i64,
+    /// The minted ledger here.
+    pub ledger: Option<PhotoDayState>,
+    /// (title, content hash) of each copy of the day an owner repair run
+    /// re-minted and was then undone (store/repair.rs): a correction made
+    /// and undone isn't made again.
+    pub undone: Vec<(String, String)>,
+}
+
 /// A stored point, for the finalize pass to rebuild adapter records.
 #[derive(Debug, Clone)]
 pub struct StoredPhotoPoint {
@@ -267,7 +292,37 @@ impl Store {
         device: &str,
         points: &[PhotoPointIn],
     ) -> Result<(usize, usize)> {
+        let (accepted, duplicates, _) = self.add_points(device, points)?;
+        Ok((accepted, duplicates))
+    }
+
+    /// [`Store::photos_add_points`] for this node's own feeds (its Mac
+    /// scan, the phone's stream): then the day of each point it names that
+    /// is stored here — stored or moved now, a key it took the place of
+    /// recorded now, or all of it done by an earlier read that stopped
+    /// before this step — is checked again for a correction waiting behind
+    /// the day's copy in view, as the photos leg does
+    /// ([`Store::photo_points_apply_and_settle`]).
+    pub fn photos_add_points_and_settle(
+        &self,
+        home: &crate::paths::Home,
+        device: &str,
+        points: &[PhotoPointIn],
+    ) -> Result<(usize, usize)> {
+        let (accepted, duplicates, days) = self.add_points(device, points)?;
+        self.settle_photo_days(home, &days)?;
+        Ok((accepted, duplicates))
+    }
+
+    /// See [`Store::photos_add_points`]: (accepted, duplicates, the days of
+    /// the points it names that are stored here, new or not).
+    fn add_points(
+        &self,
+        device: &str,
+        points: &[PhotoPointIn],
+    ) -> Result<(usize, usize, std::collections::BTreeSet<String>)> {
         let (mut accepted, mut duplicates) = (0usize, 0usize);
+        let mut days = std::collections::BTreeSet::new();
         for chunk in points.chunks(500) {
             {
                 let mut conn = self.lock();
@@ -283,6 +338,7 @@ impl Store {
                         .filter(|e| *e != p.key && same_second(e, &p.key))
                     {
                         if take_over(&tx, earlier, p)? {
+                            days.extend(point_entry(&tx, &p.key)?.map(|(day, _)| day));
                             duplicates += 1;
                             continue;
                         }
@@ -313,10 +369,16 @@ impl Store {
                             next_position(&tx)?
                         ],
                     )?;
+                    // the day of the point kept under this key, stored now
+                    // or before: a feed read again after a stop between this
+                    // commit and the settling below changes nothing here,
+                    // and its days are settled then
                     if changed == 1 {
-                        accepted += 1
+                        accepted += 1;
+                        days.insert(day.clone());
                     } else {
-                        duplicates += 1
+                        duplicates += 1;
+                        days.extend(point_entry(&tx, &p.key)?.map(|(day, _)| day));
                     }
                     // v51 dual-write: geotagged points also land in the
                     // unified observation layer the visit pass clusters
@@ -348,7 +410,29 @@ impl Store {
                 std::thread::sleep(std::time::Duration::from_millis(40));
             }
         }
-        Ok((accepted, duplicates))
+        Ok((accepted, duplicates, days))
+    }
+
+    /// Each of `days` checked for an owner repair's correction waiting
+    /// behind the day's copy in view (`settle_repair_copy`), a hundred days
+    /// to a lock hold.
+    fn settle_photo_days(
+        &self,
+        home: &crate::paths::Home,
+        days: &std::collections::BTreeSet<String>,
+    ) -> Result<()> {
+        for (i, chunk) in days.iter().collect::<Vec<_>>().chunks(100).enumerate() {
+            if i > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+            let mut conn = self.lock();
+            let tx = conn.transaction()?;
+            for day in chunk {
+                settle_repair_copy(&tx, home, &format!("photos#{day}"))?;
+            }
+            tx.commit()?;
+        }
+        Ok(())
     }
 
     /// Days whose stored union no longer matches the minted ledger
@@ -371,24 +455,48 @@ impl Store {
     }
 
     pub fn photo_points_for_day(&self, day: &str) -> Result<Vec<StoredPhotoPoint>> {
+        points_of_day(&self.lock(), day)
+    }
+
+    /// The photos stored here for `day`, each by every name it has had —
+    /// what the photo-day repair checks a day's text against
+    /// ([`photos_missing`]).
+    pub fn photo_day_held(&self, day: &str) -> Result<Vec<HeldPhoto>> {
+        held_by_points(&self.lock(), day)
+    }
+
+    /// Do the photos stored here for `day` (each by every name it has had)
+    /// cover every photo its copy in view shows ([`photos_missing`])? A copy
+    /// whose list is cut, or whose text can't be read, isn't covered. True
+    /// when no copy is in view.
+    pub fn photo_points_hold_day(&self, home: &crate::paths::Home, day: &str) -> Result<bool> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT key, filename, at_unix, tz_offset_minutes, lat, lon, place
-             FROM photo_point WHERE day = ?1 ORDER BY at_unix",
-        )?;
-        let rows = stmt.query_map([day], |row| {
-            Ok(StoredPhotoPoint {
-                key: row.get(0)?,
-                filename: row.get(1)?,
-                at_unix: row.get(2)?,
-                tz_offset_minutes: row.get(3)?,
-                lat: row.get(4)?,
-                lon: row.get(5)?,
-                place: row.get(6)?,
-            })
-        })?;
-        rows.collect::<std::result::Result<_, _>>()
-            .map_err(Into::into)
+        let held = held_by_points(&conn, day)?;
+        for copy in day_copies(&conn, &format!("photos#{day}"))? {
+            if copy.superseded_by.is_some() {
+                continue;
+            }
+            let covered = copy
+                .body(home)
+                .as_deref()
+                .and_then(photo_day_lines)
+                .is_some_and(|shown| photos_missing(&held, &shown) == 0);
+            if !covered {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// The highest revision of `day` stored here, in any state (its base
+    /// `photos#<day>` is 1); 0 when none is.
+    pub fn photo_day_max_revision(&self, day: &str) -> Result<i64> {
+        let conn = self.lock();
+        Ok(day_copies(&conn, &format!("photos#{day}"))?
+            .iter()
+            .map(|c| c.revision)
+            .max()
+            .unwrap_or(0))
     }
 
     /// The minted ledger row: (count, keys_hash, episode_id, revision).
@@ -461,6 +569,146 @@ impl Store {
         Ok(Some((id, source_ref, count)))
     }
 
+    /// Every photo day with a standing copy (in view, or retired), as the
+    /// photo-day repair reads it: that copy (the highest revision standing),
+    /// its text, the highest revision stored of the day in any state (a new
+    /// revision goes past every one, so it never takes a ref another node
+    /// already used), and the day's minted ledger here. Read a page at a
+    /// time; texts with the store released.
+    pub fn photo_days_for_repair(&self, home: &crate::paths::Home) -> Result<Vec<PhotoDayRecord>> {
+        struct Row {
+            id: String,
+            source_ref: String,
+            title: String,
+            scope: String,
+            superseded_by: Option<String>,
+            content_ref: Option<String>,
+        }
+        let mut days: std::collections::BTreeMap<String, (i64, Option<(i64, Row)>)> =
+            Default::default();
+        let mut after = String::new();
+        loop {
+            let page: Vec<Row> = {
+                let conn = self.lock();
+                let mut stmt = conn.prepare_cached(
+                    "SELECT id, source_ref, title, scope, superseded_by, content_ref
+                     FROM episodes /* all-episodes: every revision of every photo day decides the next one */
+                     WHERE source = 'photos' AND source_ref > ?1 ORDER BY source_ref LIMIT 5000",
+                )?;
+                let rows = stmt.query_map([&after], |r| {
+                    Ok(Row {
+                        id: r.get(0)?,
+                        source_ref: r.get(1)?,
+                        title: r.get(2)?,
+                        scope: r.get(3)?,
+                        superseded_by: r.get(4)?,
+                        content_ref: r.get(5)?,
+                    })
+                })?;
+                rows.collect::<std::result::Result<_, _>>()?
+            };
+            let Some(last) = page.last() else { break };
+            after = last.source_ref.clone();
+            let full = page.len() >= 5000;
+            for row in page {
+                let Some(rest) = row.source_ref.strip_prefix("photos#") else {
+                    continue;
+                };
+                let (day, revision) = match rest.split_once("#r") {
+                    Some((day, digits)) => match digits.parse::<i64>() {
+                        Ok(n) if n >= 2 && n.to_string() == digits => (day, n),
+                        _ => continue,
+                    },
+                    None => (rest, 1),
+                };
+                if chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").is_err() {
+                    continue;
+                }
+                let entry = days.entry(day.to_string()).or_insert((0, None));
+                entry.0 = entry.0.max(revision);
+                let standing = row
+                    .superseded_by
+                    .as_deref()
+                    .is_none_or(|s| s.starts_with(super::retire::RETIRED_PREFIX));
+                if standing && entry.1.as_ref().is_none_or(|(r, _)| revision > *r) {
+                    entry.1 = Some((revision, row));
+                }
+            }
+            if !full {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+        // the copies undone repair runs re-minted, by day
+        let mut undone: std::collections::HashMap<String, Vec<(String, String)>> =
+            Default::default();
+        {
+            let conn = self.lock();
+            let mut stmt = conn.prepare(&format!(
+                "SELECT DISTINCT e.source_ref, e.title, e.content_hash
+                 FROM repairs r
+                 JOIN repair_copies c ON c.run = r.id
+                 JOIN episode_origin o ON o.episode_id = c.episode_id AND o.writer = '{}'
+                 JOIN episodes e ON e.id = c.episode_id /* all-episodes: copies of undone runs, behind others by design */
+                 WHERE r.undone_at IS NOT NULL AND e.source = 'photos'",
+                super::repair::REPAIR_WRITER
+            ))?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (source_ref, title, hash) = row?;
+                if let Some((base, _)) = super::repair::revision_of("photos", &source_ref) {
+                    if let Some(day) = base.strip_prefix("photos#") {
+                        undone
+                            .entry(day.to_string())
+                            .or_default()
+                            .push((title, hash));
+                    }
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for (day, (max_revision, standing)) in days {
+            let Some((revision, row)) = standing else {
+                continue;
+            };
+            let ledger = self.photo_day_state(&day)?;
+            let undone = undone.remove(&day).unwrap_or_default();
+            let body = row
+                .content_ref
+                .as_deref()
+                .and_then(|rel| std::fs::read_to_string(home.root().join(rel)).ok());
+            out.push(PhotoDayRecord {
+                day,
+                id: row.id,
+                source_ref: row.source_ref,
+                revision,
+                title: row.title,
+                scope: row.scope,
+                retired: row
+                    .superseded_by
+                    .is_some_and(|s| s.starts_with(super::retire::RETIRED_PREFIX)),
+                body,
+                max_revision,
+                ledger,
+                undone,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The keys points here took the place of, for each of `keys` — and the
+    /// keys those took the place of in turn: `(earlier key, the key in
+    /// `keys` that holds the photo now)`.
+    pub fn photo_replaced_into(&self, keys: &[String]) -> Result<Vec<(String, String)>> {
+        replaced_into(&self.lock(), keys)
+    }
+
     /// Feed for the peer photo-point leg: rows after a rowid cursor.
     pub fn photo_points_export(&self, after: i64, limit: usize) -> Result<serde_json::Value> {
         let conn = self.lock();
@@ -507,9 +755,35 @@ impl Store {
     /// took the place of another key drops the point stored under it here;
     /// a key some point here took the place of is not stored again.
     pub fn photo_points_apply(&self, batch: &serde_json::Value) -> Result<usize> {
+        Ok(self.apply_points(batch)?.0)
+    }
+
+    /// [`Store::photo_points_apply`] for the photos leg: then each day the
+    /// page brings points of whose owner-repair correction stands behind
+    /// the day's copy in view — it arrived, or its run settled, before this
+    /// node held the photos that show it holds that copy — is checked again
+    /// (`settle_repair_copy`). Returns how many points were stored.
+    pub fn photo_points_apply_and_settle(
+        &self,
+        home: &crate::paths::Home,
+        batch: &serde_json::Value,
+    ) -> Result<usize> {
+        let (applied, days) = self.apply_points(batch)?;
+        self.settle_photo_days(home, &days)?;
+        Ok(applied)
+    }
+
+    /// Apply a peer's photo-point page: (points stored, the days of the
+    /// points it brought — and of a point stored here already under the
+    /// same key, which keeps its own day when the peer's time zone differs).
+    fn apply_points(
+        &self,
+        batch: &serde_json::Value,
+    ) -> Result<(usize, std::collections::BTreeSet<String>)> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let mut applied = 0usize;
+        let mut days = std::collections::BTreeSet::new();
         for p in batch
             .get("points")
             .and_then(|v| v.as_array())
@@ -536,6 +810,7 @@ impl Store {
             if replaced(&tx, key)? {
                 continue;
             }
+            days.insert(day.clone());
             // the keys it took the place of (a list; one key on its own read
             // the same)
             let replaces: Vec<&str> = match p.get("replaces") {
@@ -550,6 +825,9 @@ impl Store {
             .collect();
             // the photo's points here before: its own, and those it replaced
             let here = point_entry(&tx, key)?;
+            // the point kept is this one, in its own day: the keys recorded
+            // below are its names from now on
+            days.extend(here.as_ref().map(|(day, _)| day.clone()));
             let mut before: Vec<Entry> = here.iter().cloned().collect();
             for earlier in &replaces {
                 before.extend(point_entry(&tx, earlier)?);
@@ -608,8 +886,456 @@ impl Store {
             }
         }
         tx.commit()?;
-        Ok(applied)
+        Ok((applied, days))
     }
+}
+
+fn points_of_day(conn: &rusqlite::Connection, day: &str) -> Result<Vec<StoredPhotoPoint>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT key, filename, at_unix, tz_offset_minutes, lat, lon, place
+         FROM photo_point WHERE day = ?1 ORDER BY at_unix",
+    )?;
+    let rows = stmt.query_map([day], |row| {
+        Ok(StoredPhotoPoint {
+            key: row.get(0)?,
+            filename: row.get(1)?,
+            at_unix: row.get(2)?,
+            tz_offset_minutes: row.get(3)?,
+            lat: row.get(4)?,
+            lon: row.get(5)?,
+            place: row.get(6)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<_, _>>()
+        .map_err(Into::into)
+}
+
+/// See [`Store::photo_replaced_into`].
+fn replaced_into(conn: &rusqlite::Connection, keys: &[String]) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare_cached("SELECT key FROM photo_replaced WHERE by_key = ?1")?;
+    let mut out = Vec::new();
+    for key in keys {
+        let mut seen = std::collections::HashSet::from([key.clone()]);
+        let mut frontier = vec![key.clone()];
+        while let Some(at) = frontier.pop() {
+            let earlier: Vec<String> = stmt
+                .query_map([&at], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            for e in earlier {
+                if seen.insert(e.clone()) && seen.len() <= 64 {
+                    out.push((e.clone(), key.clone()));
+                    frontier.push(e);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/* ————— a photo day's copies, and the photos a copy holds ————— */
+
+/// The day ref (`photos#<date>`) of a photo day's copy: its own ref, or a
+/// revision's (`photos#<date>#r<n>`). None for any other ref.
+pub(crate) fn day_base(source_ref: &str) -> Option<&str> {
+    let rest = source_ref.strip_prefix("photos#")?;
+    let date = match rest.split_once("#r") {
+        Some((date, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => date,
+        Some(_) => return None,
+        None => rest,
+    };
+    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    Some(&source_ref[.."photos#".len() + date.len()])
+}
+
+/// One stored copy of a photo day.
+#[derive(Debug, Clone)]
+pub(crate) struct DayCopy {
+    pub id: String,
+    pub scope: String,
+    pub scope_changed_at: Option<String>,
+    pub superseded_by: Option<String>,
+    pub content_ref: Option<String>,
+    /// The base is 1.
+    pub revision: i64,
+}
+
+impl DayCopy {
+    fn body(&self, home: &crate::paths::Home) -> Option<String> {
+        let rel = self.content_ref.as_deref()?;
+        std::fs::read_to_string(home.root().join(rel)).ok()
+    }
+}
+
+/// Every stored copy of the photo day `base` (`photos#<date>`), in any state.
+pub(crate) fn day_copies(conn: &rusqlite::Connection, base: &str) -> Result<Vec<DayCopy>> {
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT id, source_ref, scope, scope_changed_at, superseded_by, content_ref
+         FROM episodes /* all-episodes: every copy of one photo day */
+         WHERE source = 'photos' AND (source_ref = ?1 OR {})",
+        super::growing::growing_revision_sql(1)
+    ))?;
+    let rows = stmt.query_map([base], |r| {
+        let source_ref: String = r.get(1)?;
+        Ok(DayCopy {
+            id: r.get(0)?,
+            revision: source_ref
+                .rsplit_once("#r")
+                .and_then(|(_, n)| n.parse().ok())
+                .unwrap_or(1),
+            scope: r.get(2)?,
+            scope_changed_at: r.get(3)?,
+            superseded_by: r.get(4)?,
+            content_ref: r.get(5)?,
+        })
+    })?;
+    rows.collect::<std::result::Result<_, _>>()
+        .map_err(Into::into)
+}
+
+/// The other stored copies of the photo day `episode_id` is a copy of;
+/// None for an episode that isn't one. A private label on one reaches them
+/// (`growing::spread_private`).
+pub(crate) fn other_day_copies(
+    conn: &rusqlite::Connection,
+    episode_id: &str,
+) -> Result<Option<Vec<String>>> {
+    let source_ref: Option<String> = conn
+        .query_row(
+            "SELECT source_ref FROM episodes /* all-episodes: one copy of a photo day */
+             WHERE id = ?1 AND source = 'photos'",
+            [episode_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(base) = source_ref.as_deref().and_then(day_base) else {
+        return Ok(None);
+    };
+    Ok(Some(
+        day_copies(conn, base)?
+            .into_iter()
+            .map(|c| c.id)
+            .filter(|id| id != episode_id)
+            .collect(),
+    ))
+}
+
+/// The day is private, so a copy arriving is too (see
+/// `growing::Arriving::private`): the latest label given to any of
+/// `copies` is private — or, none having been given one, one of them is.
+/// Carries when that label was given, if it says.
+pub(crate) fn day_private(copies: &[DayCopy]) -> Option<Option<&str>> {
+    match copies
+        .iter()
+        .filter(|c| c.scope_changed_at.is_some())
+        .max_by(|a, b| a.scope_changed_at.cmp(&b.scope_changed_at))
+    {
+        Some(c) => (c.scope == "private").then_some(c.scope_changed_at.as_deref()),
+        None => copies.iter().find(|c| c.scope == "private").map(|_| None),
+    }
+}
+
+/// One photo as the coverage check reads it: the minute its line shows,
+/// and every name it has had (its file's first, then those of the keys it
+/// took the place of) — or, a photo known only by the line a day's text
+/// shows of it, that line.
+#[derive(Debug, Clone, Default)]
+pub struct HeldPhoto {
+    pub minute: Option<String>,
+    pub names: Vec<String>,
+    pub line: Option<String>,
+}
+
+/// `HH:MM` of a photo in its own time (as a day's text writes it).
+fn local_minute(at_unix: i64, tz_offset_minutes: Option<i32>) -> Option<String> {
+    let local = at_unix + tz_offset_minutes.unwrap_or(0) as i64 * 60;
+    chrono::DateTime::from_timestamp(local, 0).map(|dt| dt.format("%H:%M").to_string())
+}
+
+/// The photo lines a day's text shows (`[HH:MM] <rest>`, `rest` being
+/// `<file>[ (lat,lon)][ — place]`), each as (`HH:MM`, rest).
+fn stamped_lines(body: &str) -> Vec<(&str, &str)> {
+    body.lines()
+        .filter(|line| {
+            let b = line.as_bytes();
+            b.len() > 8
+                && b[0] == b'['
+                && b[1..3].iter().all(u8::is_ascii_digit)
+                && b[3] == b':'
+                && b[4..6].iter().all(u8::is_ascii_digit)
+                && &b[6..8] == b"] "
+        })
+        .map(|line| (&line[1..6], &line[8..]))
+        .collect()
+}
+
+/// The photo lines a day's text shows, when its list is whole: None when
+/// it is cut (`[truncated]`) or shorter than the count it declares (what
+/// it holds can't be read then).
+pub fn photo_day_lines(body: &str) -> Option<Vec<(&str, &str)>> {
+    if body.lines().any(|l| l == "[truncated]") {
+        return None;
+    }
+    let declared: Option<usize> = body
+        .lines()
+        .find_map(|l| l.strip_prefix("photos: "))
+        .and_then(|n| n.trim().parse().ok());
+    let shown = stamped_lines(body);
+    (declared == Some(shown.len())).then_some(shown)
+}
+
+/// Does `rest` (a photo line after its time) show the file `name`?
+fn shows_name(rest: &str, name: &str) -> bool {
+    !name.is_empty()
+        && rest.strip_prefix(name).is_some_and(|tail| {
+            tail.is_empty() || tail.starts_with(" (") || tail.starts_with(" — ")
+        })
+}
+
+/// The most of `adj`'s left side (each with the right-side slots it may
+/// take) that can each take a different slot: (how many, the left side
+/// holding each slot).
+fn matching(adj: &[Vec<usize>], slots: usize) -> (usize, Vec<Option<usize>>) {
+    fn augment(
+        u: usize,
+        adj: &[Vec<usize>],
+        seen: &mut [bool],
+        owner: &mut [Option<usize>],
+    ) -> bool {
+        for &v in &adj[u] {
+            if std::mem::replace(&mut seen[v], true) {
+                continue;
+            }
+            let free = match owner[v] {
+                None => true,
+                Some(w) => augment(w, adj, seen, owner),
+            };
+            if free {
+                owner[v] = Some(u);
+                return true;
+            }
+        }
+        false
+    }
+    let mut owner = vec![None; slots];
+    let mut matched = 0;
+    for u in 0..adj.len() {
+        let mut seen = vec![false; slots];
+        if augment(u, adj, &mut seen, &mut owner) {
+            matched += 1;
+        }
+    }
+    (matched, owner)
+}
+
+/// How many of the `shown` lines (`HH:MM`, rest) no photo of `held`
+/// accounts for. A photo accounts for one line per name it has had — the
+/// same photo shown under its file's name and under a key it took the
+/// place of is one photo shown twice — and a line it is known only by
+/// accounts for that one line. Two lines of one name in one minute are two
+/// photos: one photo held never accounts for both.
+pub fn photos_missing(held: &[HeldPhoto], shown: &[(&str, &str)]) -> usize {
+    let mut slots: Vec<(usize, Option<usize>)> = Vec::new();
+    for (i, p) in held.iter().enumerate() {
+        if p.names.is_empty() {
+            if p.line.is_some() {
+                slots.push((i, None));
+            }
+        } else {
+            slots.extend((0..p.names.len()).map(|j| (i, Some(j))));
+        }
+    }
+    let adj: Vec<Vec<usize>> = shown
+        .iter()
+        .map(|(minute, rest)| {
+            slots
+                .iter()
+                .enumerate()
+                .filter(|(_, (i, name))| {
+                    let p = &held[*i];
+                    p.minute.as_deref() == Some(*minute)
+                        && match name {
+                            Some(j) => shows_name(rest, &p.names[*j]),
+                            None => p.line.as_deref() == Some(*rest),
+                        }
+                })
+                .map(|(s, _)| s)
+                .collect()
+        })
+        .collect();
+    shown.len() - matching(&adj, slots.len()).0
+}
+
+/// The photos stored here for `day`, each by every name it has had.
+fn held_by_points(conn: &rusqlite::Connection, day: &str) -> Result<Vec<HeldPhoto>> {
+    let points = points_of_day(conn, day)?;
+    let keys: Vec<String> = points.iter().map(|p| p.key.clone()).collect();
+    let mut names: std::collections::HashMap<&str, Vec<String>> = points
+        .iter()
+        .map(|p| (p.key.as_str(), vec![crate::one_line(&p.filename)]))
+        .collect();
+    for (earlier, by) in replaced_into(conn, &keys)? {
+        if let (Some(list), Some((_, name))) = (names.get_mut(by.as_str()), earlier.split_once('|'))
+        {
+            list.push(crate::one_line(name));
+        }
+    }
+    Ok(points
+        .iter()
+        .map(|p| HeldPhoto {
+            minute: local_minute(p.at_unix, p.tz_offset_minutes),
+            names: names.remove(p.key.as_str()).unwrap_or_default(),
+            line: None,
+        })
+        .collect())
+}
+
+/// The photos a copy of `day` shows (its text `body`), each by every name
+/// the photos stored here say it has had: a line is paired with a stored
+/// photo of its minute whose file it shows (one photo per line); a line no
+/// stored photo pairs with is known only by itself.
+fn held_by_text(conn: &rusqlite::Connection, day: &str, body: &str) -> Result<Vec<HeldPhoto>> {
+    let lines = stamped_lines(body);
+    let stored = held_by_points(conn, day)?;
+    let adj: Vec<Vec<usize>> = lines
+        .iter()
+        .map(|(minute, rest)| {
+            stored
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| {
+                    p.minute.as_deref() == Some(*minute)
+                        && p.names.first().is_some_and(|n| shows_name(rest, n))
+                })
+                .map(|(j, _)| j)
+                .collect()
+        })
+        .collect();
+    let (_, owner) = matching(&adj, stored.len());
+    let mut held: Vec<HeldPhoto> = lines
+        .iter()
+        .map(|(minute, rest)| HeldPhoto {
+            minute: Some(minute.to_string()),
+            names: Vec::new(),
+            line: Some(rest.to_string()),
+        })
+        .collect();
+    for (j, line) in owner.into_iter().enumerate() {
+        if let Some(i) = line {
+            held[i].names = stored[j].names.clone();
+            held[i].line = None;
+        }
+    }
+    Ok(held)
+}
+
+/// Does the copy of `day` whose text is `outer` hold every photo the copy
+/// `inner` shows? `inner`'s list must be whole ([`photo_day_lines`]).
+fn text_holds(conn: &rusqlite::Connection, day: &str, outer: &str, inner: &str) -> Result<bool> {
+    let Some(shown) = photo_day_lines(inner) else {
+        return Ok(false);
+    };
+    Ok(photos_missing(&held_by_text(conn, day, outer)?, &shown) == 0)
+}
+
+/// Was `episode_id` written by the owner repair (store/repair.rs)?
+fn written_by_repair(conn: &rusqlite::Connection, episode_id: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM episode_origin WHERE episode_id = ?1 AND writer = ?2)",
+        rusqlite::params![episode_id, super::repair::REPAIR_WRITER],
+        |r| r.get(0),
+    )?)
+}
+
+/// An owner repair's copy of the photo day `base` arriving from a peer
+/// (text `body`, id `episode_id`): the copy of the day in view here that it
+/// doesn't hold, if one is — the repaired copy lands behind it. The node
+/// that made the copy checked it against its own copy of the day; another
+/// node's can show photos that one didn't hold, so each node checks for
+/// itself (a copy whose list is cut, or that can't be read, isn't held).
+pub(crate) fn unheld_live_copy(
+    conn: &rusqlite::Connection,
+    home: &crate::paths::Home,
+    base: &str,
+    episode_id: &str,
+    body: &str,
+) -> Result<Option<String>> {
+    let day = &base["photos#".len()..];
+    let mut live: Vec<DayCopy> = day_copies(conn, base)?
+        .into_iter()
+        .filter(|c| c.superseded_by.is_none() && c.id != episode_id)
+        .collect();
+    live.sort_by_key(|c| std::cmp::Reverse(c.revision));
+    for copy in live {
+        let held = match copy.body(home) {
+            Some(inner) => text_holds(conn, day, body, &inner)?,
+            None => false,
+        };
+        if !held {
+            return Ok(Some(copy.id));
+        }
+    }
+    Ok(None)
+}
+
+/// A photo day whose newest copy is an owner repair's that stands behind
+/// another copy of the day — it arrived before this node could tell it
+/// held that copy (the photos it names, and the keys they took the place
+/// of, reach a node on their own leg) — stands once this node can tell:
+/// when it holds every copy of the day in view, which go behind it. Checked
+/// when the run settles and when the photos leg brings points of the day
+/// ([`Store::photo_points_apply_and_settle`]). An undone run's copy, a
+/// retired one and one standing behind something outside the day are left.
+/// Returns the copies whose state changed.
+pub(crate) fn settle_repair_copy(
+    conn: &rusqlite::Connection,
+    home: &crate::paths::Home,
+    base: &str,
+) -> Result<usize> {
+    let copies = day_copies(conn, base)?;
+    let Some(top) = copies.iter().max_by_key(|c| c.revision) else {
+        return Ok(0);
+    };
+    let Some(ahead) = top.superseded_by.as_deref() else {
+        return Ok(0);
+    };
+    if !copies.iter().any(|c| c.id == ahead)
+        || !written_by_repair(conn, &top.id)?
+        || super::repair::undone_copy(conn, &top.id)?
+    {
+        return Ok(0);
+    }
+    let Some(outer) = top.body(home) else {
+        return Ok(0);
+    };
+    let day = &base["photos#".len()..];
+    let live: Vec<&DayCopy> = copies
+        .iter()
+        .filter(|c| c.superseded_by.is_none())
+        .collect();
+    for copy in &live {
+        let held = match copy.body(home) {
+            Some(inner) => text_holds(conn, day, &outer, &inner)?,
+            None => false,
+        };
+        if !held {
+            return Ok(0);
+        }
+    }
+    conn.execute(
+        "UPDATE episodes SET superseded_by = NULL, location_scanned = 0 WHERE id = ?1",
+        [&top.id],
+    )?;
+    for copy in &live {
+        conn.execute(
+            "UPDATE episodes SET superseded_by = ?1 WHERE id = ?2",
+            rusqlite::params![top.id, copy.id],
+        )?;
+        conn.execute(
+            "DELETE FROM location_points WHERE episode_id = ?1",
+            [&copy.id],
+        )?;
+    }
+    Ok(1 + live.len())
 }
 
 #[cfg(test)]

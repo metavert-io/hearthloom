@@ -85,6 +85,12 @@ pub fn ingest(path: &Path, scope: Option<&str>) -> Result<Vec<EpisodeDraft>> {
     )
 }
 
+/// [`ingest`] over a calendar's text already read (`label` names it in
+/// warnings and errors) — what `hearthloom repair calendar` reads.
+pub fn ingest_text(raw: &str, scope: Option<&str>, label: &str) -> Result<Vec<EpisodeDraft>> {
+    drafts(raw, scope, Utc::now().naive_utc(), label)
+}
+
 /// Every event of a calendar as drafts, as imported at `imported_at`
 /// (UTC): recurring series expanded up to then. An event that fails is
 /// left out with a warning; only a file none of whose events can be read

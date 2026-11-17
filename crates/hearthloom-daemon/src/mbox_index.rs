@@ -931,6 +931,138 @@ pub fn fetch_bytes(mbox: &Path, id: &str) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// The head of the message the index keeps under `id` (at most
+/// `HEAD_READ` bytes: its headers), or None when the index has no such id.
+/// An index that is missing, out of date or can't be read is an error,
+/// never "not there".
+pub fn head_of(mbox: &Path, id: &str) -> Result<Option<Vec<u8>>> {
+    if is_stale(mbox) {
+        return Err(anyhow!(
+            "the index for {} is missing or stale",
+            mbox.display()
+        ));
+    }
+    let conn =
+        Connection::open_with_flags(index_path(mbox), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let row: Option<(i64, i64)> = conn
+        .query_row(
+            "SELECT offset, length FROM messages WHERE id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((offset, length)) = row else {
+        return Ok(None);
+    };
+    let mut file = std::fs::File::open(mbox)?;
+    file.seek(SeekFrom::Start(offset as u64))?;
+    let mut buf = vec![0u8; (length.max(0) as usize).min(HEAD_READ)];
+    file.read_exact(&mut buf)?;
+    Ok(Some(buf))
+}
+
+/// Bytes read of a message's head to find its Message-ID.
+const HEAD_READ: usize = 64 * 1024;
+
+/// The Message-IDs of the messages an index keeps under their offset
+/// (`at:<offset>`): a later copy of a Message-ID it gives to the first copy
+/// (`index_stream`), read from each one's head by the import's rule. Maps
+/// a Message-ID to those rows' ids. Read once per archive; such rows are
+/// few (duplicates, and messages without a Message-ID).
+pub fn offset_keyed_ids(mbox: &Path) -> Result<std::collections::HashMap<String, Vec<String>>> {
+    if is_stale(mbox) {
+        return Err(anyhow!(
+            "the index for {} is missing or stale",
+            mbox.display()
+        ));
+    }
+    let conn =
+        Connection::open_with_flags(index_path(mbox), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, offset, length FROM messages WHERE id >= 'at:' AND id < 'at;' ORDER BY offset",
+    )?;
+    let rows: Vec<(String, i64, i64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut file = std::fs::File::open(mbox)?;
+    let mut out: std::collections::HashMap<String, Vec<String>> = Default::default();
+    for (id, offset, length) in rows {
+        let mut head = vec![0u8; (length.max(0) as usize).min(HEAD_READ)];
+        file.seek(SeekFrom::Start(offset as u64))?;
+        file.read_exact(&mut head)?;
+        let head = String::from_utf8_lossy(&head);
+        let head = head
+            .split("\n\n")
+            .next()
+            .unwrap_or_default()
+            .split("\r\n\r\n")
+            .next()
+            .unwrap_or_default();
+        if let Some(message_id) = hearthloom_adapters::mbox::message_id_ref(head) {
+            out.entry(message_id).or_default().push(id);
+        }
+    }
+    Ok(out)
+}
+
+/// One archived copy of a message.
+#[derive(Debug, Clone)]
+pub struct ArchivedCopy {
+    /// Its labels as the index holds them now (label updates applied).
+    pub labels: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Every copy of the message `message_id` an archive holds: the one its
+/// index keeps under that id and the later ones it keeps under their
+/// offset (`offset_keyed`, from [`offset_keyed_ids`]). Empty: none here.
+/// An index that can't be read is an error, never "none here".
+pub fn copies_of(
+    mbox: &Path,
+    message_id: &str,
+    offset_keyed: &std::collections::HashMap<String, Vec<String>>,
+) -> Result<Vec<ArchivedCopy>> {
+    if is_stale(mbox) {
+        return Err(anyhow!(
+            "the index for {} is missing or stale",
+            mbox.display()
+        ));
+    }
+    let conn =
+        Connection::open_with_flags(index_path(mbox), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut stmt = conn.prepare("SELECT offset, length, labels FROM messages WHERE id = ?1")?;
+    let ids = std::iter::once(message_id.to_string())
+        .chain(offset_keyed.get(message_id).into_iter().flatten().cloned());
+    let mut file: Option<std::fs::File> = None;
+    let mut out = Vec::new();
+    for id in ids {
+        let Some((offset, length, labels)) = stmt
+            .query_row([&id], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .optional()?
+        else {
+            continue;
+        };
+        let file = match &mut file {
+            Some(f) => f,
+            None => file.insert(std::fs::File::open(mbox)?),
+        };
+        file.seek(SeekFrom::Start(offset as u64))?;
+        let mut bytes = vec![0u8; length.max(0) as usize];
+        file.read_exact(&mut bytes)?;
+        out.push(ArchivedCopy {
+            labels: labels.unwrap_or_default(),
+            bytes,
+        });
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

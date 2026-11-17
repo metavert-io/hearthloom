@@ -496,6 +496,19 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/retire", post(retire_post))
         .route("/v1/retirements", get(retirements_list))
         .route("/v1/retirements/{id}/undo", post(retirement_undo))
+        // owner repairs (v69): dry run unless `apply`; owner + vault open
+        .route("/v1/repair/mail", post(repair_mail))
+        .route("/v1/repair/calendar", post(repair_calendar))
+        .route("/v1/repair/chatgpt", post(repair_chatgpt))
+        .route("/v1/repair/health", post(repair_health))
+        .route("/v1/repair/copies", post(repair_copies))
+        .route("/v1/repair/photo-days", post(repair_photo_days))
+        .route("/v1/repairs", get(repairs_list))
+        .route("/v1/repairs/{id}/undo", post(repair_undo))
+        .route(
+            "/v1/sync/repairs",
+            get(sync_repairs_get).post(sync_repairs_post),
+        )
         .route("/v1/sync/agents/adopt", post(sync_agents_adopt))
         .route("/v1/sync/agents/release", post(sync_agents_release))
         .route("/v1/sync/agents/released", post(sync_agents_released))
@@ -819,6 +832,8 @@ const KEY_ROUTES: &[(&str, &str, &[&str])] = &[
     ("POST", "/v1/sync/agents", &["peer"]),
     ("GET", "/v1/sync/retirements", &["peer"]),
     ("POST", "/v1/sync/retirements", &["peer"]),
+    ("GET", "/v1/sync/repairs", &["peer"]),
+    ("POST", "/v1/sync/repairs", &["peer"]),
     ("POST", "/v1/sync/agents/adopt", &["peer"]),
     ("POST", "/v1/sync/agents/release", &["peer"]),
     ("POST", "/v1/sync/agents/released", &["peer"]),
@@ -1686,6 +1701,839 @@ mod owned_source_tests {
         assert!(state.store.owner_emails().unwrap().contains("a@x.example"));
         let envelope = profile_card_envelope(&state.store).unwrap();
         assert_eq!(envelope["updated_at"], json!("2026-11-02T00:00:00Z"));
+    }
+}
+
+#[cfg(test)]
+mod mail_hold_route_tests {
+    use super::*;
+
+    fn state() -> (AppState, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::paths::Home::at(tmp.path());
+        home.init().unwrap();
+        let state = AppState {
+            store: std::sync::Arc::new(
+                hearthloom_core::store::Store::open(&home.db_path()).unwrap(),
+            ),
+            home,
+            embedder: None,
+            llm: None,
+            auth_locked: Default::default(),
+            bus: Default::default(),
+            killswitch: Default::default(),
+            running: Default::default(),
+        };
+        (state, tmp)
+    }
+
+    /// A private memory under a Gmail `uid:` path holds all mail only when
+    /// a person wrote it (an earlier version's promotion). One an ingest
+    /// key or an ember writes through `/v1/ingest` — the server names them
+    /// `agent:key:…` / `plugin:…` — holds nothing; the owner's own does.
+    #[tokio::test]
+    async fn test_only_the_owners_uid_memory_holds_mail() {
+        use tower::ServiceExt;
+        let (state, _tmp) = state();
+        let mint = |name: &str, scopes: &[&str]| -> (String, String) {
+            let scopes: Vec<String> = scopes.iter().map(|s| s.to_string()).collect();
+            let (row, secret) = state
+                .store
+                .create_api_key_scoped(&Actor::new("human:owner"), name, &scopes, None, None)
+                .unwrap();
+            (row.id, secret)
+        };
+        let (ember_id, ember) = mint("plugin:clipper", &["read", "ingest", "notify"]);
+        state
+            .store
+            .install_plugin(
+                &Actor::new("human:owner"),
+                "clipper",
+                "1.0.0",
+                &json!({"name": "clipper"}),
+                &["read".into(), "ingest".into(), "notify".into()],
+                &ember_id,
+                "local-only",
+            )
+            .unwrap();
+        let (_, ingest) = mint("helper", &["ingest"]);
+        let (_, admin) = mint("cli", &["admin"]);
+        let app = router(state.clone());
+        let post = |secret: &str, source_ref: &str| {
+            let batch = IngestBatch {
+                actor: "human:dashboard".into(),
+                session_id: None,
+                episodes: vec![hearthloom_core::EpisodeDraft {
+                    source: crate::gmail_search::SOURCE.into(),
+                    source_ref: source_ref.into(),
+                    kind: "email".into(),
+                    title: "promoted".into(),
+                    body: "From: Ann <ann@x.example>\nSubject: plans\n\nSee you then.".into(),
+                    event_time: hearthloom_core::EventTime::unknown(),
+                    trust: "imported".into(),
+                    scope: Some("private".into()),
+                    entities: vec![],
+                    edges: vec![],
+                }],
+            };
+            let request = axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/ingest")
+                .header("authorization", format!("Bearer {secret}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    serde_json::to_string(&batch).unwrap(),
+                ))
+                .unwrap();
+            let app = app.clone();
+            async move { app.oneshot(request).await.unwrap().status() }
+        };
+        let hold = || {
+            crate::virtual_source::MailPrivacy::new(&state)
+                .hold()
+                .unwrap()
+                .cloned()
+        };
+
+        assert_eq!(post(&ingest, "uid:41").await, StatusCode::OK);
+        assert_eq!(post(&ember, "uid:42").await, StatusCode::OK);
+        let stored = state
+            .store
+            .private_prefixed_anywhere("uid:")
+            .unwrap()
+            .into_iter()
+            .map(|m| (m.source_ref, m.writer))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stored,
+            vec![
+                ("uid:41".to_string(), Some("agent:key:helper".to_string())),
+                ("uid:42".to_string(), Some("plugin:clipper".to_string())),
+            ]
+        );
+        assert_eq!(hold(), None, "no key but the owner's holds mail");
+
+        assert_eq!(post(&admin, "uid:43").await, StatusCode::OK);
+        assert_eq!(
+            hold().map(|h| h.source_ref),
+            Some("uid:43".to_string()),
+            "the owner's own does"
+        );
+    }
+
+    /// While mail is held, an owner whose vault is locked reads no thread —
+    /// not the list, not a draft (a thread's, or an ember's of a message),
+    /// not an ember's queued message, not through raw SQL — and the threads
+    /// keep their labels: once the hold ends they show again.
+    #[tokio::test]
+    async fn test_a_locked_view_reads_no_thread_while_mail_is_held() {
+        use tower::ServiceExt;
+        let (state, _tmp) = state();
+        let owner = Actor::new("human:owner");
+        let (_, admin) = state
+            .store
+            .create_api_key_scoped(&owner, "cli", &["admin".to_string()], None, None)
+            .unwrap();
+        let thread = state
+            .store
+            .mail_observe(
+                &owner,
+                &hearthloom_core::store::mail::MailSeen {
+                    account: "jon@y.example".into(),
+                    message_id: "clinic@x".into(),
+                    from: "Ann <ann@x.example>".into(),
+                    from_addr: "ann@x.example".into(),
+                    subject: "plans for the clinic".into(),
+                    primary: true,
+                    snippet: "See you at the clinic on Friday.".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .unwrap();
+        state
+            .store
+            .mail_draft_request(&owner, Some(&thread), None, None, false, None)
+            .unwrap();
+        // a message queued for an ember, and the ember's draft answering it
+        assert!(state
+            .store
+            .mail_match_add(&hearthloom_core::store::mail_watch::MailMatch {
+                plugin: "stars".into(),
+                watch: "mw_stars".into(),
+                watch_name: "watched mail".into(),
+                message_id: "clinic@x".into(),
+                sender: "Ann <ann@x.example>".into(),
+                subject: "plans for the clinic".into(),
+                text: "See you at the clinic on Friday.".into(),
+                ..Default::default()
+            })
+            .unwrap());
+        state
+            .store
+            .mail_draft_request(
+                &Actor::new("plugin:stars"),
+                None,
+                Some("clinic@x"),
+                None,
+                false,
+                Some("Friday works."),
+            )
+            .unwrap();
+        let app = router(state.clone());
+        let call = |method: &str, uri: &str, body: Value| {
+            let request = axum::http::Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", format!("Bearer {admin}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap();
+            let app = app.clone();
+            async move {
+                let response = app.oneshot(request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                serde_json::from_slice::<Value>(&bytes).unwrap()
+            }
+        };
+        let seen = || async {
+            let threads = call("GET", "/v1/mail/threads?state=all", Value::Null).await;
+            let drafts = call("GET", "/v1/mail/drafts", Value::Null).await;
+            let sql = call(
+                "POST",
+                "/v1/sql",
+                json!({"query": "SELECT id FROM mail_threads UNION ALL SELECT id FROM mail_drafts \
+                                 UNION ALL SELECT subject FROM mail_matches"}),
+            )
+            .await;
+            (
+                threads["threads"].as_array().unwrap().len(),
+                drafts["drafts"].as_array().unwrap().len(),
+                sql["rows"].as_array().unwrap().len(),
+            )
+        };
+        assert_eq!(seen().await, (1, 2, 4));
+
+        // an earlier version's promotion, private under its uid: mail is held
+        let promoted = IngestBatch {
+            actor: "human:dashboard".into(),
+            session_id: None,
+            episodes: vec![hearthloom_core::EpisodeDraft {
+                source: crate::gmail_search::SOURCE.into(),
+                source_ref: "uid:42".into(),
+                kind: "file".into(),
+                title: "promoted".into(),
+                body: "From: Ann <ann@x.example>\nSubject: plans for the clinic\n\nSee you.".into(),
+                event_time: hearthloom_core::EventTime::unknown(),
+                trust: "imported".into(),
+                scope: Some("private".into()),
+                entities: vec![],
+                edges: vec![],
+            }],
+        };
+        state.store.apply_batch(&state.home, &promoted).unwrap();
+        assert_eq!(seen().await, (0, 0, 0), "nothing of the thread while held");
+        assert!(state.store.mail_thread(&thread).unwrap().is_none());
+
+        // out of the vault: the hold ends, and the thread is as it was
+        state.store.vault_unlock(5);
+        state
+            .store
+            .set_episode_scopes(
+                &owner,
+                &[hearthloom_core::ids::episode_id(
+                    crate::gmail_search::SOURCE,
+                    "uid:42",
+                )],
+                "personal",
+            )
+            .unwrap();
+        state.store.vault_lock();
+        assert_eq!(seen().await, (1, 2, 4));
+        assert_eq!(
+            state.store.mail_thread(&thread).unwrap().unwrap().scope,
+            "personal"
+        );
+    }
+}
+
+#[cfg(test)]
+mod repair_route_tests {
+    use super::*;
+    use hearthloom_core::store::{ApiKeyClaims, KeyGrants};
+
+    fn state() -> (AppState, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::paths::Home::at(tmp.path());
+        home.init().unwrap();
+        let state = AppState {
+            store: std::sync::Arc::new(
+                hearthloom_core::store::Store::open(&home.db_path()).unwrap(),
+            ),
+            home,
+            embedder: None,
+            llm: None,
+            auth_locked: Default::default(),
+            bus: Default::default(),
+            killswitch: Default::default(),
+            running: Default::default(),
+        };
+        (state, tmp)
+    }
+
+    fn key(scopes: &[&str], grants: Option<KeyGrants>) -> AuthInfo {
+        AuthInfo(Some(ApiKeyClaims {
+            id: "ak_1".into(),
+            name: "someone".into(),
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            grants,
+        }))
+    }
+
+    async fn mail(state: &AppState, auth: AuthInfo, apply: bool) -> StatusCode {
+        match mail_with(state, auth, apply, false).await {
+            Ok(_) => StatusCode::OK,
+            Err(ApiError(code, _)) => code,
+        }
+    }
+
+    async fn mail_with(
+        state: &AppState,
+        auth: AuthInfo,
+        apply: bool,
+        allow_older_nodes: bool,
+    ) -> Result<Json<Value>, ApiError> {
+        repair_mail(
+            State(state.clone()),
+            axum::Extension(auth),
+            Json(RepairMailBody {
+                apply,
+                allow_older_nodes,
+            }),
+        )
+        .await
+    }
+
+    /// The tests that get past the gate take turns. One repair runs at a
+    /// time on a node (`repair::try_start`, keyed by the node's home, so
+    /// other tests' nodes never hold it); taking turns keeps these simple.
+    static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// What the four export and record repairs answer `auth`, dry run or
+    /// applied (an export path that exists, so only the gate decides).
+    async fn other_repairs(state: &AppState, auth: AuthInfo, apply: bool) -> Vec<StatusCode> {
+        let code = |r: Result<Json<Value>, ApiError>| match r {
+            Ok(_) => StatusCode::OK,
+            Err(ApiError(code, _)) => code,
+        };
+        let export = || RepairExportBody {
+            apply,
+            allow_older_nodes: false,
+            path: state.home.root().display().to_string(),
+        };
+        vec![
+            code(
+                repair_chatgpt(
+                    State(state.clone()),
+                    axum::Extension(auth.clone()),
+                    Json(export()),
+                )
+                .await,
+            ),
+            code(
+                repair_health(
+                    State(state.clone()),
+                    axum::Extension(auth.clone()),
+                    Json(export()),
+                )
+                .await,
+            ),
+            code(
+                repair_copies(
+                    State(state.clone()),
+                    axum::Extension(auth.clone()),
+                    Json(RepairMailBody {
+                        apply,
+                        allow_older_nodes: false,
+                    }),
+                )
+                .await,
+            ),
+            code(
+                repair_photo_days(
+                    State(state.clone()),
+                    axum::Extension(auth),
+                    Json(RepairMailBody {
+                        apply,
+                        allow_older_nodes: false,
+                    }),
+                )
+                .await,
+            ),
+        ]
+    }
+
+    /// Every repair — ChatGPT, health, copies and photo days too — is the
+    /// owner's with the vault open: an agent's key and the owner with the
+    /// vault locked are refused before anything is read.
+    #[tokio::test]
+    async fn test_the_export_and_record_repairs_refuse_an_agent_key_and_a_locked_vault() {
+        let _turn = ONE_AT_A_TIME.lock().await;
+        let (state, _tmp) = state();
+        state.store.vault_unlock(5);
+        for (who, auth) in [
+            ("an agent's key", key(&[], Some(KeyGrants::default()))),
+            ("a write key", key(&["read", "write"], None)),
+            ("an ember's read key", key(&["read"], None)),
+            ("a peer's key", key(&["peer"], None)),
+        ] {
+            for apply in [false, true] {
+                assert_eq!(
+                    other_repairs(&state, auth.clone(), apply).await,
+                    [StatusCode::FORBIDDEN; 4],
+                    "{who}"
+                );
+            }
+        }
+        for path in ["/v1/repair/chatgpt", "/v1/repair/photo-days"] {
+            assert!(!crate::plugins::plugin_route_allowed(
+                path,
+                "GET",
+                &["read".to_string()]
+            ));
+        }
+        state.store.vault_lock();
+        for auth in [AuthInfo(None), key(&["admin"], None)] {
+            for apply in [false, true] {
+                assert_eq!(
+                    other_repairs(&state, auth.clone(), apply).await,
+                    [StatusCode::FORBIDDEN; 4]
+                );
+            }
+        }
+        // the owner, vault open: copies and photo days run (nothing to do
+        // on an empty node); an export that isn't one is a bad request
+        state.store.vault_unlock(5);
+        let codes = other_repairs(&state, AuthInfo(None), false).await;
+        assert_eq!(codes[2..], [StatusCode::OK, StatusCode::OK]);
+        assert_eq!(
+            codes[..2],
+            [StatusCode::BAD_REQUEST, StatusCode::BAD_REQUEST]
+        );
+        // an export named by a relative path is refused
+        let relative = repair_chatgpt(
+            State(state.clone()),
+            axum::Extension(AuthInfo(None)),
+            Json(RepairExportBody {
+                apply: false,
+                allow_older_nodes: false,
+                path: "export.zip".into(),
+            }),
+        )
+        .await;
+        assert!(matches!(
+            relative,
+            Err(ApiError(StatusCode::BAD_REQUEST, _))
+        ));
+    }
+
+    /// Repairs are the owner's, with the vault open: an agent's key, a
+    /// write or ingest key, a peer, a friend and an ember's read key are
+    /// refused, and so is the owner while the vault is locked — the dry
+    /// run, the run, the list and the undo alike.
+    #[tokio::test]
+    async fn test_only_the_owner_with_the_vault_open_repairs() {
+        let _turn = ONE_AT_A_TIME.lock().await;
+        let (state, _tmp) = state();
+        state.store.vault_unlock(5);
+        for (who, auth) in [
+            ("an agent's key", key(&[], Some(KeyGrants::default()))),
+            ("a write key", key(&["read", "write"], None)),
+            ("an ingest key", key(&["ingest"], None)),
+            ("a peer's key", key(&["peer"], None)),
+            ("a friend's key", key(&["friend"], None)),
+            ("an ember's read key", key(&["read"], None)),
+        ] {
+            for apply in [false, true] {
+                assert_eq!(
+                    mail(&state, auth.clone(), apply).await,
+                    StatusCode::FORBIDDEN,
+                    "{who}"
+                );
+            }
+            let listed = repairs_list(State(state.clone()), axum::Extension(auth.clone())).await;
+            assert!(
+                matches!(listed, Err(ApiError(StatusCode::FORBIDDEN, _))),
+                "{who}"
+            );
+            let undone = repair_undo(
+                State(state.clone()),
+                Path("rp_x".into()),
+                axum::Extension(auth.clone()),
+            )
+            .await;
+            assert!(
+                matches!(undone, Err(ApiError(StatusCode::FORBIDDEN, _))),
+                "{who}"
+            );
+            let calendar = repair_calendar(
+                State(state.clone()),
+                axum::Extension(auth),
+                Json(RepairCalendarBody {
+                    apply: true,
+                    allow_older_nodes: false,
+                    files: vec![crate::repair::CalendarFile {
+                        name: "a.ics".into(),
+                        text: "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n".into(),
+                    }],
+                }),
+            )
+            .await;
+            assert!(
+                matches!(calendar, Err(ApiError(StatusCode::FORBIDDEN, _))),
+                "{who}"
+            );
+        }
+        // an ember's read key never reaches the routes at all
+        for path in ["/v1/repairs", "/v1/repair/mail"] {
+            assert!(!crate::plugins::plugin_route_allowed(
+                path,
+                "GET",
+                &["read".to_string()]
+            ));
+        }
+
+        // the owner, vault locked
+        state.store.vault_lock();
+        for auth in [AuthInfo(None), key(&["admin"], None)] {
+            assert_eq!(mail(&state, auth, false).await, StatusCode::FORBIDDEN);
+        }
+        // the owner, vault open: a session and the owner's admin key
+        state.store.vault_unlock(5);
+        assert_eq!(mail(&state, AuthInfo(None), false).await, StatusCode::OK);
+        assert_eq!(
+            mail(&state, key(&["admin"], None), true).await,
+            StatusCode::OK
+        );
+        assert!(
+            repairs_list(State(state.clone()), axum::Extension(AuthInfo(None)))
+                .await
+                .is_ok()
+        );
+    }
+
+    /// A node of the owner's seen lately that doesn't know owner repairs
+    /// is named in the dry run, and applying is refused until it is
+    /// upgraded — unless the owner allows it; a node that says it knows
+    /// them doesn't hold a repair up.
+    #[tokio::test]
+    async fn test_applying_waits_for_older_nodes() {
+        let _turn = ONE_AT_A_TIME.lock().await;
+        let (state, _tmp) = state();
+        state.store.vault_unlock(5);
+        state
+            .store
+            .publish_node(
+                "n_new",
+                "cloud",
+                "cloud",
+                &json!({"repairs": true}),
+                "0.5.101",
+            )
+            .unwrap();
+        assert_eq!(
+            mail(&state, AuthInfo(None), true).await,
+            StatusCode::OK,
+            "every node knows the rule"
+        );
+        state
+            .store
+            .publish_node(
+                "n_old",
+                "laptop",
+                "local",
+                &json!({"mail": false}),
+                "0.5.99",
+            )
+            .unwrap();
+
+        let dry = mail_with(&state, AuthInfo(None), false, false)
+            .await
+            .ok()
+            .unwrap();
+        assert_eq!(dry["older_nodes"], json!(["laptop (0.5.99)"]));
+        assert!(
+            dry["notes"]
+                .to_string()
+                .contains("laptop (0.5.99) runs a version"),
+            "{}",
+            dry.0
+        );
+        match mail_with(&state, AuthInfo(None), true, false).await {
+            Err(ApiError(StatusCode::CONFLICT, why)) => {
+                assert!(why.contains("Upgrade it first"), "{why}")
+            }
+            _ => panic!("applying is refused while an older node is about"),
+        }
+        assert!(mail_with(&state, AuthInfo(None), true, true).await.is_ok());
+    }
+
+    /// A memory as an earlier mail import stored it, and its decoded copy.
+    fn encoded_and_decoded() -> (hearthloom_core::EpisodeDraft, hearthloom_core::EpisodeDraft) {
+        let draft = |title: &str, body: &str| hearthloom_core::EpisodeDraft {
+            source: "mbox".into(),
+            source_ref: "m1@x".into(),
+            kind: "email".into(),
+            title: title.into(),
+            body: body.into(),
+            event_time: hearthloom_core::EventTime::parse_rfc3339(
+                "2026-03-16T09:30:00Z",
+                hearthloom_core::TimeUncertainty::Exact,
+            )
+            .unwrap(),
+            trust: "imported".into(),
+            scope: None,
+            entities: vec![],
+            edges: vec![],
+        };
+        (
+            draft(
+                "=?UTF-8?Q?Caf=C3=A9?=",
+                "subject: =?UTF-8?Q?Caf=C3=A9?=\n\nTWVldA==",
+            ),
+            draft("Café", "subject: Café\n\nMeet"),
+        )
+    }
+
+    fn live_refs(state: &AppState) -> Vec<String> {
+        let (_, rows) = state
+            .store
+            .read_query(
+                "SELECT source_ref FROM episodes WHERE superseded_by IS NULL ORDER BY source_ref",
+                100,
+            )
+            .unwrap();
+        rows.iter()
+            .map(|r| r[0].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// The undo route undoes a run (the memory back in view, the run
+    /// listed undone) — and waits while a repair runs on the node, which
+    /// could be that run still landing.
+    #[tokio::test]
+    async fn test_the_undo_route_undoes_and_waits_for_a_running_repair() {
+        let _turn = ONE_AT_A_TIME.lock().await;
+        let (state, _tmp) = state();
+        state.store.vault_unlock(5);
+        let (encoded, decoded) = encoded_and_decoded();
+        state
+            .store
+            .apply_batch(
+                &state.home,
+                &hearthloom_core::IngestBatch {
+                    actor: "adapter:mbox".into(),
+                    session_id: None,
+                    episodes: vec![encoded],
+                },
+            )
+            .unwrap();
+        let run = state
+            .store
+            .repair_apply(
+                &state.home,
+                &Actor::new("human:owner"),
+                "mail",
+                &[hearthloom_core::store::RepairItem {
+                    base_ref: "m1@x".into(),
+                    draft: decoded,
+                }],
+                &[],
+                "adapter:ics",
+            )
+            .unwrap()
+            .run
+            .unwrap();
+        assert_ne!(live_refs(&state), ["m1@x"]);
+
+        let undo = || {
+            repair_undo(
+                State(state.clone()),
+                Path(run.clone()),
+                axum::Extension(AuthInfo(None)),
+            )
+        };
+        {
+            // a run in progress at this node (the route only tries it)
+            let _running = crate::repair::try_start(&state.home).unwrap();
+            assert!(matches!(
+                undo().await,
+                Err(ApiError(StatusCode::CONFLICT, _))
+            ));
+        }
+        assert_ne!(live_refs(&state), ["m1@x"], "nothing undone yet");
+        let done = undo().await.ok().unwrap();
+        assert_eq!(done["undone"], json!(run));
+        assert_eq!(live_refs(&state), ["m1@x"]);
+        let listed = repairs_list(State(state.clone()), axum::Extension(AuthInfo(None)))
+            .await
+            .ok()
+            .unwrap();
+        assert_eq!(listed["repairs"][0]["state"], "undone");
+        assert!(matches!(
+            undo().await,
+            Err(ApiError(StatusCode::BAD_REQUEST, _))
+        ));
+    }
+
+    /// The repairs leg through its routes: a spoke's run and its undo
+    /// pushed to the hub (`POST /v1/sync/repairs`) reach a third node that
+    /// pulls them from the hub (`GET`), which settles them; only a peer's
+    /// key reaches either route.
+    #[tokio::test]
+    async fn test_the_repairs_leg_relays_a_run_and_its_undo_through_the_hub() {
+        let _turn = ONE_AT_A_TIME.lock().await;
+        let (spoke, _a) = state();
+        let (hub, _b) = state();
+        let (third, _c) = state();
+        let (encoded, decoded) = encoded_and_decoded();
+        for node in [&spoke, &third] {
+            node.store
+                .apply_batch(
+                    &node.home,
+                    &hearthloom_core::IngestBatch {
+                        actor: "adapter:mbox".into(),
+                        session_id: None,
+                        episodes: vec![encoded.clone()],
+                    },
+                )
+                .unwrap();
+        }
+        let run = spoke
+            .store
+            .repair_apply(
+                &spoke.home,
+                &Actor::new("human:owner"),
+                "mail",
+                &[hearthloom_core::store::RepairItem {
+                    base_ref: "m1@x".into(),
+                    draft: decoded,
+                }],
+                &[],
+                "adapter:ics",
+            )
+            .unwrap()
+            .run
+            .unwrap();
+        // the corrected copy reaches the third node on the episodes leg
+        let page = spoke
+            .store
+            .sync_export_for(&spoke.home, 0, 100, Some("third"))
+            .unwrap();
+        third
+            .store
+            .apply_batch_from(
+                &third.home,
+                &hearthloom_core::IngestBatch {
+                    actor: "peer:spoke".into(),
+                    session_id: None,
+                    episodes: page.episodes,
+                },
+                &page.origins,
+            )
+            .unwrap();
+        let peer = key(&["peer"], None);
+        let relay = |since: String| async {
+            // spoke → hub
+            let pushed = spoke.store.repairs_sync_export("").unwrap();
+            assert!(sync_repairs_post(
+                State(hub.clone()),
+                axum::Extension(peer.clone()),
+                Json(pushed),
+            )
+            .await
+            .is_ok());
+            // hub → third, as the third node's pull applies it
+            let pulled = sync_repairs_get(
+                State(hub.clone()),
+                Query(NotifSinceParams { since }),
+                axum::Extension(peer.clone()),
+            )
+            .await
+            .ok()
+            .unwrap()
+            .0;
+            assert!(!pulled["repairs"].as_array().unwrap().is_empty());
+            third.store.repairs_sync_apply(&pulled).unwrap();
+            crate::repair::catch_up(&third).await;
+        };
+        relay(String::new()).await;
+        assert_eq!(live_refs(&third).len(), 1);
+        assert_ne!(live_refs(&third), ["m1@x"]);
+        assert!(third.store.repairs_pending_here().unwrap().is_empty());
+
+        spoke
+            .store
+            .repair_undo(&spoke.home, &Actor::new("human:owner"), &run)
+            .unwrap();
+        relay(String::new()).await;
+        assert_eq!(live_refs(&third), ["m1@x"]);
+        assert!(third
+            .store
+            .repair_run(&run)
+            .unwrap()
+            .unwrap()
+            .undone_at
+            .is_some());
+
+        // only a peer's key (or the admin's) reaches the leg
+        for auth in [
+            AuthInfo(None),
+            key(&["read", "write"], None),
+            key(&["ingest"], None),
+        ] {
+            assert!(sync_repairs_get(
+                State(hub.clone()),
+                Query(NotifSinceParams {
+                    since: String::new()
+                }),
+                axum::Extension(auth.clone()),
+            )
+            .await
+            .is_err());
+            assert!(sync_repairs_post(
+                State(hub.clone()),
+                axum::Extension(auth),
+                Json(json!({"repairs": []})),
+            )
+            .await
+            .is_err());
+        }
+    }
+
+    /// No batch on /v1/ingest writes as the owner repair — not even the
+    /// owner's: only `hearthloom repair` does.
+    #[tokio::test]
+    async fn test_ingest_never_writes_as_the_repair() {
+        let (state, _tmp) = state();
+        for auth in [AuthInfo(None), key(&["admin"], None)] {
+            let body: IngestBody = serde_json::from_value(json!({
+                "actor": "repair:owner",
+                "episodes": [],
+            }))
+            .unwrap();
+            let refused = ingest(
+                State(state.clone()),
+                HeaderMap::new(),
+                axum::Extension(auth),
+                Json(body),
+            )
+            .await;
+            assert!(matches!(refused, Err(ApiError(StatusCode::BAD_REQUEST, _))));
+        }
     }
 }
 
@@ -3578,6 +4426,13 @@ async fn ingest(
     }
     if auth.0.is_none() {
         origins.clear(); // a keyless caller is a local tool, never a node
+    }
+    // the owner repair's writer belongs to `hearthloom repair` alone: a copy
+    // written as it replaces the memory it names (core store/repair.rs)
+    if batch.actor.starts_with("repair:") {
+        return Err(bad_request(
+            "the repair writer is reserved for `hearthloom repair`",
+        ));
     }
     // A local import (the CLI reading this machine's files) lands a day or
     // session stored before only when fuller; a peer's batch replicates
@@ -5628,9 +6483,10 @@ async fn ingest_photos(
     }
     batch.actor = ingest_actor(&state, &auth, &batch.actor);
     let report = crate::scoped::spawn_blocking(move || -> anyhow::Result<Value> {
-        let (accepted, duplicates) = state
-            .store
-            .photos_add_points(&batch.device, &batch.photos)?;
+        let (accepted, duplicates) =
+            state
+                .store
+                .photos_add_points_and_settle(&state.home, &batch.device, &batch.photos)?;
         let day_span = day_span_ref(batch.photos.iter().filter_map(|p| {
             chrono::DateTime::parse_from_rfc3339(&p.taken_at)
                 .ok()
@@ -6533,10 +7389,12 @@ async fn raw_sql(
     if auth.0.is_some() {
         require_scope(&auth, "admin")?;
     }
-    let (columns, rows) =
-        crate::scoped::spawn_blocking(move || state.store.read_query(&body.query, 120))
-            .await
-            .map_err(anyhow::Error::from)??;
+    let (columns, rows) = crate::scoped::spawn_blocking(move || {
+        crate::virtual_source::before_mail_sql(&state, &body.query);
+        state.store.read_query(&body.query, 120)
+    })
+    .await
+    .map_err(anyhow::Error::from)??;
     Ok(Json(json!({ "columns": columns, "rows": rows })))
 }
 
@@ -6615,9 +7473,9 @@ async fn sync_photos_post(
     Json(batch): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&auth, "peer")?;
-    Ok(Json(
-        json!({"applied": state.store.photo_points_apply(&batch)?}),
-    ))
+    Ok(Json(json!({
+        "applied": crate::live_photos::apply_peer_points(&state, batch).await?
+    })))
 }
 
 /// Peer grants/shares feed (v47): ONE sharing posture across a user's
@@ -6760,6 +7618,8 @@ async fn mail_threads_get(
             "all" => vec![],
             one => vec![one],
         };
+        // while mail is held a locked view shows no thread: read it now
+        held_mail_read(&st);
         st.store.mail_threads(&states, limit)
     })
     .await
@@ -6768,6 +7628,14 @@ async fn mail_threads_get(
         "threads": threads,
         "triage": crate::mail_triage::status(&state),
     })))
+}
+
+/// Before a locked viewer reads threads or drafts: whether mail is held,
+/// as of now (the store's thread readers hide every thread while it is).
+fn held_mail_read(state: &AppState) {
+    if state.store.vault_status().0 {
+        crate::virtual_source::refresh_mail_hold(state);
+    }
 }
 
 #[derive(Deserialize)]
@@ -7252,6 +8120,7 @@ async fn mail_drafts_get(
     axum::Extension(auth): axum::Extension<AuthInfo>,
 ) -> Result<Json<Value>, ApiError> {
     require_owner(&auth, "see reply drafts")?;
+    held_mail_read(&state);
     Ok(Json(json!({
         "drafts": state.store.mail_drafts(params.thread.as_deref(), None, params.limit.unwrap_or(50))?,
         "drafter": crate::mail_drafts::status(&state),
@@ -7264,6 +8133,7 @@ async fn mail_draft_get(
     axum::Extension(auth): axum::Extension<AuthInfo>,
 ) -> Result<Json<Value>, ApiError> {
     require_owner(&auth, "see a reply draft")?;
+    held_mail_read(&state);
     let draft = state
         .store
         .mail_draft(&id)?
@@ -13019,6 +13889,322 @@ async fn sync_retirements_post(
     Ok(Json(json!({"applied": changed.len()})))
 }
 
+/* ————— owner repairs (v69; core store/repair.rs, daemon repair.rs) ————— */
+
+/// Only the owner — never an agent's key, an ember, a friend or a peer —
+/// and only with the vault open: a repair reads and replaces any memory,
+/// private ones too.
+fn repair_allowed(state: &AppState, auth: &AuthInfo) -> Result<(), ApiError> {
+    require_owner(auth, "repair memories")?;
+    if state.store.vault_status().0 {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "unlock the vault first: a repair reads and replaces memories, private ones too".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct RepairMailBody {
+    /// Land the corrected copies; without it, a dry run.
+    #[serde(default)]
+    apply: bool,
+    /// Apply even while one of the owner's nodes doesn't know owner
+    /// repairs yet (`repair::older_nodes`).
+    #[serde(default)]
+    allow_older_nodes: bool,
+}
+
+#[derive(Deserialize)]
+struct RepairCalendarBody {
+    #[serde(default)]
+    apply: bool,
+    #[serde(default)]
+    allow_older_nodes: bool,
+    files: Vec<crate::repair::CalendarFile>,
+}
+
+/// What a repair request came to.
+enum RepairOutcome {
+    Busy,
+    /// Applying waits for these nodes to be upgraded.
+    Older(Vec<String>),
+    Report(Value),
+}
+
+/// Plan a repair (and land it when asked) off the runtime's threads, one
+/// at a time on this node. A node of the owner's that doesn't know owner
+/// repairs yet is named in the dry run, and applying is refused while
+/// there is one unless `allow_older` says otherwise.
+async fn run_repair(
+    state: AppState,
+    apply: bool,
+    allow_older: bool,
+    plan: impl FnOnce(&AppState) -> anyhow::Result<crate::repair::Plan> + Send + 'static,
+) -> Result<Json<Value>, ApiError> {
+    let background = state.clone();
+    let outcome = crate::scoped::spawn_blocking(move || -> anyhow::Result<RepairOutcome> {
+        let Some(_one) = crate::repair::try_start(&background.home) else {
+            return Ok(RepairOutcome::Busy);
+        };
+        let older = crate::repair::older_nodes(&background);
+        if apply && !allow_older && !older.is_empty() {
+            return Ok(RepairOutcome::Older(older));
+        }
+        let mut plan = plan(&background)?;
+        if !older.is_empty() {
+            plan.notes.push(crate::repair::older_nodes_note(&older));
+        }
+        let mut report = if apply {
+            let applied = crate::repair::apply(&background, "human:owner", &plan)?;
+            plan.report(Some(&applied))
+        } else {
+            plan.report(None)
+        };
+        report["older_nodes"] = json!(older);
+        Ok(RepairOutcome::Report(report))
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| bad_request(format!("{e:#}")))?;
+    let report = match outcome {
+        RepairOutcome::Report(report) => report,
+        RepairOutcome::Busy => {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "a repair is running on this node — try again when it ends".into(),
+            ))
+        }
+        RepairOutcome::Older(older) => {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                crate::repair::older_nodes_note(&older),
+            ))
+        }
+    };
+    if report["run"].is_string() {
+        crate::bus::touch(&state, "operational.changed");
+    }
+    if report["made_private"].as_u64().unwrap_or(0) > 0 {
+        crate::bus::touch(&state, "privacy.changed");
+    }
+    Ok(Json(report))
+}
+
+/// Mail memories still encoded, read again from the local archives.
+async fn repair_mail(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(body): Json<RepairMailBody>,
+) -> Result<Json<Value>, ApiError> {
+    repair_allowed(&state, &auth)?;
+    run_repair(
+        state,
+        body.apply,
+        body.allow_older_nodes,
+        crate::repair::plan_mail,
+    )
+    .await
+}
+
+/// Calendar events read again from the owner's .ics files.
+async fn repair_calendar(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(body): Json<RepairCalendarBody>,
+) -> Result<Json<Value>, ApiError> {
+    repair_allowed(&state, &auth)?;
+    if body.files.is_empty() {
+        return Err(bad_request("name at least one calendar file"));
+    }
+    let files = body.files;
+    run_repair(state, body.apply, body.allow_older_nodes, move |s| {
+        crate::repair::plan_calendar(s, &files)
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct RepairExportBody {
+    #[serde(default)]
+    apply: bool,
+    #[serde(default)]
+    allow_older_nodes: bool,
+    /// The export on this node's disk: a folder or a zip (an Apple Health
+    /// export: also its `export.xml`). An absolute path.
+    path: String,
+}
+
+/// The export a repair reads: an absolute path that exists on this node.
+fn export_path(body: &RepairExportBody) -> Result<std::path::PathBuf, ApiError> {
+    let path = std::path::PathBuf::from(body.path.trim());
+    if !path.is_absolute() {
+        return Err(bad_request(
+            "name the export by its full path on this node's disk",
+        ));
+    }
+    if !path.exists() {
+        return Err(bad_request(format!("no such file: {}", path.display())));
+    }
+    Ok(path)
+}
+
+/// Conversations read again from the owner's ChatGPT export.
+async fn repair_chatgpt(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(body): Json<RepairExportBody>,
+) -> Result<Json<Value>, ApiError> {
+    repair_allowed(&state, &auth)?;
+    let path = export_path(&body)?;
+    run_repair(state, body.apply, body.allow_older_nodes, move |s| {
+        crate::repair::plan_chatgpt(s, &path)
+    })
+    .await
+}
+
+/// Day summaries and workouts read again from the owner's Apple Health
+/// export.
+async fn repair_health(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(body): Json<RepairExportBody>,
+) -> Result<Json<Value>, ApiError> {
+    repair_allowed(&state, &auth)?;
+    let path = export_path(&body)?;
+    run_repair(state, body.apply, body.allow_older_nodes, move |s| {
+        crate::repair::plan_health(s, &path)
+    })
+    .await
+}
+
+/// Growing sources' days and sessions stored under an unversioned base,
+/// re-minted from their stored text.
+async fn repair_copies(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(body): Json<RepairMailBody>,
+) -> Result<Json<Value>, ApiError> {
+    repair_allowed(&state, &auth)?;
+    run_repair(
+        state,
+        body.apply,
+        body.allow_older_nodes,
+        crate::repair::plan_copies,
+    )
+    .await
+}
+
+/// Photo days whose text no longer matches their photos, re-minted.
+async fn repair_photo_days(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(body): Json<RepairMailBody>,
+) -> Result<Json<Value>, ApiError> {
+    repair_allowed(&state, &auth)?;
+    run_repair(
+        state,
+        body.apply,
+        body.allow_older_nodes,
+        crate::repair::plan_photo_days,
+    )
+    .await
+}
+
+/// The runs, newest first, with this node's state of each.
+async fn repairs_list(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    repair_allowed(&state, &auth)?;
+    let pending: std::collections::HashSet<String> =
+        state.store.repairs_pending_here()?.into_iter().collect();
+    let runs: Vec<Value> = state
+        .store
+        .repair_runs(200)?
+        .into_iter()
+        .map(|r| {
+            let here = if pending.contains(&r.id) {
+                "settling"
+            } else if r.undone_at.is_some() {
+                "undone"
+            } else {
+                "applied"
+            };
+            let mut v = json!(r);
+            v["state"] = json!(here);
+            v
+        })
+        .collect();
+    Ok(Json(json!({"repairs": runs})))
+}
+
+/// Undo a run: the memories it replaced are back in view here and —
+/// through the synced run — on every other node. What it added stays. Not
+/// while a repair runs here (it could be this run, still landing).
+async fn repair_undo(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    repair_allowed(&state, &auth)?;
+    let run = state
+        .store
+        .repair_run(&id)?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such repair".into()))?;
+    let store = state.store.clone();
+    let home = state.home.clone();
+    let undone = crate::scoped::spawn_blocking(move || -> anyhow::Result<Option<usize>> {
+        let Some(_one) = crate::repair::try_start(&home) else {
+            return Ok(None);
+        };
+        store
+            .repair_undo(&home, &Actor::new("human:owner"), &id)
+            .map(Some)
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| bad_request(format!("{e:#}")))?
+    .ok_or_else(|| {
+        ApiError(
+            StatusCode::CONFLICT,
+            "a repair is running on this node — undo it when it ends".into(),
+        )
+    })?;
+    crate::bus::touch(&state, "operational.changed");
+    Ok(Json(
+        json!({"undone": run.id, "restored": undone, "added_stay": run.added}),
+    ))
+}
+
+/// Peer: repair runs since a cursor.
+async fn sync_repairs_get(
+    State(state): State<AppState>,
+    Query(params): Query<NotifSinceParams>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+) -> Result<Json<Value>, ApiError> {
+    require_scope(&auth, "peer")?;
+    Ok(Json(state.store.repairs_sync_export(&params.since)?))
+}
+
+/// Peer: take the other node's runs; settle what changed here.
+async fn sync_repairs_post(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthInfo>,
+    Json(batch): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    require_scope(&auth, "peer")?;
+    let changed = state.store.repairs_sync_apply(&batch)?;
+    if !changed.is_empty() {
+        let background = state.clone();
+        tokio::spawn(async move {
+            crate::repair::catch_up(&background).await;
+        });
+    }
+    Ok(Json(json!({"applied": changed.len()})))
+}
+
 async fn sync_agents_get(
     State(state): State<AppState>,
     Query(params): Query<NotifSinceParams>,
@@ -15716,6 +16902,8 @@ async fn plugin_mail_drafts(
             format!("{plugin} wasn't given {}", crate::mail_drafts::SCOPE),
         ));
     }
+    // while mail is held no draft is shown (it carries a message's subject)
+    held_mail_read(&state);
     let drafts: Vec<Value> = state
         .store
         .mail_drafts(None, Some(&format!("plugin:{plugin}")), 100)?

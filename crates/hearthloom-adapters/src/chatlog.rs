@@ -45,7 +45,7 @@ pub fn read(path: &Path, scope: Option<&str>) -> Result<crate::openai::ExportRea
 }
 
 /// The account owner a Claude export names in the `users.json` beside it.
-fn owner_of(path: &Path) -> Option<(String, String)> {
+pub(crate) fn owner_of(path: &Path) -> Option<(String, String)> {
     path.parent()
         .map(|dir| dir.join("users.json"))
         .filter(|p| p.exists())
@@ -229,6 +229,16 @@ fn claude_conversation(
         scope,
         owner,
     ))
+}
+
+/// A ChatGPT conversation as this route stores it, with no scope passed
+/// (a conversation flagged "do not remember" is private): what
+/// `openai::read_routes` compares a stored `chatlog-chatgpt` copy with.
+pub(crate) fn single_file_draft(
+    conversation: &Value,
+    owner: Option<&(String, String)>,
+) -> Result<Option<EpisodeDraft>> {
+    chatgpt_conversation(conversation, None, owner, &mut Vec::new())
 }
 
 /// A ChatGPT conversation, read by the export adapter's reader

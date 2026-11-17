@@ -272,7 +272,10 @@ impl GrowingCopy {
 
 impl Store {
     /// The fullest stored copy of `base` of a growing source, in any state
-    /// (see [`GrowingCopy`]). One indexed lookup; the base's text is read
+    /// (see [`GrowingCopy`]) — except a copy an owner repair run re-minted
+    /// and that run was undone (store/repair.rs): it stands behind the copy
+    /// in view, so a read holding as much is new here
+    /// ([`revive_undone_copy`]). One indexed lookup; the base's text is read
     /// after the store is released.
     pub fn growing_latest(
         &self,
@@ -282,7 +285,13 @@ impl Store {
     ) -> Result<Option<GrowingCopy>> {
         let copies = {
             let conn = self.lock();
-            copies_of(&conn, source, base)?
+            let mut kept = Vec::new();
+            for copy in copies_of(&conn, source, base)? {
+                if !super::repair::undone_copy(&conn, &copy.id)? {
+                    kept.push(copy);
+                }
+            }
+            kept
         };
         Ok(copies
             .into_iter()
@@ -307,6 +316,8 @@ struct Related {
 /// before it is inserted (`apply_batch`).
 pub(crate) struct Arriving {
     rank: Rank,
+    /// The id its base (`<base>`) has, stored here or not.
+    base_id: String,
     /// The other copies of its day or session.
     copies: Vec<Related>,
     /// A Chrome day keyed by its profile: the days stored under the
@@ -369,6 +380,7 @@ impl Arriving {
         }
         Ok(Some(Arriving {
             rank,
+            base_id: crate::ids::episode_id(source, base),
             copies,
             held,
             holders,
@@ -424,14 +436,31 @@ impl Arriving {
     /// After the copy `episode_id` is inserted: when a standing copy (its
     /// own, or a profile day holding it) holds more, it lands behind that
     /// one; otherwise every standing copy it outranks goes behind it — a
-    /// retired one once its retirement is undone.
-    pub(crate) fn settle(&self, conn: &Connection, episode_id: &str) -> Result<()> {
+    /// retired one once its retirement is undone. A copy an undone repair
+    /// run re-minted (`undone`, store/repair.rs) lands behind the fullest
+    /// standing copy whatever it holds — none being here yet, behind the
+    /// base's id, so the base arriving later stands and it never does — and
+    /// puts none behind itself.
+    pub(crate) fn settle(&self, conn: &Connection, episode_id: &str, undone: bool) -> Result<()> {
         let best = |set: &[Related]| {
             set.iter()
                 .filter(|r| r.stored.standing())
                 .max_by(|a, b| a.rank.cmp(&b.rank))
                 .map(|r| (r.rank.clone(), r.stored.id.clone()))
         };
+        if undone {
+            let ahead = best(&self.copies)
+                .or_else(|| best(&self.holders))
+                .map(|(_, id)| id)
+                .or_else(|| (self.base_id != episode_id).then(|| self.base_id.clone()));
+            if let Some(ahead) = ahead {
+                conn.execute(
+                    "UPDATE episodes SET superseded_by = ?1 WHERE id = ?2",
+                    params![ahead, episode_id],
+                )?;
+            }
+            return Ok(());
+        }
         let ahead = best(&self.copies)
             .filter(|(rank, _)| *rank > self.rank)
             .or_else(|| best(&self.holders))
@@ -462,6 +491,119 @@ impl Arriving {
     }
 }
 
+/// A read of this node's own files (`apply_batch`, not a peer's or a
+/// repair's batch) named `<base>#r<n>`, a ref an owner repair run took
+/// for a copy holding `n` items and that run was undone: the copy stands
+/// behind the copy in view, and the read can't land under the taken ref.
+/// The read holds at least `n` items, so the copy stands again by the
+/// growing rule — as the read itself would have, had the run never been
+/// made. A retired copy, or one standing behind something outside its
+/// record, is left. The read is recorded (`repair::record_revived`) and
+/// travels with the run, so every node puts the copy back the same way —
+/// only this node can read the files that hold it. Returns whether it
+/// changed.
+pub(crate) fn revive_undone_copy(
+    conn: &Connection,
+    home: &Home,
+    draft: &crate::ingest::EpisodeDraft,
+) -> Result<bool> {
+    let Some((_, n)) = growing_copy(&draft.source, &draft.source_ref) else {
+        return Ok(false);
+    };
+    if n == 0 || growing_items(&draft.source, &draft.body).is_none_or(|have| have < n) {
+        return Ok(false);
+    }
+    let id = crate::ids::episode_id(&draft.source, &draft.source_ref);
+    if !super::repair::undone_copy(conn, &id)? {
+        return Ok(false);
+    }
+    let Some(changed) = stand_by_rule(conn, home, &id, Some(&draft.body))? else {
+        return Ok(false);
+    };
+    super::repair::record_revived(conn, &id)?;
+    Ok(changed)
+}
+
+/// Put the copy `id`, standing behind another copy of its own day or
+/// session (or behind the id of its base, not stored here yet), where the
+/// growing rule puts it — in view when it holds the most, the copies it
+/// outranks behind it. A retired copy, or one standing behind something
+/// outside its record, is left (None). `fallback`: its
+/// text, if its raw file can't be read. Returns whether where it stands
+/// changed.
+fn stand_by_rule(
+    conn: &Connection,
+    home: &Home,
+    id: &str,
+    fallback: Option<&str>,
+) -> Result<Option<bool>> {
+    let row: Option<(String, String, Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT source, source_ref, superseded_by, content_ref FROM episodes /* all-episodes: a copy behind another, by design */
+             WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    let Some((source, source_ref, Some(behind), content_ref)) = row else {
+        return Ok(None);
+    };
+    if behind.starts_with(super::retire::RETIRED_PREFIX) {
+        return Ok(None);
+    }
+    let Some(body) = content_ref
+        .and_then(|rel| std::fs::read_to_string(home.root().join(rel)).ok())
+        .or_else(|| fallback.map(String::from))
+    else {
+        return Ok(None);
+    };
+    let Some(arriving) = Arriving::read(conn, home, &source, &source_ref, &body)? else {
+        return Ok(None);
+    };
+    // behind another copy of its record — or behind its base's id, the base
+    // not having reached this node (an undone copy waits there, and the
+    // base arriving later is placed against it by the growing rule)
+    if behind != arriving.base_id && !arriving.copies.iter().any(|r| r.stored.id == behind) {
+        return Ok(None);
+    }
+    conn.execute(
+        "UPDATE episodes SET superseded_by = NULL WHERE id = ?1",
+        [id],
+    )?;
+    arriving.settle(conn, id, false)?;
+    let now: Option<String> = conn.query_row(
+        "SELECT superseded_by FROM episodes /* all-episodes: where a copy stands now */ WHERE id = ?1",
+        [id],
+        |r| r.get(0),
+    )?;
+    Ok(Some(now.as_deref() != Some(behind.as_str())))
+}
+
+/// The copies of a growing source's `base` that a read put back in view on
+/// some node (`repair_revived`) and that stand behind another copy here:
+/// placed by the growing rule, as that read placed them there. Returns how
+/// many were placed.
+pub(crate) fn restore_revived(
+    conn: &Connection,
+    home: &Home,
+    source: &str,
+    base: &str,
+) -> Result<usize> {
+    if !GROWING_SOURCES.contains(&source) {
+        return Ok(0);
+    }
+    let mut placed = 0;
+    for copy in copies_of(conn, source, base)? {
+        if copy.superseded_by.is_none() || !super::repair::revived(conn, &copy.id)? {
+            continue;
+        }
+        if stand_by_rule(conn, home, &copy.id, None)? == Some(true) {
+            placed += 1;
+        }
+    }
+    Ok(placed)
+}
+
 /// The most copies one record's lookup gathers (a day or a session has a
 /// handful).
 const MAX_COPIES: usize = 256;
@@ -474,6 +616,10 @@ const MAX_COPIES: usize = 256;
 /// stored under the profile's shown name it took the place of), with
 /// theirs in turn.
 pub(crate) fn other_copies(conn: &Connection, episode_id: &str) -> Result<Vec<String>> {
+    // a repaired record (store/repair.rs): its base and replacements
+    if let Some(copies) = super::repair::other_copies(conn, episode_id)? {
+        return Ok(copies);
+    }
     let mut row = conn.prepare_cached(
         "SELECT source, source_ref, superseded_by FROM episodes /* all-episodes: one copy of a record */
          WHERE id = ?1",
@@ -548,8 +694,11 @@ pub(crate) fn other_copies(conn: &Connection, episode_id: &str) -> Result<Vec<St
 /// ([`other_copies`]) that isn't private takes the label with the same
 /// stamp — unless that copy was labelled since. A copy private already
 /// under an older stamp takes the newer one, so a later label sent for it
-/// alone is measured against the record's latest decision. Ids of other
-/// sources, and ones not private now, are passed over; a private label with
+/// alone is measured against the record's latest decision. A repaired
+/// record (a memory and the corrected copies that replaced it, store/
+/// repair.rs) is one record the same way, and so is a photo day (its base
+/// and its revisions, store/photo.rs). Ids of other sources, and ones
+/// not private now, are passed over; a private label with
 /// no stamp spreads stamped now, to copies that aren't private only (a
 /// stamp of its own would change on every call). The copies relabelled
 /// carry the stamp, so the scope leg takes the label to every node holding
@@ -574,13 +723,22 @@ pub(crate) fn spread_private(conn: &Connection, actor: &Actor, ids: &[String]) -
         let Some((source, scope, stamp)) = found else {
             continue;
         };
-        if scope != "private" || !GROWING_SOURCES.contains(&source.as_str()) {
+        let has_copies = GROWING_SOURCES.contains(&source.as_str())
+            || super::repair::REPAIRABLE_SOURCES.contains(&source.as_str())
+            || source == "photos";
+        if scope != "private" || !has_copies {
             continue;
         }
+        // a photo day's copies are its base and revisions (store/photo.rs)
+        let copies = if source == "photos" {
+            super::photo::other_day_copies(conn, id)?.unwrap_or_default()
+        } else {
+            other_copies(conn, id)?
+        };
         let stamped = stamp.is_some();
         let stamp = stamp.unwrap_or_else(now_utc);
         let mut relabeled = Vec::new();
-        for copy in other_copies(conn, id)? {
+        for copy in copies {
             if relabel.execute(params![copy, stamp, stamped])? > 0 {
                 relabeled.push(copy);
             }

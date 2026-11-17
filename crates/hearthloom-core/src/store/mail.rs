@@ -75,8 +75,14 @@ pub struct MailSeen {
     pub list_id: Option<String>,
     /// the start of its text (≤300 chars)
     pub snippet: String,
-    /// a privacy rule covers it, or its memory is labelled private
+    /// a privacy rule covers it, or its memory is labelled private — or
+    /// `held`
     pub private: bool,
+    /// Nothing says it's private, but its privacy can't be told: mail is
+    /// held (a private promotion an earlier version kept can't be told
+    /// apart from it). It reads as `private`, and is never recorded:
+    /// `mail_observe` refuses it.
+    pub held: bool,
     /// Gmail's labels for it (what an ember's watch can name)
     pub labels: Vec<String>,
     /// its readable text, for embers' watches (not stored on the thread)
@@ -85,7 +91,9 @@ pub struct MailSeen {
     /// Message-ID header (which can differ from `message_id`, a MIME
     /// parser's reading of it), and `message_id`. Empty when its memory is
     /// keyed by a hash of its text. Its privacy is read again by these
-    /// once the pull has made the memory (not stored on the thread).
+    /// once the pull has made the memory, and by triage before a model
+    /// reads its thread (kept in this node's thread index, v70 — not on
+    /// the thread).
     pub memory_refs: Vec<String>,
 }
 
@@ -239,6 +247,18 @@ fn rule_matches(rule: &MailRule, seen: &MailSeen) -> bool {
 }
 
 impl Store {
+    /// The SQL tail every reader of threads a viewer sees adds: the vault's
+    /// guard, and while mail is held (`mail_hidden`) nothing at all for a
+    /// viewer whose vault is locked — any thread can hold the message the
+    /// hold is for, and the hold relabels nothing.
+    fn mail_thread_guard(&self) -> String {
+        let mut guard = self.scope_guard("scope");
+        if self.mail_hidden() {
+            guard.push_str(" AND 0");
+        }
+        guard
+    }
+
     /// The owner's deterministic rule for this message, if any (first
     /// added wins).
     fn mail_rule_for(&self, seen: &MailSeen) -> Result<Option<MailRule>> {
@@ -256,12 +276,16 @@ impl Store {
     /// it joined becomes private too. Nothing here makes a thread
     /// un-private.
     pub fn mail_observe(&self, actor: &Actor, seen: &MailSeen) -> Result<Option<String>> {
+        if seen.held {
+            bail!("mail is held: a message whose privacy can't be told is not recorded");
+        }
         if seen.message_id.trim().is_empty() {
             return Ok(None);
         }
         let rule = self.mail_rule_for(seen)?;
         let now = now_utc();
         let conn = self.lock();
+        let refs = serde_json::to_string(&seen.memory_refs)?;
         let known: Option<String> = conn
             .query_row(
                 "SELECT thread_id FROM mail_thread_messages WHERE message_id = ?1",
@@ -270,6 +294,12 @@ impl Store {
             )
             .optional()?;
         if let Some(thread) = known {
+            // a message recorded before the index kept its memory's keys
+            conn.execute(
+                "UPDATE mail_thread_messages SET memory_refs = ?2
+                 WHERE message_id = ?1 AND memory_refs IS NULL",
+                [&seen.message_id, &refs],
+            )?;
             if !seen.private || !make_private(&conn, actor, &thread, &now)? {
                 return Ok(None);
             }
@@ -379,8 +409,9 @@ impl Store {
             }
         }
         conn.execute(
-            "INSERT OR IGNORE INTO mail_thread_messages (message_id, thread_id) VALUES (?1, ?2)",
-            [&seen.message_id, &id],
+            "INSERT OR IGNORE INTO mail_thread_messages (message_id, thread_id, memory_refs)
+             VALUES (?1, ?2, ?3)",
+            [&seen.message_id, &id, &refs],
         )?;
         super::journal_row(&conn, actor, "mail_thread", "mail_threads", &id, "update")?;
         Ok(Some(id))
@@ -389,7 +420,7 @@ impl Store {
     /// Threads in these states (all when empty), newest first, as the
     /// vault allows.
     pub fn mail_threads(&self, states: &[&str], limit: usize) -> Result<Vec<MailThread>> {
-        let guard = self.scope_guard("scope");
+        let guard = self.mail_thread_guard();
         let conn = self.lock();
         let filter = if states.is_empty() {
             String::new()
@@ -414,7 +445,7 @@ impl Store {
     }
 
     pub fn mail_thread(&self, id: &str) -> Result<Option<MailThread>> {
-        let guard = self.scope_guard("scope");
+        let guard = self.mail_thread_guard();
         let conn = self.lock();
         conn.query_row(
             &format!("SELECT {THREAD_COLS} FROM mail_threads WHERE id = ?1{guard}"),
@@ -447,14 +478,27 @@ impl Store {
         accounts: &[String],
         unwatched: Option<&[String]>,
     ) -> Result<Vec<MailThread>> {
+        self.mail_threads_to_triage_from(0, limit, accounts, unwatched)
+    }
+
+    /// `mail_threads_to_triage_for`, past the first `skip` of them: triage
+    /// pages past threads that wait (their mail can't be checked here yet).
+    pub fn mail_threads_to_triage_from(
+        &self,
+        skip: usize,
+        limit: usize,
+        accounts: &[String],
+        unwatched: Option<&[String]>,
+    ) -> Result<Vec<MailThread>> {
         let conn = self.lock();
-        let (filter, params) = account_filter(accounts, unwatched, 2);
+        let (filter, params) = account_filter(accounts, unwatched, 3);
         let mut stmt = conn.prepare(&format!(
             "SELECT {THREAD_COLS} FROM mail_threads
              WHERE state = 'new' AND scope != 'private' AND {filter}
-             ORDER BY last_at LIMIT ?1"
+             ORDER BY last_at, id LIMIT ?1 OFFSET ?2"
         ))?;
-        let mut all: Vec<rusqlite::types::Value> = vec![(limit as i64).into()];
+        let mut all: Vec<rusqlite::types::Value> =
+            vec![(limit as i64).into(), (skip as i64).into()];
         all.extend(params);
         let rows = stmt.query_map(rusqlite::params_from_iter(all), thread_from_row)?;
         rows.collect::<std::result::Result<_, _>>()
@@ -519,6 +563,44 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// The messages this node has seen in a thread, each with the keys its
+    /// memory can be stored under (`MailSeen::memory_refs`; empty: keyed by
+    /// a hash of its text; None: recorded before v70 kept them, or
+    /// unreadable — the message id alone is known).
+    pub fn mail_thread_message_keys(
+        &self,
+        thread_id: &str,
+    ) -> Result<Vec<(String, Option<Vec<String>>)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT message_id, memory_refs FROM mail_thread_messages WHERE thread_id = ?1",
+        )?;
+        let rows = stmt.query_map([thread_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, refs) = row?;
+            let refs = refs.and_then(|r| serde_json::from_str::<Vec<String>>(&r).ok());
+            out.push((id, refs));
+        }
+        Ok(out)
+    }
+
+    /// Keep the keys a message's memory can be stored under, for a message
+    /// recorded before the index kept them (`memory_refs` NULL); a message
+    /// that has them keeps them.
+    pub fn mail_thread_message_set_refs(&self, message_id: &str, refs: &[String]) -> Result<()> {
+        let refs = serde_json::to_string(refs)?;
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE mail_thread_messages SET memory_refs = ?2
+             WHERE message_id = ?1 AND memory_refs IS NULL",
+            [message_id, refs.as_str()],
+        )?;
+        Ok(())
+    }
+
     /// The owner moves a thread (done, not needed, needs a reply after all…).
     pub fn mail_set_state(&self, actor: &Actor, id: &str, state: &str) -> Result<MailThread> {
         if !MAIL_STATES.contains(&state) {
@@ -551,7 +633,7 @@ impl Store {
 
     /// How many threads are in each state (as the vault allows).
     pub fn mail_counts(&self) -> Result<Vec<(String, i64)>> {
-        let guard = self.scope_guard("scope");
+        let guard = self.mail_thread_guard();
         let conn = self.lock();
         let mut stmt = conn.prepare(&format!(
             "SELECT state, COUNT(*) FROM mail_threads WHERE 1=1{guard} GROUP BY state"

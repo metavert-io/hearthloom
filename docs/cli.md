@@ -490,6 +490,149 @@ hearthloom recall --entity "Acme Corp"
 
 Episodes with provenance for a time window or an entity.
 
+### `repair` — replace memories an earlier version stored wrongly
+
+```
+hearthloom vault unlock --minutes 15
+hearthloom repair mail                            # dry run: what would change
+hearthloom repair mail --apply                    # replace them
+hearthloom repair calendar --file work.ics --file home.ics          # dry run
+hearthloom repair calendar --file work.ics --file home.ics --apply
+hearthloom repair chatgpt --export ~/Downloads/chatgpt-export.zip   # dry run
+hearthloom repair health --export ~/Downloads/export.zip --apply
+hearthloom repair copies                          # count first, then --apply
+hearthloom repair photo-days --apply
+hearthloom repair list                            # runs, newest first
+hearthloom repair undo rp_…                       # what undoing it means
+hearthloom repair undo rp_… --yes                 # put a run's memories back
+```
+
+Importing again can't fix a memory an earlier version stored wrongly: a
+stored ref keeps its first text, and a retired one never lands again. A
+repair reads the original again with the current importer and lands a
+corrected copy that takes the memory's place — its label (private stays
+private), its retirement, and the links the extraction pass found carry
+over; the old copy stays in the record behind it.
+
+- `mail` — mail memories still encoded (an encoded subject or name, a
+  base64 or quoted-printable body, raw MIME parts). Each message's
+  original is read from an archive this node holds (the Takeout's, each
+  connected mailbox's live archive) and decoded, keeping the labels the
+  memory was made under. A Message-ID is the sender's choice and an
+  archive can hold several messages under one, so every archived copy
+  under it is read: the original is a copy outside Spam and Trash with
+  the memory's date and sender, and when such copies read differently the
+  memory is left (`ambiguous`). A message no local archive holds, or one
+  with no Message-ID, is listed and left, and so is every message while an
+  archive can't be read — its index out of date or unreadable, or its
+  drive not connected (`archive_error`; the notes name the archive). Run
+  it on the node that holds the archives.
+- `calendar --file <ics>…` — the files read by the current importer
+  (they're sent to the node, so `--url` works): an event the .ics
+  importer stored whose text differs (an alarm's attendee or description
+  taken in, a time read another way) is replaced, an occurrence not
+  stored yet is imported, and an event an earlier importer stored under
+  another ref is found by its UID and start — never imported a second
+  time. A stored event whose own UID only begins the same way
+  (`meeting#…` for `meeting`) is another event and is left; one that
+  can't be told apart is listed (`unmatched`) and neither replaced nor
+  imported. An event your phone's calendar feed stored (same UID, its own
+  shape and times), or one whose writer this node didn't record, is
+  listed and left (`other_writer`).
+- `chatgpt --export <folder|zip>` — a ChatGPT export (holding
+  `conversations.json` or `conversations-NNN.json`) read again with the
+  current reader. Earlier versions sorted every message of a conversation
+  by time, so answers you regenerated and prompts you edited were mixed
+  into the transcript; a stored conversation (imported from the full
+  export or from its single file) whose transcript has turns off the
+  branch it ended on is replaced by that branch — only when the export
+  holds every turn the stored transcript shows. One stored from a later
+  export (the conversation continued since, or its images named
+  otherwise), or one whose only difference is its title, is listed and
+  left (`other_export`): give the newest export. A conversation you flagged
+  "do not remember" ends private, whether or not its text changes (the
+  single-file route used to ignore the flag) — it goes into the vault
+  before its corrected copy lands; an undo doesn't take it out. A stored
+  conversation the export doesn't hold is listed and left.
+- `health --export <export.zip|export.xml|folder>` — an Apple Health
+  export read again (a zip is read in place, never unpacked). Earlier
+  versions averaged readings in different units as one number, read
+  workout distances in metres as kilometres, and added up sleep from
+  several trackers; a stored day summary or workout whose text differs is
+  replaced. Days and workouts the export doesn't cover are listed and
+  left, and so is the day the export was made on (only part of it is in
+  the export), and a day that shows a tracker or a measure the export
+  doesn't hold for it — body fat beside a weight, exercise minutes beside
+  steps (`other_export` — read from a later export). A night is shown as
+  one tracker recorded it, so deep or REM hours another tracker added are
+  dropped from a day when the export holds them from that tracker.
+  Workouts the phone sent are left alone.
+- `copies` — Chrome days, iMessage chat-days and Claude Code sessions an
+  earlier version stored under an unversioned ref. Each node kept the text
+  that reached it first, so two nodes can show different texts of one
+  day. A run re-mints each such day once as a copy named by what it holds
+  (`<ref>#r<count>`), from the stored text — the original files aren't
+  read — and every node shows the fullest copy. The dry run gives the
+  count first: each re-mint is a new episode on every node, and iMessage
+  days are read again by the extraction pass (the model cost line). Your
+  other nodes re-mint their own copies when the run reaches them at their
+  next sync. Two copies holding the same count with different texts can't
+  be told apart and stay as each node has them. After an undo, the next
+  local read of such a day puts the run's copy back in view when it holds
+  as much — on your other nodes too, at their next sync.
+- `photo-days` — photo days minted while a photo was stored twice (an
+  earlier Mac scan's key next to the phone's) show it twice and keep an
+  inflated count, and the day was only minted again once it grew past it.
+  A day is re-minted under its next revision, its count put right, only
+  when its count is inflated (it shows a photo twice, or its count here
+  keeps photos stored here out) and the photos this node holds (each by
+  its current name and the names it had before) cover every photo the day
+  shows and every place it names — so a day another node minted with more
+  photos is listed and left. Two photos shown under one name in the same
+  minute count as two. A day that reads otherwise for another reason
+  (a place read since, another order) is only counted. A day that already
+  reads right but whose count here is off has only its count put right.
+  Each of your other nodes checks the corrected day against its own copy
+  when it arrives, and again when the day's photos reach it (from another
+  node, or from its own Mac scan or the phone): where its
+  copy shows a photo the correction lacks, its copy stays in view, and
+  where the day is private, the correction is private too.
+
+`chatgpt` and `health` read the export on the node's machine (they refuse
+`--url`); the corrected copies reach your other nodes at their next sync.
+
+Every run is a dry run unless `--apply`; it prints counts, episode ids and
+a short reason for each, never what a message, an event, a conversation
+or a day says (`--json` lists every finding), how many new copies the
+extraction pass would read (mail, calendar and health extraction are off
+by default; ChatGPT conversations and iMessage days are on), and how many
+new episodes the run makes: each is also new to the goal matching, and a
+copy that matches one of your goals goes to the cascade pass (one model
+call a cycle, for up to 6 matches). Owner only, with the vault unlocked;
+one run (or undo) at a time per node. Applying again changes nothing.
+
+`undo` brings the replaced memories back in view on this node and, at
+their next sync, on your other nodes — for `copies` and `photo-days`, the
+copy that stood before the run (and the photo day's count; the day's next
+revision goes past the run's) — and a copy
+that arrives later from an undone run stays behind; what a calendar run
+added stays (retire it like any memory). It can't be taken back: a later
+repair finds the same corrections "repaired before and undone" and leaves
+them until the importer reads the originals differently, so `undo` only
+says so unless you add `--yes`.
+
+Upgrade every node first. A node older than this release doesn't know
+the rule: it keeps each corrected copy as a second memory in view beside
+the old one — even where the old one is retired, or private on that node
+alone — doesn't re-mint its own copies for `copies`, and as a hub it
+doesn't pass an undo between your other nodes. Every node publishes
+whether it knows repairs in the node list; the dry run names any node
+seen in the last 30 days that doesn't, and `--apply` is refused while
+there is one, unless you add `--allow-older-nodes` (for a node you know
+is gone). Once it is upgraded, the run reaches it and it settles the
+records: the old copies go behind the corrected ones, and private labels
+and retirements hold for both.
+
 ### `scope` — correct scope labels
 
 ```

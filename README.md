@@ -441,6 +441,17 @@ filtered fallback.
   prior state; Undo (the toast, the card, or Memories → Retired) puts all
   of it back. Retirements travel to your other nodes, and anything that
   arrives later from a retired source lands retired.
+- **Repairs** (`hearthloom repair`, owner only, vault unlocked) fix what
+  an earlier version stored wrongly — mail left encoded, calendar events
+  that took in their alarm's text, ChatGPT transcripts with abandoned
+  branches mixed in, Apple Health days read in the wrong units — by
+  reading the original again and putting a corrected copy in the memory's
+  place (label, retirement and extracted links carried over; the old copy
+  kept behind it); and re-mint Chrome, iMessage and Claude Code days that
+  differ between nodes, and photo days counted with duplicate photos. A
+  dry run unless `--apply`, and one undo per run (it can't be taken
+  back). Upgrade every node first: applying waits until each node you
+  used in the last 30 days knows repairs. See `docs/cli.md`.
 
 ### How it got here — provenance (0.5.78)
 - **Every memory says where it came from.** Expand any memory (Day view,
@@ -661,6 +672,10 @@ hearthloom recall 2026-06-14                   # a day, with provenance
 hearthloom query "what changed in my sleep since March?"   # the RLM (spends tokens)
 hearthloom scope --by-source imessage personal # relabel scopes
 hearthloom ingest git ~/myrepo                 # adapters; also mbox/ics/…
+hearthloom repair mail                         # memories stored still encoded (dry run; --apply)
+hearthloom repair calendar --file cal.ics      # events that took in alarm text; undo: repair undo <run> --yes
+hearthloom repair chatgpt --export chatgpt.zip # transcripts with abandoned branches; also: health --export
+hearthloom repair copies                       # days stored differently on each node; also: photo-days
 hearthloom quarantine list                     # the human gate for agent writes
 ```
 
