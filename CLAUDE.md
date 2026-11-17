@@ -36,6 +36,19 @@ Linux job, a shell-out to a macOS-only tool (`ditto`, `launchctl`,
 Dependabot uses, misses most RustSec advisories, so a red audit is the
 signal to `cargo update -p <crate>`.
 
+**CodeQL false positives.** CodeQL treats every argument of an axum
+handler as outside input, the server's own `State` too, so a path built
+on the home folder read as user-controlled wherever a handler reached a
+file read (most of the path-injection alerts dismissed before
+2026-11-17). The model pack in `.github/codeql/extensions/hearthloom-models/`
+(code scanning loads it by itself) marks what `Home`'s folder methods
+return as safe for path injection; a new `Home` method that returns a
+folder gets a row there. Path parts that come from a request are still
+tracked. The logging query flags a value whose NAME sounds sensitive
+(`uid`, user id, session id, account, token, password, health terms)
+once it reaches a printed or logged message, test assertion messages
+and numbers included, so tests don't name variables that way.
+
 Deploying: `cargo build --release && install -m 755 target/release/hearthloom
 ~/.local/bin/hearthloom && launchctl kickstart -k "gui/$(id -u)/com.hearthloom.daemon"`.
 The daemon runs under launchd on the developer's machine — deploy after changes or

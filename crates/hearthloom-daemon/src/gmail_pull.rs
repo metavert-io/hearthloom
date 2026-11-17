@@ -1485,11 +1485,11 @@ mod tests {
         let privacy = crate::virtual_source::MailPrivacy::new(&state);
         let core = LabelFilter::core_strata();
         let [filled, too_long] = links_past_the_room();
-        for (uid, html) in [(1, &filled), (2, &too_long)] {
-            let m = html_mail(uid, &format!("cut{uid}@x"), &["Category Personal"], html);
+        for (n, html) in [(1, &filled), (2, &too_long)] {
+            let m = html_mail(n, &format!("cut{n}@x"), &["Category Personal"], html);
             let draft = pulled_draft(&privacy, &core, &m).unwrap().unwrap();
-            assert!(!draft.body.contains("clinic-one"), "uid {uid}: left out");
-            assert_eq!(draft.scope.as_deref(), Some("private"), "uid {uid}");
+            assert!(!draft.body.contains("clinic-one"), "message {n}: left out");
+            assert_eq!(draft.scope.as_deref(), Some("private"), "message {n}");
         }
         // a message no rule matches keeps its scope inferred
         let other = html_mail(

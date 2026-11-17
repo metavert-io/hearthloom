@@ -1,0 +1,26 @@
+# The node's own folders are not outside input.
+#
+# CodeQL treats every argument of an axum handler as remote input, the
+# server's own `State` included, so a path built on the home folder that
+# `State` carries (`state.home.root().join(...)`) reads as user-controlled
+# wherever a handler reaches a file read. The home folder is fixed at
+# startup (HEARTHLOOM_HOME, else ~/.hearthloom) and never comes from a
+# request. These rows mark what `Home`'s folder methods return as a barrier
+# for path injection. A path segment that does come from a request is still
+# tracked: only these return values are barriers, not what is joined onto
+# them.
+extensions:
+  - addsTo:
+      pack: codeql/rust-all
+      extensible: barrierModel
+    data:
+      - ["<hearthloom_core::paths::Home>::root", "ReturnValue", "path-injection", "manual"]
+      - ["<hearthloom_core::paths::Home>::db_path", "ReturnValue", "path-injection", "manual"]
+      - ["<hearthloom_core::paths::Home>::raw_dir", "ReturnValue", "path-injection", "manual"]
+      - ["<hearthloom_core::paths::Home>::config_dir", "ReturnValue", "path-injection", "manual"]
+      - ["<hearthloom_core::paths::Home>::brain_index_path", "ReturnValue", "path-injection", "manual"]
+      - ["<hearthloom_core::paths::Home>::models_dir", "ReturnValue", "path-injection", "manual"]
+      - ["<hearthloom_core::paths::Home>::inbox_dir", "ReturnValue", "path-injection", "manual"]
+      - ["<hearthloom_core::paths::Home>::notes_dir", "ReturnValue", "path-injection", "manual"]
+      - ["<hearthloom_core::paths::Home>::notes_media_dir", "ReturnValue", "path-injection", "manual"]
+      - ["<hearthloom_core::paths::Home>::daemon_log_path", "ReturnValue", "path-injection", "manual"]
