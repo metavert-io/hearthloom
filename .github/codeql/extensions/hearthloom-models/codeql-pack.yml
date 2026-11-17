@@ -1,0 +1,11 @@
+# CodeQL model pack: facts about this repository's own code that CodeQL
+# can't work out by itself. Code scanning picks up packs in
+# .github/codeql/extensions automatically. See models/ for each model and
+# why it is true.
+name: metavert-io/hearthloom-models
+version: 0.0.1
+library: true
+extensionTargets:
+  codeql/rust-all: "*"
+dataExtensions:
+  - models/*.model.yml
