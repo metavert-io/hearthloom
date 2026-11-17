@@ -104,7 +104,15 @@ const seriesCache = new Map();
 /// (`mmol<180.15…>/L`), which the label leaves out.
 function unitOf(metric) {
   const named = seriesCache.get(metric.id)?.unit;
-  return named ? named.replace(/<[^>]*>/g, "") : metric.unit;
+  if (!named) return metric.unit;
+  // drop each "<…>" note, as a label shows it (it is shown as text)
+  let unit = named;
+  for (let open = unit.indexOf("<"); open >= 0; open = unit.indexOf("<", open)) {
+    const close = unit.indexOf(">", open);
+    if (close < 0) break;
+    unit = unit.slice(0, open) + unit.slice(close + 1);
+  }
+  return unit;
 }
 
 export async function loadSeries(metric) {
