@@ -2175,7 +2175,8 @@ the design log 2026-07-14.
   quoted, any case, comments or whitespace as SQLite's tokenizer reads it
   (a vertical tab within a run, a U+FEFF where a token would begin) before
   the dot — and ATTACH, either of which reaches the tables behind the
-  views: `names_another_schema`),
+  views: `names_another_schema` — and every other table judged by its
+  class through SQLite's authorizer: see "Raw SQL" below),
   with zero leakage (no "N hidden"). Ask history/detail (v9): an ask run
   while unlocked is flagged `ask_log.sensitive` and hides again while
   locked (its answer/transcript can quote private episodes). Persisted
@@ -2241,6 +2242,47 @@ home-root entry that holds secrets or steers the node must be classified
   — a user mid-shutdown or in a grace period can unlock and take their
   data; the killswitch screen carries the unlock→prepare→download path.
   `killswitch.allow_export` is stored but no longer gates anything.
+
+## Raw SQL (the read classification — never bypass it)
+
+`Store::read_query` / `read_query_public` (`/v1/sql`, Ask's `sql` and
+`map`) read only what each table's class allows, enforced by SQLite's
+authorizer while the query is prepared and run
+(`hearthloom-core/src/store/raw_sql.rs`), never by reading the SQL text:
+- Every DB table must be classified in `raw_sql.rs::RAW_SQL_CLASSES`
+  (SQLite's own in `SQLITE_TABLES`) as **Filtered** (a shadow view in
+  `VAULT_SHADOW_VIEWS` — while locked, and always for `read_query_public`,
+  read only through it), **Open** (nothing private, nothing secret),
+  **Vault** (private content or text that can quote it, no exact filter:
+  only with the viewer's vault open, never for `read_query_public`;
+  refused, naming the table, otherwise) or **Never** (credentials,
+  secrets, sessions). Unsure → Vault. A virtual table's own tables
+  (`<vtab>_<suffix>`: FTS5 `_content`/`_data`/…, vec0 `_chunks`/…) are
+  Vault by rule (`internal_table_of`) — only those listed in
+  `INDEX_TABLES` (what the modules make for this store's declarations)
+  that SQLite also counts as shadow tables (`shadow` in `PRAGMA
+  table_list`). The label alone isn't proof: SQLite gives it to any table
+  with a suffix the module claims, made by the module or not (vec0 claims
+  `_auxiliary`; vec_chunks has none). One that merely shares the prefix
+  (vec0's `_vector_chunks00`, which vec0 doesn't claim), one with a
+  claimed suffix the module didn't make, and a new index's tables until
+  they are added to `INDEX_TABLES` need a class of their own. A table
+  named like an allowed table function (`json_each`) is judged as a
+  table, never as the function.
+  `test_every_table_is_classified_for_raw_sql` FAILS THE BUILD on an
+  unclassified table, a class naming no table, or an `INDEX_TABLES` name
+  that is no virtual table's shadow table in a new store; until
+  classified, the authorizer refuses it.
+- SQL functions are allowed or refused by name (`FUNCTIONS` /
+  `FUNCTIONS_REFUSED`, `test_every_sql_function_is_classified`); only the
+  schema/version pragmas in `PRAGMAS` and the table functions in
+  `TABLE_FUNCTIONS` run; transactions, ATTACH and writes never do.
+- A shadow view reads its tables through a CTE whose name is drawn
+  afresh per query (`ShadowViews`): the authorizer trusts a read as the
+  view's only behind that name, so a query's CTE named like a view gains
+  nothing. A new shadow view must name every table it reads as
+  `main.<table>`, with no `;` in its body and comments only on lines of
+  their own.
 
 ## Performance invariants (each encodes a fixed daemon-freeze — see
 the design log 2026-07-08 post-mortem)

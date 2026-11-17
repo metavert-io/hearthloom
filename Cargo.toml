@@ -33,7 +33,8 @@ reqwest = { version = "0.12", features = ["json", "blocking"] }
 # SENTRY_DSN (sealed env / machine env), and nothing sends without the
 # user's Settings consent — see daemon apm.rs.
 sentry = { version = "0.49", features = ["tracing", "tower", "tower-http", "tower-axum-matched-path", "anyhow"] }
-rusqlite = { version = "0.41.1", features = ["bundled"] }
+# `hooks`: the authorizer that decides what raw SQL may read (store/raw_sql.rs)
+rusqlite = { version = "0.41.1", features = ["bundled", "hooks"] }
 # Registered via sqlite3_auto_extension before any connection opens
 # (store/mod.rs) — composes with rusqlite's `bundled` feature.
 sqlite-vec = "0.1.6"

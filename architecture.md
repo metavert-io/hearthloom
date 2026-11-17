@@ -639,7 +639,10 @@ These spend no LLM tokens and are fully local.
   tables for the dashboard's workbench.
 - **Guarded SQL** (`Store::read_query`): read-only, single statement,
   row-capped, with the vault enforced by shadowing table names with
-  filtered temporary views.
+  filtered temporary views and by SQLite's authorizer, which holds every
+  table a query reads to its class in `store/raw_sql.rs` (filtered, open,
+  vault-only, never) and refuses writes, transactions, ATTACH, and any
+  pragma or function not listed there.
 
 ### 8.2 Ask: the deep-query engine
 

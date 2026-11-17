@@ -45,6 +45,7 @@ mod privacy;
 mod projects;
 mod provenance;
 mod quarantine;
+pub mod raw_sql;
 mod recall;
 mod relationships;
 mod repair;
@@ -118,6 +119,7 @@ pub use plugins::PluginRow;
 pub use privacy::{rules_match_text, PrivacyRule, PrivateMemory};
 pub use provenance::{others_words, trust_for, Hop, Origin, OTHERS_WORDS_SOURCES};
 pub use quarantine::{outside_proposal, QuarantineEntry, PROPOSAL_KINDS};
+pub use raw_sql::{RawSqlClass, RAW_SQL_CLASSES, SQLITE_TABLES};
 pub use recall::DayView;
 pub use relationships::{DirectoryRow, RelationshipRow, RELATIONSHIP_KINDS};
 pub use repair::{
@@ -493,7 +495,9 @@ const SCHEMA_V1: &str = "
 /// VIEWS instead of the base tables (temp schema resolves first). Episode/
 /// entity/edge material is scope-filtered; audit surfaces whose payloads
 /// may quote private content (mutations, ask_log) and the rules themselves
-/// read as empty. Created and dropped inside one connection lock.
+/// read as empty. Created and dropped inside one connection lock. Each table
+/// shadowed here is `Filtered` in raw_sql.rs `RAW_SQL_CLASSES`; every other
+/// table is read, or refused, by its class there.
 const VAULT_SHADOW_VIEWS: &str = "
     CREATE TEMP VIEW episodes AS
         SELECT * FROM main.episodes WHERE scope != 'private' AND superseded_by IS NULL;
@@ -581,6 +585,17 @@ const VAULT_SHADOW_VIEWS: &str = "
         JOIN main.episodes e ON e.id = o.episode_id
         JOIN main.self_model s ON s.id = o.seeking_id
         WHERE e.scope != 'private' AND s.sphere != 'private' AND e.superseded_by IS NULL;
+    -- goals scope by `sphere`, and a goal's watch queries and catches go with it
+    CREATE TEMP VIEW intents AS
+        SELECT * FROM main.intents WHERE sphere IS NOT 'private';
+    CREATE TEMP VIEW standing_queries AS
+        SELECT q.* FROM main.standing_queries q
+        WHERE q.intent_id IN (SELECT id FROM main.intents WHERE sphere IS NOT 'private');
+    CREATE TEMP VIEW intent_matches AS
+        SELECT m.* FROM main.intent_matches m
+        WHERE m.intent_id IN (SELECT id FROM main.intents WHERE sphere IS NOT 'private')
+          AND m.episode_id IN (SELECT id FROM main.episodes
+                               WHERE scope != 'private' AND superseded_by IS NULL);
     CREATE TEMP VIEW mutations AS SELECT * FROM main.mutations WHERE 0;
     CREATE TEMP VIEW quarantine AS SELECT * FROM main.quarantine WHERE 0;
     CREATE TEMP VIEW ask_log AS
@@ -643,6 +658,9 @@ const VAULT_SHADOW_DROP: &str = "
     DROP VIEW IF EXISTS temp.semantic_pairs;
     DROP VIEW IF EXISTS temp.mail_drafts;
     DROP VIEW IF EXISTS temp.mail_matches;
+    DROP VIEW IF EXISTS temp.intents;
+    DROP VIEW IF EXISTS temp.standing_queries;
+    DROP VIEW IF EXISTS temp.intent_matches;
 ";
 
 /// While mail is held (`Store::mail_held`), a read that hides private rows
@@ -2728,8 +2746,10 @@ impl Store {
         // table names (SQLite resolves the temp schema first), filtering
         // private rows; `main.`-qualified names would bypass the shadowing,
         // so they are rejected outright, in every spelling SQLite reads
-        // (`names_another_schema`). Views are dropped before the lock guard
-        // releases — writers on this connection never see them.
+        // (`names_another_schema`) — a first check; the authorizer below is
+        // the enforcement, and refuses such a read on its own. Views are
+        // dropped before the lock guard releases — writers on this
+        // connection never see them.
         if names_another_schema(trimmed) {
             return Err(anyhow::anyhow!(
                 "schema-qualified table names and ATTACH are not allowed"
@@ -2742,34 +2762,56 @@ impl Store {
                 "raw SQL is not available to an area-limited key"
             ));
         }
-        let conn = self.lock();
-        let shadowed = always_exclude_private || !self.private_visible();
-        conn.execute_batch(if shadowed {
+        let mut conn = self.lock();
+        let locked = !self.private_visible();
+        let shadowed = always_exclude_private || locked;
+        // while mail is held no thread is shown where private ones aren't
+        let held = shadowed && self.mail_held.load(std::sync::atomic::Ordering::SeqCst);
+        let mut batches = vec![if shadowed {
             VAULT_SHADOW_VIEWS
         } else {
             LIVE_SHADOW_VIEWS
-        })?;
-        let held = shadowed && self.mail_held.load(std::sync::atomic::Ordering::SeqCst);
-        let result = (|| {
-            // while mail is held no thread is shown where private ones aren't
-            if held {
-                conn.execute_batch(MAIL_HELD_SHADOW_VIEWS)?;
-            }
-            Self::run_read_query(&conn, trimmed, max_rows)
-        })();
-        conn.execute_batch(VAULT_SHADOW_DROP)?;
-        result
+        }];
+        if held {
+            batches.push(MAIL_HELD_SHADOW_VIEWS);
+        }
+        let reader = if always_exclude_private {
+            raw_sql::Reader::Public
+        } else if locked {
+            raw_sql::Reader::Locked
+        } else {
+            raw_sql::Reader::Open
+        };
+        // Every table the query reads is judged by SQLite's authorizer
+        // against its class (raw_sql.rs) while the query is prepared and
+        // run; the authorizer is off again before the views are dropped.
+        let shadow = raw_sql::ShadowViews::new(&batches);
+        let result = conn
+            .execute_batch(&shadow.sql)
+            .map_err(anyhow::Error::from)
+            .and_then(|()| {
+                raw_sql::run_guarded(&mut conn, reader, &shadow, |conn, prepared| {
+                    Self::run_read_query(conn, trimmed, max_rows, prepared)
+                })
+            });
+        let dropped = conn.execute_batch(VAULT_SHADOW_DROP);
+        let rows = result?;
+        dropped?;
+        Ok(rows)
     }
 
+    /// `prepared` is called once the statement is prepared, before it runs.
     fn run_read_query(
         conn: &Connection,
         trimmed: &str,
         max_rows: usize,
+        prepared: &dyn Fn(),
     ) -> Result<(Vec<String>, Vec<Vec<JsonValue>>)> {
         let mut stmt = conn.prepare(trimmed)?;
         if !stmt.readonly() {
             return Err(anyhow::anyhow!("only read-only queries are allowed"));
         }
+        prepared();
         let columns: Vec<String> = stmt.column_names().map(String::from).collect();
         let column_count = columns.len();
         let mut rows_out = Vec::new();
@@ -3294,10 +3336,14 @@ mod tests {
     fn test_every_shadow_view_is_dropped() {
         // a view created for a locked read and never dropped makes the next
         // locked read fail ("view … already exists") — 0.5.92's mail_threads
-        for name in [VAULT_SHADOW_VIEWS, MAIL_HELD_SHADOW_VIEWS]
-            .iter()
-            .flat_map(|views| views.split("CREATE TEMP VIEW ").skip(1))
-            .filter_map(|v| v.split_whitespace().next())
+        for name in [
+            VAULT_SHADOW_VIEWS,
+            MAIL_HELD_SHADOW_VIEWS,
+            LIVE_SHADOW_VIEWS,
+        ]
+        .iter()
+        .flat_map(|views| views.split("CREATE TEMP VIEW ").skip(1))
+        .filter_map(|v| v.split_whitespace().next())
         {
             assert!(
                 VAULT_SHADOW_DROP.contains(&format!("DROP VIEW IF EXISTS temp.{name};")),
