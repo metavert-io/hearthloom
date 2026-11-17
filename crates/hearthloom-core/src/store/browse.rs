@@ -660,7 +660,9 @@ impl Store {
 
     /// Register (or update) a virtual source — data that stays at origin
     /// and is queried at need. Surfaces as an RLM tool handle, never as
-    /// substrate the system depends on.
+    /// substrate the system depends on. For the daemon's own code and the
+    /// owner: any virtual registration may be updated, and a refusal (the
+    /// name belongs to a source of another kind) is an error.
     pub fn register_virtual_source(
         &self,
         actor: &super::Actor,
@@ -669,30 +671,84 @@ impl Store {
         config: &serde_json::Value,
         capabilities: &[String],
     ) -> Result<()> {
-        let conn = self.lock();
-        conn.execute(
-            "INSERT INTO sources (name, kind, adapter, config, capabilities, first_seen)
-             VALUES (?1, 'virtual', ?2, ?3, ?4, ?5)
-             ON CONFLICT(name) DO UPDATE SET
-                 adapter = excluded.adapter,
-                 config = excluded.config,
-                 capabilities = excluded.capabilities",
-            rusqlite::params![
-                name,
-                adapter,
-                config.to_string(),
-                serde_json::json!(capabilities).to_string(),
-                now_utc(),
-            ],
-        )?;
-        super::record_mutation(
-            &conn,
-            actor,
-            "source_registered",
-            &format!("source_registered:{name}"),
-            &serde_json::json!({"name": name, "kind": "virtual", "adapter": adapter}),
-        )?;
-        Ok(())
+        self.register_virtual_source_as(actor, true, name, adapter, config, capabilities)?
+            .map_err(|why| anyhow::anyhow!(why))
+    }
+
+    /// Register a virtual source as `actor`. A new name is anyone's to
+    /// register. An existing virtual registration changes only for the
+    /// `owner`, or for the writer who made it — read from the mutation log,
+    /// never from the request: the latest `source_registered` record of the
+    /// name, unless the name was unregistered after it or an earlier build
+    /// recorded it (then who made it can't be told, and only the owner may
+    /// change it — `registrant_of`). A row of another
+    /// kind (materialized, peer, friend) is never changed. `Ok(Err(why))`
+    /// when refused; `why` names no content.
+    pub fn register_virtual_source_as(
+        &self,
+        actor: &super::Actor,
+        owner: bool,
+        name: &str,
+        adapter: &str,
+        config: &serde_json::Value,
+        capabilities: &[String],
+    ) -> Result<std::result::Result<(), &'static str>> {
+        use rusqlite::OptionalExtension;
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let kind: Option<String> = tx
+            .query_row("SELECT kind FROM sources WHERE name = ?1", [name], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        let config_text = config.to_string();
+        let capabilities_text = serde_json::json!(capabilities).to_string();
+        let record = match kind.as_deref() {
+            None => {
+                tx.execute(
+                    "INSERT INTO sources (name, kind, adapter, config, capabilities, first_seen)
+                     VALUES (?1, 'virtual', ?2, ?3, ?4, ?5)",
+                    rusqlite::params![name, adapter, config_text, capabilities_text, now_utc()],
+                )?;
+                true
+            }
+            Some("virtual") => {
+                let registrant = registrant_of(&tx, name)?;
+                let same_writer = registrant.as_deref() == Some(actor.actor.as_str());
+                if !same_writer && !owner {
+                    return Ok(Err(
+                        "another writer registered that name; only the owner can change it",
+                    ));
+                }
+                tx.execute(
+                    "UPDATE sources SET adapter = ?2, config = ?3, capabilities = ?4
+                     WHERE name = ?1 AND kind = 'virtual'",
+                    rusqlite::params![name, adapter, config_text, capabilities_text],
+                )?;
+                // the owner changing another writer's registration makes it
+                // the owner's from now on
+                !same_writer
+            }
+            Some(_) => {
+                return Ok(Err(
+                    "a source of another kind has that name; it can't be registered as mounted",
+                ))
+            }
+        };
+        if record {
+            // each registration gets a key of its own, so each is recorded;
+            // the name's bare key is what an earlier build recorded, and
+            // only for a name's first registration (`registrant_of`)
+            super::record_mutation(
+                &tx,
+                actor,
+                "source_registered",
+                &format!("source_registered:{name}:{}", uuid::Uuid::new_v4().simple()),
+                &serde_json::json!({"name": name, "kind": "virtual", "adapter": adapter}),
+            )?;
+        }
+        tx.commit()?;
+        Ok(Ok(()))
     }
 
     /// Read one virtual source's full definition (adapter + config +
@@ -721,13 +777,16 @@ impl Store {
             [name],
         )?;
         if gone > 0 {
+            // every unregister is recorded, two in one second too: who may
+            // change the name's next registration is read from these
             super::record_mutation(
                 &conn,
                 actor,
                 "virtual_source_unregistered",
                 &format!(
-                    "virtual_source_unregistered:{name}:{}",
-                    crate::time::now_utc()
+                    "virtual_source_unregistered:{name}:{}:{}",
+                    crate::time::now_utc(),
+                    uuid::Uuid::new_v4().simple()
                 ),
                 &serde_json::json!({"name": name}),
             )?;
@@ -747,6 +806,42 @@ impl Store {
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
     }
+}
+
+/// Who made the current registration of `name`, from the mutation log: the
+/// actor of its latest `source_registered` record. None when there is no
+/// record, when the name was unregistered after it — a registration made
+/// since may not have been recorded — or when that record is under the
+/// name's bare key: an earlier build recorded only a name's first
+/// registration, there, so a change after it (the owner's, say) left no
+/// record. The key ranges keep this on the log's unique index; the
+/// payload's name is checked exactly (a name can hold `:`).
+fn registrant_of(conn: &Connection, name: &str) -> Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    let latest = |kind: &str, prefix: &str| -> Result<Option<(i64, String, String)>> {
+        let upper = format!("{prefix}\u{10FFFF}");
+        conn.query_row(
+            "SELECT seq, actor, idempotency_key FROM mutations
+             WHERE idempotency_key >= ?1 AND idempotency_key < ?2
+               AND kind = ?3 AND json_extract(payload, '$.name') = ?4
+             ORDER BY seq DESC LIMIT 1",
+            rusqlite::params![prefix, upper, kind, name],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(Into::into)
+    };
+    let bare = format!("source_registered:{name}");
+    let registered = latest("source_registered", &bare)?.filter(|(_, _, key)| *key != bare);
+    let unregistered = latest(
+        "virtual_source_unregistered",
+        &format!("virtual_source_unregistered:{name}:"),
+    )?;
+    Ok(match (registered, unregistered) {
+        (Some((reg, actor, _)), Some((unreg, _, _))) if reg > unreg => Some(actor),
+        (Some((_, actor, _)), None) => Some(actor),
+        _ => None,
+    })
 }
 
 /// Map a `(name, adapter, config, capabilities)` row into a definition,
@@ -886,6 +981,104 @@ mod tests {
         let hfs = sources.iter().find(|s| s.name == "hearthfs").unwrap();
         assert_eq!(hfs.kind, "virtual");
         assert_eq!(hfs.episode_count, 0);
+    }
+
+    #[test]
+    fn test_who_made_a_registration_is_read_from_the_log() {
+        let (store, _tmp) = seeded();
+        let owner_actor = crate::store::Actor::new("human:owner");
+        let register = |actor: &str, owner: bool, name: &str, mount: &str| {
+            store
+                .register_virtual_source_as(
+                    &crate::store::Actor::new(actor),
+                    owner,
+                    name,
+                    "dir",
+                    &serde_json::json!({ "mount": mount }),
+                    &[],
+                )
+                .unwrap()
+        };
+        assert!(register("plugin:a", false, "shelf", "/a").is_ok());
+        assert!(register("plugin:a", false, "shelf", "/a2").is_ok());
+        assert!(register("plugin:b", false, "shelf", "/b").is_err());
+        // a name holding the other's as a prefix is a name of its own
+        assert!(register("plugin:c", false, "shelf:x", "/c").is_ok());
+
+        // unregistered, the name is new again: whoever registers it next
+        // is its writer, though the name's first record stays
+        assert!(store
+            .unregister_virtual_source(&owner_actor, "shelf")
+            .unwrap());
+        assert!(register("plugin:b", false, "shelf", "/b").is_ok());
+        assert!(register("plugin:b", false, "shelf", "/b2").is_ok());
+        assert!(register("plugin:a", false, "shelf", "/a").is_err());
+        assert!(register("plugin:c", false, "shelf", "/c").is_err());
+
+        // a registration made after an unregister without a record of its
+        // own (as before each one was recorded): only the owner changes it
+        assert!(store
+            .unregister_virtual_source(&owner_actor, "shelf")
+            .unwrap());
+        store
+            .lock()
+            .execute(
+                "INSERT INTO sources (name, kind, adapter, config, capabilities, first_seen)
+                 VALUES ('shelf', 'virtual', 'dir', '{}', '[]', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        for writer in ["plugin:a", "plugin:b", "plugin:c"] {
+            assert!(register(writer, false, "shelf", "/x").is_err(), "{writer}");
+        }
+        assert!(register("human:owner", true, "shelf", "/o").is_ok());
+        assert!(register("plugin:b", false, "shelf", "/b").is_err());
+        assert_eq!(
+            store.virtual_source("shelf").unwrap().unwrap().config["mount"],
+            "/o"
+        );
+
+        // registered by an earlier build, which recorded only a name's first
+        // registration, under the name's own key: the owner's change after
+        // it left no record, so who changed it last can't be told — the
+        // first writer no longer changes it, only the owner does
+        {
+            let conn = store.lock();
+            conn.execute(
+                "INSERT INTO sources (name, kind, adapter, config, capabilities, first_seen)
+                 VALUES ('clips', 'virtual', 'dir', '{\"mount\":\"/ember\"}', '[]',
+                         '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+            crate::store::record_mutation(
+                &conn,
+                &crate::store::Actor::new("plugin:clipper"),
+                "source_registered",
+                "source_registered:clips",
+                &serde_json::json!({"name": "clips", "kind": "virtual", "adapter": "dir"}),
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE sources SET config = '{\"mount\":\"/owner\"}' WHERE name = 'clips'",
+                [],
+            )
+            .unwrap();
+        }
+        let mount =
+            |name: &str| store.virtual_source(name).unwrap().unwrap().config["mount"].clone();
+        assert!(register("plugin:clipper", false, "clips", "/ember2").is_err());
+        assert_eq!(mount("clips"), "/owner");
+        assert!(register("human:owner", true, "clips", "/owner2").is_ok());
+        assert!(register("plugin:clipper", false, "clips", "/ember3").is_err());
+        assert_eq!(mount("clips"), "/owner2");
+        // registered anew, the name is its new writer's to change
+        assert!(store
+            .unregister_virtual_source(&owner_actor, "clips")
+            .unwrap());
+        assert!(register("plugin:clipper", false, "clips", "/ember4").is_ok());
+        assert!(register("plugin:clipper", false, "clips", "/ember5").is_ok());
+        assert_eq!(mount("clips"), "/ember5");
     }
 
     #[test]

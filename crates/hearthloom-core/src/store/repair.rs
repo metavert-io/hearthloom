@@ -4535,6 +4535,62 @@ mod tests {
         assert_eq!(photos_live(&laptop), [PHOTO_DAY]);
     }
 
+    /// The same when the correction reaches a node before a copy of the day
+    /// does: a day showing a photo the correction lacks stands, and the
+    /// correction behind it, through the photos and the run arriving; a day
+    /// the node can't yet tell it holds stands until the photos arrive; one
+    /// it holds goes behind the correction.
+    #[test]
+    fn test_a_photo_day_correction_arriving_first_stands_only_where_it_holds_the_day() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mini_home, mini) = node(&tmp, "mini");
+        apply(
+            &mini,
+            &mini_home,
+            "agent:photo-finalize",
+            vec![photo_day(PHOTO_DAY, DOUBLED)],
+        );
+        photos_once(&mini);
+        photo_run(&mini, &mini_home, photo_day(PHOTO_FIX, ONCE));
+        // another node's own copy of the day shows a third photo
+        let (other_home, other) = node(&tmp, "other");
+        let fuller = [("10:00", "IMG_1"), ("11:00", "IMG_2"), ("12:00", "IMG_3")];
+        apply(
+            &other,
+            &other_home,
+            "agent:photo-finalize",
+            vec![photo_day(PHOTO_DAY, &fuller)],
+        );
+
+        let (late_home, late) = node(&tmp, "late");
+        send(&mini, &mini_home, &late, &late_home, &[PHOTO_FIX]);
+        assert_eq!(photos_live(&late), [PHOTO_FIX]);
+        send(&other, &other_home, &late, &late_home, &[PHOTO_DAY]);
+        assert_eq!(photos_live(&late), [PHOTO_DAY]);
+        sync_points(&mini, &late, &late_home);
+        sync_runs(&mini, &late, &late_home);
+        assert_eq!(photos_live(&late), [PHOTO_DAY]);
+
+        // mini's own day, before the photos that show the correction holds it
+        let (hub_home, hub) = node(&tmp, "hub");
+        send(&mini, &mini_home, &hub, &hub_home, &[PHOTO_FIX, PHOTO_DAY]);
+        assert_eq!(photos_live(&hub), [PHOTO_DAY]);
+        sync_points(&mini, &hub, &hub_home);
+        assert_eq!(photos_live(&hub), [PHOTO_FIX]);
+
+        // and after them
+        let (third_home, third) = node(&tmp, "third");
+        sync_points(&mini, &third, &third_home);
+        send(
+            &mini,
+            &mini_home,
+            &third,
+            &third_home,
+            &[PHOTO_FIX, PHOTO_DAY],
+        );
+        assert_eq!(photos_live(&third), [PHOTO_FIX]);
+    }
+
     /// The keys a photo took the place of can reach a node from a peer that
     /// stored the photo in another time zone, so under another day. The
     /// point stored here keeps its own day, and that day's waiting

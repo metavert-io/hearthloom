@@ -45,6 +45,7 @@ mod privacy;
 mod projects;
 mod provenance;
 mod quarantine;
+pub mod raw_sql;
 mod recall;
 mod relationships;
 mod repair;
@@ -118,6 +119,7 @@ pub use plugins::PluginRow;
 pub use privacy::{rules_match_text, PrivacyRule, PrivateMemory};
 pub use provenance::{others_words, trust_for, Hop, Origin, OTHERS_WORDS_SOURCES};
 pub use quarantine::{outside_proposal, QuarantineEntry, PROPOSAL_KINDS};
+pub use raw_sql::{RawSqlClass, RAW_SQL_CLASSES, SQLITE_TABLES};
 pub use recall::DayView;
 pub use relationships::{DirectoryRow, RelationshipRow, RELATIONSHIP_KINDS};
 pub use repair::{
@@ -493,7 +495,9 @@ const SCHEMA_V1: &str = "
 /// VIEWS instead of the base tables (temp schema resolves first). Episode/
 /// entity/edge material is scope-filtered; audit surfaces whose payloads
 /// may quote private content (mutations, ask_log) and the rules themselves
-/// read as empty. Created and dropped inside one connection lock.
+/// read as empty. Created and dropped inside one connection lock. Each table
+/// shadowed here is `Filtered` in raw_sql.rs `RAW_SQL_CLASSES`; every other
+/// table is read, or refused, by its class there.
 const VAULT_SHADOW_VIEWS: &str = "
     CREATE TEMP VIEW episodes AS
         SELECT * FROM main.episodes WHERE scope != 'private' AND superseded_by IS NULL;
@@ -528,6 +532,22 @@ const VAULT_SHADOW_VIEWS: &str = "
         SELECT * FROM main.tasks WHERE scope != 'private';
     CREATE TEMP VIEW mail_threads AS
         SELECT * FROM main.mail_threads WHERE scope != 'private';
+    -- A draft or a queued match shows only when its thread is here and not
+    -- private: the thread it names, else the one its message joined on this
+    -- node. One whose thread can't be found (none named or joined, or one
+    -- not here) is left out: nothing says whether it is private.
+    CREATE TEMP VIEW mail_drafts AS
+        SELECT d.* FROM main.mail_drafts d
+        WHERE COALESCE(d.thread_id,
+                       (SELECT tm.thread_id FROM main.mail_thread_messages tm
+                        WHERE tm.message_id = d.reply_to))
+              IN (SELECT id FROM main.mail_threads WHERE scope != 'private');
+    CREATE TEMP VIEW mail_matches AS
+        SELECT m.* FROM main.mail_matches m
+        WHERE COALESCE(m.thread_id,
+                       (SELECT tm.thread_id FROM main.mail_thread_messages tm
+                        WHERE tm.message_id = m.message_id))
+              IN (SELECT id FROM main.mail_threads WHERE scope != 'private');
     CREATE TEMP VIEW notes_index AS
         SELECT * FROM main.notes_index WHERE scope != 'private';
     CREATE TEMP VIEW note_mentions AS
@@ -565,6 +585,17 @@ const VAULT_SHADOW_VIEWS: &str = "
         JOIN main.episodes e ON e.id = o.episode_id
         JOIN main.self_model s ON s.id = o.seeking_id
         WHERE e.scope != 'private' AND s.sphere != 'private' AND e.superseded_by IS NULL;
+    -- goals scope by `sphere`, and a goal's watch queries and catches go with it
+    CREATE TEMP VIEW intents AS
+        SELECT * FROM main.intents WHERE sphere IS NOT 'private';
+    CREATE TEMP VIEW standing_queries AS
+        SELECT q.* FROM main.standing_queries q
+        WHERE q.intent_id IN (SELECT id FROM main.intents WHERE sphere IS NOT 'private');
+    CREATE TEMP VIEW intent_matches AS
+        SELECT m.* FROM main.intent_matches m
+        WHERE m.intent_id IN (SELECT id FROM main.intents WHERE sphere IS NOT 'private')
+          AND m.episode_id IN (SELECT id FROM main.episodes
+                               WHERE scope != 'private' AND superseded_by IS NULL);
     CREATE TEMP VIEW mutations AS SELECT * FROM main.mutations WHERE 0;
     CREATE TEMP VIEW quarantine AS SELECT * FROM main.quarantine WHERE 0;
     CREATE TEMP VIEW ask_log AS
@@ -627,15 +658,21 @@ const VAULT_SHADOW_DROP: &str = "
     DROP VIEW IF EXISTS temp.semantic_pairs;
     DROP VIEW IF EXISTS temp.mail_drafts;
     DROP VIEW IF EXISTS temp.mail_matches;
+    DROP VIEW IF EXISTS temp.intents;
+    DROP VIEW IF EXISTS temp.standing_queries;
+    DROP VIEW IF EXISTS temp.intent_matches;
 ";
 
 /// While mail is held (`Store::mail_held`), a read that hides private rows
 /// sees no mail thread, no draft (of a thread, or an ember's of a message)
 /// and no message queued for an ember: any of them can be the message the
 /// hold is for. Created after VAULT_SHADOW_VIEWS, replacing its
-/// mail_threads view; dropped by VAULT_SHADOW_DROP.
+/// mail_threads, mail_drafts and mail_matches views; dropped by
+/// VAULT_SHADOW_DROP.
 const MAIL_HELD_SHADOW_VIEWS: &str = "
     DROP VIEW IF EXISTS temp.mail_threads;
+    DROP VIEW IF EXISTS temp.mail_drafts;
+    DROP VIEW IF EXISTS temp.mail_matches;
     CREATE TEMP VIEW mail_threads AS SELECT * FROM main.mail_threads WHERE 0;
     CREATE TEMP VIEW mail_drafts AS SELECT * FROM main.mail_drafts WHERE 0;
     CREATE TEMP VIEW mail_matches AS SELECT * FROM main.mail_matches WHERE 0;
@@ -2708,11 +2745,14 @@ impl Store {
         // Vault enforcement for raw SQL: while locked, TEMP VIEWS shadow the
         // table names (SQLite resolves the temp schema first), filtering
         // private rows; `main.`-qualified names would bypass the shadowing,
-        // so they are rejected outright. Views are dropped before the lock
-        // guard releases — writers on this connection never see them.
-        if trimmed.to_ascii_lowercase().contains("main.") {
+        // so they are rejected outright, in every spelling SQLite reads
+        // (`names_another_schema`) — a first check; the authorizer below is
+        // the enforcement, and refuses such a read on its own. Views are
+        // dropped before the lock guard releases — writers on this
+        // connection never see them.
+        if names_another_schema(trimmed) {
             return Err(anyhow::anyhow!(
-                "schema-qualified table names are not allowed"
+                "schema-qualified table names and ATTACH are not allowed"
             ));
         }
         // The shadow views know the vault, not life areas — raw SQL is
@@ -2722,34 +2762,56 @@ impl Store {
                 "raw SQL is not available to an area-limited key"
             ));
         }
-        let conn = self.lock();
-        let shadowed = always_exclude_private || !self.private_visible();
-        conn.execute_batch(if shadowed {
+        let mut conn = self.lock();
+        let locked = !self.private_visible();
+        let shadowed = always_exclude_private || locked;
+        // while mail is held no thread is shown where private ones aren't
+        let held = shadowed && self.mail_held.load(std::sync::atomic::Ordering::SeqCst);
+        let mut batches = vec![if shadowed {
             VAULT_SHADOW_VIEWS
         } else {
             LIVE_SHADOW_VIEWS
-        })?;
-        let held = shadowed && self.mail_held.load(std::sync::atomic::Ordering::SeqCst);
-        let result = (|| {
-            // while mail is held no thread is shown where private ones aren't
-            if held {
-                conn.execute_batch(MAIL_HELD_SHADOW_VIEWS)?;
-            }
-            Self::run_read_query(&conn, trimmed, max_rows)
-        })();
-        conn.execute_batch(VAULT_SHADOW_DROP)?;
-        result
+        }];
+        if held {
+            batches.push(MAIL_HELD_SHADOW_VIEWS);
+        }
+        let reader = if always_exclude_private {
+            raw_sql::Reader::Public
+        } else if locked {
+            raw_sql::Reader::Locked
+        } else {
+            raw_sql::Reader::Open
+        };
+        // Every table the query reads is judged by SQLite's authorizer
+        // against its class (raw_sql.rs) while the query is prepared and
+        // run; the authorizer is off again before the views are dropped.
+        let shadow = raw_sql::ShadowViews::new(&batches);
+        let result = conn
+            .execute_batch(&shadow.sql)
+            .map_err(anyhow::Error::from)
+            .and_then(|()| {
+                raw_sql::run_guarded(&mut conn, reader, &shadow, |conn, prepared| {
+                    Self::run_read_query(conn, trimmed, max_rows, prepared)
+                })
+            });
+        let dropped = conn.execute_batch(VAULT_SHADOW_DROP);
+        let rows = result?;
+        dropped?;
+        Ok(rows)
     }
 
+    /// `prepared` is called once the statement is prepared, before it runs.
     fn run_read_query(
         conn: &Connection,
         trimmed: &str,
         max_rows: usize,
+        prepared: &dyn Fn(),
     ) -> Result<(Vec<String>, Vec<Vec<JsonValue>>)> {
         let mut stmt = conn.prepare(trimmed)?;
         if !stmt.readonly() {
             return Err(anyhow::anyhow!("only read-only queries are allowed"));
         }
+        prepared();
         let columns: Vec<String> = stmt.column_names().map(String::from).collect();
         let column_count = columns.len();
         let mut rows_out = Vec::new();
@@ -3079,6 +3141,93 @@ pub(crate) fn journal_op(
     )
 }
 
+/// Does `sql` reach the tables behind the shadow views through a schema
+/// name: a name qualified with the `main` schema, in any spelling SQLite
+/// reads as one — any case, quoted (`"main"`, `` `main` ``, `[main]`, or
+/// `'main'`, which SQLite takes as a name before a dot), with whitespace or
+/// comments before the dot (whitespace as SQLite's tokenizer reads it: a
+/// vertical tab within a run, a U+FEFF byte-order mark where a token would
+/// begin) — or an ATTACH, which would give the database
+/// file a schema name of its own on this connection. Text inside a string
+/// literal, a quoted name or a comment is no schema (`'domain.com'` is a
+/// string).
+fn names_another_schema(sql: &str) -> bool {
+    let b = sql.as_bytes();
+    let mut i = 0;
+    // the token read last (comments and whitespace aside) was a `main`
+    let mut after_main = false;
+    // no token read yet (comments and whitespace aside)
+    let mut first = true;
+    while i < b.len() {
+        match b[i] {
+            // SQLite's whitespace: a run of it goes on through a vertical
+            // tab (one where a token would begin is an error to SQLite, so
+            // reading it as whitespace there only makes this stricter)
+            b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c => i += 1,
+            // and a byte-order mark is whitespace where a token would begin
+            // (inside a name it is part of the name, as below)
+            0xef if b.get(i + 1) == Some(&0xbb) && b.get(i + 2) == Some(&0xbf) => i += 3,
+            b'-' if b.get(i + 1) == Some(&b'-') => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i < b.len() && !(b[i] == b'*' && b.get(i + 1) == Some(&b'/')) {
+                    i += 1;
+                }
+                i += 2;
+            }
+            b'.' if after_main => return true,
+            quote @ (b'\'' | b'"' | b'`' | b'[') => {
+                let close = if quote == b'[' { b']' } else { quote };
+                let mut value = Vec::new();
+                i += 1;
+                while i < b.len() {
+                    if b[i] == close {
+                        // a doubled quote is one quote character
+                        if close != b']' && b.get(i + 1) == Some(&close) {
+                            value.push(close);
+                            i += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    value.push(b[i]);
+                    i += 1;
+                }
+                i += 1;
+                after_main = value.eq_ignore_ascii_case(b"main");
+                first = false;
+            }
+            c if c.is_ascii_alphabetic() || c == b'_' || c >= 0x80 => {
+                let start = i;
+                while i < b.len()
+                    && (b[i].is_ascii_alphanumeric()
+                        || b[i] == b'_'
+                        || b[i] == b'$'
+                        || b[i] >= 0x80)
+                {
+                    i += 1;
+                }
+                let word = &b[start..i];
+                if first && word.eq_ignore_ascii_case(b"attach") {
+                    return true;
+                }
+                after_main = word.eq_ignore_ascii_case(b"main");
+                first = false;
+            }
+            _ => {
+                after_main = false;
+                first = false;
+                i += 1;
+            }
+        }
+    }
+    false
+}
+
 /// `journal_op` stamped `ts` — for a writer whose entry must not sort
 /// before the row's own stamp (a delete tombstone wins only at or after
 /// it).
@@ -3133,19 +3282,201 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_a_schema_name_is_found_in_every_spelling() {
+        for sql in [
+            "SELECT * FROM main.episodes",
+            "select * from MAIN.episodes",
+            "SELECT * FROM \"main\".episodes",
+            "SELECT * FROM \"MaIn\" . episodes",
+            "SELECT * FROM `main`.episodes",
+            "SELECT * FROM [main].episodes",
+            "SELECT * FROM 'main'.episodes",
+            "SELECT * FROM main/**/.episodes",
+            "SELECT * FROM main /* .x */ -- y\n\t. episodes",
+            "SELECT * FROM x JOIN main.episodes e ON 1",
+            "SELECT main.episodes.body FROM episodes",
+            "ATTACH '/tmp/h.db' AS y",
+            " /* a */ attach database 'h.db' AS y",
+            // SQLite's whitespace: a vertical tab continues a run of it, a
+            // byte-order mark is a token of it wherever a token can start
+            "SELECT * FROM main \u{0b} .episodes",
+            "SELECT * FROM main\r\u{0b}\u{0b}.episodes",
+            "SELECT * FROM main \u{feff}.episodes",
+            "SELECT * FROM main/**/\u{feff}\u{feff}.episodes",
+            "SELECT * FROM `main`\u{feff}.episodes",
+            "SELECT * FROM x,\u{feff}main.episodes",
+            "\u{feff}ATTACH 'h.db' AS y",
+            "/* a */\u{feff}attach 'h.db' AS y",
+            " \u{0b}ATTACH 'h.db' AS y",
+        ] {
+            assert!(names_another_schema(sql), "{sql}");
+        }
+        for sql in [
+            "SELECT * FROM episodes",
+            "SELECT * FROM episodes WHERE body LIKE '%domain.com%'",
+            "SELECT * FROM episodes WHERE body = 'main.c'",
+            "SELECT * FROM episodes WHERE source = 'main'",
+            "SELECT \"main.x\" FROM episodes",
+            "SELECT * FROM domain.episodes",
+            "SELECT * FROM mainly.episodes",
+            "SELECT * FROM temp.episodes",
+            "SELECT * FROM episodes -- main.episodes",
+            "SELECT * FROM episodes /* main.episodes */",
+            "SELECT 'it''s main'.length FROM episodes",
+            "SELECT main FROM episodes",
+            "SELECT 3.5, main + 1 FROM episodes",
+            "SELECT 'attach' FROM episodes",
+            "SELECT attach FROM episodes",
+        ] {
+            assert!(!names_another_schema(sql), "{sql}");
+        }
+    }
+
+    #[test]
     fn test_every_shadow_view_is_dropped() {
         // a view created for a locked read and never dropped makes the next
         // locked read fail ("view … already exists") — 0.5.92's mail_threads
-        for name in [VAULT_SHADOW_VIEWS, MAIL_HELD_SHADOW_VIEWS]
-            .iter()
-            .flat_map(|views| views.split("CREATE TEMP VIEW ").skip(1))
-            .filter_map(|v| v.split_whitespace().next())
+        for name in [
+            VAULT_SHADOW_VIEWS,
+            MAIL_HELD_SHADOW_VIEWS,
+            LIVE_SHADOW_VIEWS,
+        ]
+        .iter()
+        .flat_map(|views| views.split("CREATE TEMP VIEW ").skip(1))
+        .filter_map(|v| v.split_whitespace().next())
         {
             assert!(
                 VAULT_SHADOW_DROP.contains(&format!("DROP VIEW IF EXISTS temp.{name};")),
                 "{name} is created in VAULT_SHADOW_VIEWS but never dropped"
             );
         }
+    }
+
+    #[test]
+    fn test_raw_sql_reads_drafts_and_matches_only_of_threads_it_may_see() {
+        use crate::store::mail::MailSeen;
+        use crate::store::mail_watch::MailMatch;
+        let tmp = tempfile::tempdir().unwrap();
+        let s = Store::open(&tmp.path().join("t.db")).unwrap();
+        let a = Actor::new("human:owner");
+        let seen = |id: &str| MailSeen {
+            account: "me@x.example".into(),
+            message_id: id.into(),
+            from: "Sender <sender@x.example>".into(),
+            from_addr: "sender@x.example".into(),
+            subject: "A question".into(),
+            primary: true,
+            ..Default::default()
+        };
+        let open = s.mail_observe(&a, &seen("open@x")).unwrap().unwrap();
+        let closed = s.mail_observe(&a, &seen("closed@x")).unwrap().unwrap();
+        // asked for while both threads were ordinary
+        let d_open = s
+            .mail_draft_request(&a, Some(&open), None, Some("yes"), false, None)
+            .unwrap();
+        let d_closed = s
+            .mail_draft_request(&a, Some(&closed), None, Some("no"), false, None)
+            .unwrap();
+        // an ember's draft names the message it answers, not its thread
+        let d_by_message = s
+            .mail_draft_request(&a, None, Some("closed@x"), None, false, Some("ok"))
+            .unwrap();
+        let d_by_open_message = s
+            .mail_draft_request(&a, None, Some("open@x"), None, false, Some("ok"))
+            .unwrap();
+        let queue = |id: &str, thread: Option<&str>| MailMatch {
+            plugin: "watcher".into(),
+            watch: "w1".into(),
+            watch_name: "all".into(),
+            thread_id: thread.map(String::from),
+            message_id: id.into(),
+            ..Default::default()
+        };
+        s.mail_match_add(&queue("open@x", Some(&open))).unwrap();
+        s.mail_match_add(&queue("closed@x", Some(&closed))).unwrap();
+        // no thread named, none joined here, or one that isn't here
+        s.mail_match_add(&queue("loose@x", None)).unwrap();
+        s.mail_match_add(&queue("elsewhere@x", Some("mt_not_here")))
+            .unwrap();
+        assert!(s.mail_thread_make_private(&a, &closed).unwrap());
+
+        let ids = |sql: &str| -> std::collections::BTreeSet<String> {
+            let (_, rows) = s.read_query(sql, 100).unwrap();
+            rows.iter()
+                .map(|r| r[0].as_str().unwrap().to_string())
+                .collect()
+        };
+        let set = |v: &[&str]| -> std::collections::BTreeSet<String> {
+            v.iter().map(|x| x.to_string()).collect()
+        };
+        // locked: only the ordinary thread's rows
+        let ordinary = set(&[&d_open.id, &d_by_open_message.id]);
+        assert_eq!(ids("SELECT id FROM mail_drafts"), ordinary);
+        assert_eq!(ids("SELECT message_id FROM mail_matches"), set(&["open@x"]));
+        // the tables behind the views can't be named, in any spelling
+        for sql in [
+            "SELECT id FROM main.mail_drafts",
+            "SELECT id FROM \"main\".mail_drafts",
+            "SELECT id FROM `MAIN`.mail_drafts",
+            "SELECT id FROM [main].mail_drafts",
+            "SELECT id FROM 'main'.mail_drafts",
+            "SELECT id FROM main /* a */ . mail_drafts",
+            "SELECT id FROM main -- a\n.mail_drafts",
+            "SELECT message_id FROM \"Main\"\n.\"mail_matches\"",
+            "SELECT id FROM mail_drafts WHERE id IN (SELECT id FROM \"main\".mail_drafts)",
+            // a vertical tab inside a run of whitespace, and a byte-order
+            // mark where a token could start, are whitespace to SQLite
+            "SELECT id FROM main \u{0b} .mail_drafts",
+            "SELECT message_id FROM main\t\u{0b}.mail_matches",
+            "SELECT id FROM main \u{feff}.mail_drafts",
+            "SELECT message_id FROM \"main\"\u{feff}.mail_matches",
+            "SELECT d.id FROM mail_threads t,\u{feff}main.mail_drafts d",
+        ] {
+            assert!(s.read_query(sql, 100).is_err(), "{sql}");
+            assert!(s.read_query_public(sql, 100).is_err(), "{sql}");
+        }
+        // nor reached under a schema name of the reader's own
+        let file = tmp.path().join("t.db");
+        for attach in [
+            format!("ATTACH '{}' AS y", file.display()),
+            format!("\u{feff}ATTACH '{}' AS y", file.display()),
+            format!("/* a */\u{feff}attach '{}' AS y", file.display()),
+            format!(" \u{0b}ATTACH '{}' AS y", file.display()),
+        ] {
+            assert!(s.read_query(&attach, 1).is_err(), "{attach}");
+            assert!(s.read_query("SELECT id FROM y.mail_drafts", 100).is_err());
+        }
+        // text that only reads like one is no schema
+        assert_eq!(
+            ids("SELECT id FROM mail_drafts WHERE 'domain.com' != \"id\" -- main.x"),
+            ordinary
+        );
+        // while mail is held, none at all
+        s.set_mail_held(true);
+        assert!(ids("SELECT id FROM mail_drafts").is_empty());
+        assert!(ids("SELECT message_id FROM mail_matches").is_empty());
+        assert!(ids("SELECT id FROM mail_threads").is_empty());
+        s.set_mail_held(false);
+        // open: every row
+        {
+            let _v = enter_viewer("session:owner");
+            s.vault_unlock(15);
+            assert_eq!(
+                ids("SELECT id FROM mail_drafts"),
+                set(&[
+                    &d_open.id,
+                    &d_closed.id,
+                    &d_by_message.id,
+                    &d_by_open_message.id
+                ])
+            );
+            assert_eq!(
+                ids("SELECT message_id FROM mail_matches"),
+                set(&["open@x", "closed@x", "loose@x", "elsewhere@x"])
+            );
+        }
+        // locked again: the views were dropped and are made afresh
+        assert_eq!(ids("SELECT id FROM mail_drafts"), ordinary);
     }
     use serde_json::json;
 
