@@ -2179,7 +2179,11 @@ nodes only, previous db kept as a timestamped backup).
 **A restore writes only what an export writes (0.5.100,
 `export::restorable`).** Never a top-level dotfile (`.env` is read into
 the environment at the next boot — a zip carrying one could switch a
-hosted node's settings), never the db files, nothing `DIR_CLASSES`
+hosted node's settings), never the db files, nor a SQLite side file
+(`-wal`/`-shm`/`-journal`) at any depth — so the export reads a database
+with a `-wal`/`-journal` beside it through SQLite (`export::write_file`,
+read-only `VACUUM INTO`, side files left out; what SQLite can't read goes
+in as it is, side files too, with a manifest warning) — nothing `DIR_CLASSES`
 excludes (archives excepted), never `plugins/<n>/key` or
 `plugins/<n>/secrets/`; names compare IGNORING CASE (a Mac's disk does);
 `config/` comes back as `<name>.restored`, never read. On a HOSTED node

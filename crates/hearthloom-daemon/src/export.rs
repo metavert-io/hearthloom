@@ -200,7 +200,7 @@ async fn build(
         table_counts.push((*t, n));
         total_units += n;
     }
-    let (file_list, warnings) = collect_files(&state.home, with_archives);
+    let (file_list, mut warnings) = collect_files(&state.home, with_archives);
     total_units += file_list.len() as i64 + 500; // +db snapshot weight
 
     let store = state.store.clone();
@@ -273,12 +273,18 @@ async fn build(
             zip.write_all(b"]")?;
         }
 
-        // 3. the files the record references
+        // 3. the files the record references. A database's side files go
+        // in through its copy (`write_file`), never on their own.
+        let listed: std::collections::HashSet<&str> =
+            file_list.iter().map(String::as_str).collect();
+        let scratch = home_root.join("exports/.file-snapshot");
         for rel in &file_list {
-            let src = home_root.join(rel);
-            zip.start_file(format!("files/{}", rel.replace('\\', "/")), deflate)?;
-            if let Ok(mut f) = std::fs::File::open(&src) {
-                std::io::copy(&mut f, &mut zip)?;
+            let side_of_listed = SQLITE_SIDE_FILES
+                .iter()
+                .any(|end| rel.strip_suffix(end).is_some_and(|db| listed.contains(db)));
+            if !side_of_listed {
+                let warning = write_file(&mut zip, deflate, &home_root, rel, &scratch)?;
+                warnings.extend(warning);
             }
             done += 1;
             if done % 200 == 0 {
@@ -394,6 +400,79 @@ fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
             out.push(rel);
         }
     }
+}
+
+/// One exported file into the zip, under `files/`. A database with a
+/// write-ahead log or rollback journal beside it goes in as a copy SQLite
+/// reads (`sqlite_copy`) and its side files stay out: what the log holds
+/// since the last checkpoint is in the copy, and a restore writes no side
+/// file (`restorable`). A file SQLite can't read that way (not a
+/// database, a journal left by a writer that stopped) goes in as it is,
+/// its side files beside it, and the returned warning lands in the
+/// manifest: a restore leaves those side files out.
+fn write_file(
+    zip: &mut zip::ZipWriter<std::fs::File>,
+    options: zip::write::SimpleFileOptions,
+    root: &Path,
+    rel: &str,
+    scratch: &Path,
+) -> Result<Option<String>> {
+    let src = root.join(rel);
+    let entry = |rel: &str| format!("files/{}", rel.replace('\\', "/"));
+    let side_file = |end: &str| {
+        let mut path = src.clone().into_os_string();
+        path.push(end);
+        std::path::PathBuf::from(path)
+    };
+    let mut warning = None;
+    if ["-wal", "-journal"]
+        .iter()
+        .any(|end| side_file(end).exists())
+    {
+        let copied = sqlite_copy(&src, scratch);
+        if copied.is_ok() {
+            zip.start_file(entry(rel), options)?;
+            std::io::copy(&mut std::fs::File::open(scratch)?, zip)?;
+        }
+        let _ = std::fs::remove_file(scratch);
+        match copied {
+            Ok(()) => return Ok(None),
+            Err(err) => {
+                warning = Some(format!(
+                    "{rel}: not read as a database ({err:#}); exported as it is with the \
+                     files beside it, which a restore leaves out"
+                ))
+            }
+        }
+    }
+    zip.start_file(entry(rel), options)?;
+    if let Ok(mut f) = std::fs::File::open(&src) {
+        std::io::copy(&mut f, zip)?;
+    }
+    if warning.is_some() {
+        for end in SQLITE_SIDE_FILES {
+            if let Ok(mut f) = std::fs::File::open(side_file(end)) {
+                zip.start_file(entry(&format!("{rel}{end}")), options)?;
+                std::io::copy(&mut f, zip)?;
+            }
+        }
+    }
+    Ok(warning)
+}
+
+/// A copy of the SQLite database at `src` in `dest`, as the record's own
+/// snapshot is made (`VACUUM INTO`): one consistent state, what its
+/// write-ahead log holds included. Opened read-only, so the database and
+/// its side files stay as they were.
+fn sqlite_copy(src: &Path, dest: &Path) -> Result<()> {
+    let _ = std::fs::remove_file(dest);
+    let conn = rusqlite::Connection::open_with_flags(
+        src,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    conn.execute("VACUUM INTO ?1", [dest.to_string_lossy().as_ref()])?;
+    Ok(())
 }
 
 /// Left by `apply_incoming_restore` for `after_restore`, which runs once
@@ -516,6 +595,10 @@ fn restore_dest(root: &Path, name: &str, keep_packages: bool) -> Option<std::pat
     Some(dest)
 }
 
+/// Endings of the files SQLite keeps beside a database (write-ahead log,
+/// shared memory, rollback journal), lowercase.
+const SQLITE_SIDE_FILES: [&str; 3] = ["-wal", "-shm", "-journal"];
+
 /// A restore writes only what an export writes (0.5.100). An export never
 /// holds the node's secrets and settings (`.env`, `.env.sealed`, the seal
 /// keys — every name starting with `.`), the database files, or anything
@@ -525,14 +608,22 @@ fn restore_dest(root: &Path, name: &str, keep_packages: bool) -> Option<std::pat
 /// runs: a plaintext `.env` is read into the environment at the next
 /// start. `keep_packages` false (a hosted node) leaves embers' packages
 /// out too: only the registry installs code there (`after_restore`).
+/// Nor does a restore write a SQLite side file (`SQLITE_SIDE_FILES`) at any
+/// depth: the export reads each database with one through SQLite
+/// (`write_file`), and the node opens its sidecar databases in place
+/// (`archives/<x>.vidx.sqlite`), never beside a side file it didn't write.
 /// Names compare ignoring case: a Mac's disk does (`Mail-Triage/` IS
 /// `mail-triage/` there).
 fn restorable(parts: &[&str], keep_packages: bool) -> bool {
     let lower: Vec<String> = parts.iter().map(|p| p.to_ascii_lowercase()).collect();
-    let Some(top) = lower.first().map(String::as_str) else {
+    let (Some(top), Some(file)) = (lower.first(), lower.last()) else {
         return false;
     };
+    let top = top.as_str();
     if top.starts_with('.') || top.starts_with("hearthloom.db") {
+        return false;
+    }
+    if SQLITE_SIDE_FILES.iter().any(|end| file.ends_with(end)) {
         return false;
     }
     if DIR_CLASSES.iter().any(|(name, class)| {
@@ -682,15 +773,47 @@ mod tests {
         assert!(restore_dest(root, "files/plugins/demo/data/state.json", false).is_some());
     }
 
-    /// After a restore a hosted node holds no ember it didn't install
-    /// from the registry: off the list, key revoked, package gone, data
-    /// and stored values kept, the owner told. Elsewhere nothing changes.
+    /// An export holds no SQLite side file, so a restore writes none, at
+    /// any depth and in any case; the database files beside them still
+    /// restore, and so does a folder whose name merely ends that way.
     #[test]
-    fn test_a_hosted_node_takes_restored_embers_off_until_reinstalled() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = hearthloom_core::paths::Home::at(tmp.path());
+    fn test_restore_writes_no_sqlite_side_files() {
+        let root = Path::new("/srv/hl");
+        for refused in [
+            "files/archives/x.vidx.sqlite-wal",
+            "files/archives/x.vidx.sqlite-shm",
+            "files/archives/x.vidx.sqlite-journal",
+            "files/raw/health/health.vidx.sqlite-wal",
+            "files/plugins/demo/data/state.db-shm",
+            "files/somenewfeature/deep/a/b.sqlite-journal",
+            "files/config/x.sqlite-wal",
+            "files/archives/X.VIDX.SQLITE-WAL",
+            "files/archives/x.vidx.sqlite-Shm",
+            "files/archives/x.vidx.sqlite-Journal",
+        ] {
+            assert_eq!(
+                restore_dest(root, refused, true),
+                None,
+                "{refused} must not restore"
+            );
+        }
+        for kept in [
+            "files/archives/x.vidx.sqlite",
+            "files/plugins/demo/data/state.db",
+            "files/notes/daily-journal/a.md",
+            "files/raw/wal.txt",
+        ] {
+            assert!(
+                restore_dest(root, kept, true).is_some(),
+                "{kept} should restore"
+            );
+        }
+    }
+
+    fn state_at(root: &Path) -> AppState {
+        let home = hearthloom_core::paths::Home::at(root);
         home.init().unwrap();
-        let state = AppState {
+        AppState {
             store: std::sync::Arc::new(
                 hearthloom_core::store::Store::open(&home.db_path()).unwrap(),
             ),
@@ -701,7 +824,87 @@ mod tests {
             bus: Default::default(),
             killswitch: Default::default(),
             running: Default::default(),
-        };
+        }
+    }
+
+    /// An ember's database keeps what it committed since the last
+    /// checkpoint in its write-ahead log. The export reads it through
+    /// SQLite, so the restored copy holds it although a restore writes no
+    /// side file; a file SQLite can't read goes in as it is, its side
+    /// file beside it, and the manifest says so.
+    #[tokio::test]
+    async fn test_export_and_restore_keep_what_a_databases_log_holds() {
+        let from = tempfile::tempdir().unwrap();
+        let state = state_at(from.path());
+        let data = crate::plugins::plugin_dir(&state, "demo").join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let ember = rusqlite::Connection::open(data.join("state.db")).unwrap();
+        let mode: String = ember
+            .query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        ember
+            .execute_batch(
+                "PRAGMA wal_autocheckpoint=0;
+                 CREATE TABLE t(x TEXT);
+                 INSERT INTO t VALUES ('kept');",
+            )
+            .unwrap();
+        let wal = std::fs::metadata(data.join("state.db-wal")).unwrap();
+        assert!(wal.len() > 0, "the insert waits in the log");
+        std::fs::write(data.join("blob"), "not a database").unwrap();
+        std::fs::write(data.join("blob-journal"), "nor this").unwrap();
+
+        let (zip_path, _) = build(&state, std::time::Instant::now(), false)
+            .await
+            .unwrap();
+        drop(ember);
+
+        let to = tempfile::tempdir().unwrap();
+        let target = state_at(to.path());
+        stage_restore(&target, &zip_path).unwrap();
+        let restored = crate::plugins::plugin_dir(&target, "demo").join("data");
+        assert!(!restored.join("state.db-wal").exists());
+        assert!(!restored.join("blob-journal").exists());
+        let conn = rusqlite::Connection::open(restored.join("state.db")).unwrap();
+        let x: String = conn.query_row("SELECT x FROM t", [], |r| r.get(0)).unwrap();
+        assert_eq!(x, "kept");
+
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&zip_path).unwrap()).unwrap();
+        let names: Vec<String> = archive
+            .file_names()
+            .map(|n| n.unwrap().into_owned())
+            .collect();
+        assert!(names.contains(&"files/plugins/demo/data/state.db".to_string()));
+        for side in ["-wal", "-shm", "-journal"] {
+            let name = format!("files/plugins/demo/data/state.db{side}");
+            assert!(!names.contains(&name), "{name} is read into the copy");
+        }
+        assert!(names.contains(&"files/plugins/demo/data/blob".to_string()));
+        assert!(names.contains(&"files/plugins/demo/data/blob-journal".to_string()));
+        let mut manifest = String::new();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("manifest.json").unwrap(),
+            &mut manifest,
+        )
+        .unwrap();
+        let manifest: Value = serde_json::from_str(&manifest).unwrap();
+        let warnings = manifest["warnings"].as_array().unwrap();
+        assert!(warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().starts_with("plugins/demo/data/blob:")));
+        assert!(!warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("state.db")));
+    }
+
+    /// After a restore a hosted node holds no ember it didn't install
+    /// from the registry: off the list, key revoked, package gone, data
+    /// and stored values kept, the owner told. Elsewhere nothing changes.
+    #[test]
+    fn test_a_hosted_node_takes_restored_embers_off_until_reinstalled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_at(tmp.path());
         let actor = hearthloom_core::Actor::new("human:test");
         let install = |name: &str| {
             let (key, _) = state

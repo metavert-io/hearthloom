@@ -2750,7 +2750,7 @@ impl Store {
         if !stmt.readonly() {
             return Err(anyhow::anyhow!("only read-only queries are allowed"));
         }
-        let columns: Vec<String> = stmt.column_names().into_iter().map(String::from).collect();
+        let columns: Vec<String> = stmt.column_names().map(String::from).collect();
         let column_count = columns.len();
         let mut rows_out = Vec::new();
         let mut rows = stmt.query([])?;
@@ -2943,7 +2943,7 @@ pub(crate) fn record_mutation(
 /// operational journal stores. None if the row is absent.
 pub(crate) fn row_as_json(conn: &Connection, table: &str, id: &str) -> Result<Option<JsonValue>> {
     let mut stmt = conn.prepare(&format!("SELECT * FROM {table} WHERE id = ?1"))?;
-    let cols: Vec<String> = stmt.column_names().into_iter().map(String::from).collect();
+    let cols: Vec<String> = stmt.column_names().map(String::from).collect();
     let mut rows = stmt.query([id])?;
     match rows.next()? {
         Some(row) => {
