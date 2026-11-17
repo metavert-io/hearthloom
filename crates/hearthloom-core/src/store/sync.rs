@@ -343,8 +343,7 @@ impl Store {
             let body = row
                 .content_ref
                 .as_deref()
-                .map(|content_ref| home.root().join(content_ref))
-                .and_then(|path| std::fs::read_to_string(path).ok())
+                .and_then(|content_ref| home.read_raw(content_ref))
                 .unwrap_or_default();
             episodes.push(EpisodeDraft {
                 source: row.source,

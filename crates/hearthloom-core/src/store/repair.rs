@@ -746,8 +746,7 @@ pub struct RepairTarget {
 impl RepairTarget {
     /// The text of the copy in view, from its raw file.
     pub fn body(&self, home: &Home) -> Option<String> {
-        let rel = self.content_ref.as_deref()?;
-        std::fs::read_to_string(home.root().join(rel)).ok()
+        home.read_raw(self.content_ref.as_deref()?)
     }
 
     fn of(
@@ -1784,7 +1783,7 @@ impl Store {
                 let body = stored
                     .content_ref
                     .as_deref()
-                    .and_then(|rel| std::fs::read_to_string(home.root().join(rel)).ok());
+                    .and_then(|rel| home.read_raw(rel));
                 let Some(body) = body else {
                     finding.status = "unreadable";
                     finding.reason = "its stored text can't be read".into();

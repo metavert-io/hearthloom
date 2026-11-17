@@ -135,7 +135,7 @@ impl Home {
         if !stays_inside(&rel) {
             anyhow::bail!("note slug {slug:?} would write outside the notes folder");
         }
-        let path = self.root.join(&rel);
+        let path = self.root().join(&rel);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -144,7 +144,26 @@ impl Home {
     }
 
     pub fn read_note(&self, rel: &str) -> Result<String> {
-        fs::read_to_string(self.root.join(rel)).map_err(Into::into)
+        let path = self
+            .under_root(rel)
+            .ok_or_else(|| anyhow!("note path {rel:?} is outside the home folder"))?;
+        fs::read_to_string(path).map_err(Into::into)
+    }
+
+    /// The file a stored path names (an episode's `content_ref`, a note's
+    /// path): `rel` under the home root, or None when it could reach outside
+    /// it. The writers check the paths they make; readers check again,
+    /// because a stored row can come from somewhere else (a restored backup,
+    /// a database edited by hand). Joins go through `root()`, the method the
+    /// repository's CodeQL model marks as the node's own folder.
+    pub fn under_root(&self, rel: &str) -> Option<PathBuf> {
+        reads_inside(rel).then(|| self.root().join(rel))
+    }
+
+    /// The text of an episode's raw file, by its `content_ref`: None when it
+    /// can't be read or the path would leave the home root.
+    pub fn read_raw(&self, content_ref: &str) -> Option<String> {
+        fs::read_to_string(self.under_root(content_ref)?).ok()
     }
 
     /// Media preserved from note imports (images an embed referenced),
@@ -176,7 +195,7 @@ impl Home {
         if !stays_inside(&rel) {
             anyhow::bail!("raw path {rel:?} would write outside the raw folder");
         }
-        let path = self.root.join(&rel);
+        let path = self.root().join(&rel);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -195,6 +214,17 @@ fn stays_inside(rel: &str) -> bool {
         && rel
             .split('/')
             .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+}
+
+/// A stored relative path a reader may follow: not absolute, no `..`
+/// segment, no backslash or NUL. Looser than [`stays_inside`] on purpose
+/// (an empty or `.` segment can't leave the root), so a path an earlier
+/// version wrote before the writers checked still reads.
+fn reads_inside(rel: &str) -> bool {
+    !rel.is_empty()
+        && !rel.starts_with('/')
+        && !rel.contains(['\\', '\0'])
+        && rel.split('/').all(|seg| seg != "..")
 }
 
 #[cfg(test)]
@@ -234,5 +264,95 @@ mod tests {
         assert!(home.write_raw("../../escape", "2026-03-15", "x").is_err());
         assert!(home.write_raw("ep_x", "..-..-..", "x").is_err());
         assert!(!tmp.path().join("escape.md").exists() && !tmp.path().join("escape.txt").exists());
+    }
+
+    #[test]
+    fn test_readers_stay_inside_the_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path().join("hl"));
+        home.init().unwrap();
+        fs::write(tmp.path().join("outside.txt"), "not the home's").unwrap();
+        let outside = tmp.path().join("outside.txt");
+        let rel = home.write_raw("ep_in", "2026-03-15", "inside").unwrap();
+        assert_eq!(home.read_raw(&rel).as_deref(), Some("inside"));
+        // what a row an earlier version wrote can hold, and still reads
+        fs::create_dir_all(home.root().join("raw/2026/x")).unwrap();
+        fs::write(home.root().join("raw/2026/x/ep_old.txt"), "old").unwrap();
+        assert_eq!(
+            home.read_raw("raw/2026//x/ep_old.txt").as_deref(),
+            Some("old")
+        );
+        assert_eq!(
+            home.read_raw("./raw/2026/x/ep_old.txt").as_deref(),
+            Some("old")
+        );
+        for bad in [
+            "../outside.txt",
+            "raw/../../outside.txt",
+            outside.to_str().unwrap(),
+            "raw\\..\\..\\outside.txt",
+            "raw/\0",
+            "",
+        ] {
+            assert_eq!(home.read_raw(bad), None, "{bad:?} must be refused");
+            assert!(home.read_note(bad).is_err(), "{bad:?} must be refused");
+        }
+        let note = home.write_note("plan", "a note").unwrap();
+        assert_eq!(home.read_note(&note).unwrap(), "a note");
+    }
+
+    /// Outside tests, the home root is joined only with a name the code
+    /// fixes (a literal, a `format!`, a constant); a stored path goes
+    /// through `under_root` / `read_raw` / `read_note`. A new reader that
+    /// joins a stored path itself fails here.
+    #[test]
+    fn test_stored_paths_are_read_through_the_check() {
+        fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
+            for entry in fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    sources(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let mut files = Vec::new();
+        for krate in ["hearthloom-core", "hearthloom-daemon", "hearthloom-cli"] {
+            sources(&crates.join(krate).join("src"), &mut files);
+        }
+        assert!(files.len() > 20, "found the sources");
+        let mut joins = 0;
+        for file in files {
+            // the checked readers and writers themselves live here
+            if file.ends_with("hearthloom-core/src/paths.rs") {
+                continue;
+            }
+            let src = fs::read_to_string(&file).unwrap();
+            let code = src.split("#[cfg(test)]\nmod ").next().unwrap();
+            for (n, line) in code.lines().enumerate() {
+                for (at, _) in line.match_indices("root().join(") {
+                    joins += 1;
+                    let arg = &line[at + "root().join(".len()..];
+                    let fixed = arg.starts_with('"')
+                        || arg.starts_with("format!(")
+                        || arg
+                            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                            .next()
+                            .is_some_and(|name| {
+                                !name.is_empty()
+                                    && name.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+                            });
+                    assert!(
+                        fixed,
+                        "{}:{}: the home root joined with a stored path — use Home::under_root or read_raw",
+                        file.display(),
+                        n + 1
+                    );
+                }
+            }
+        }
+        assert!(joins > 10, "the scan sees the joins");
     }
 }
