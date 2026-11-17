@@ -44,10 +44,14 @@ file read (most of the path-injection alerts dismissed before
 (code scanning loads it by itself) marks what `Home`'s folder methods
 return as safe for path injection; a new `Home` method that returns a
 folder gets a row there. Path parts that come from a request are still
-tracked. The logging query flags a value whose NAME sounds sensitive
-(`uid`, user id, session id, account, token, password, health terms)
-once it reaches a printed or logged message, test assertion messages
-and numbers included, so tests don't name variables that way.
+tracked. CodeQL runs from `.github/workflows/codeql.yml` (advanced
+setup; GitHub's default setup stays off, or it refuses the workflow's
+results), whose Rust extractor leaves out `#[cfg(test)]` code
+(`CODEQL_EXTRACTOR_RUST_OPTION_CARGO_CFG_OVERRIDES: "-test"`): test
+fixtures were most of what it reported. The logging query still flags a
+value whose NAME sounds sensitive (`uid`, user id, session id, account,
+token, password, health terms) once it reaches a printed or logged
+message, numbers included, so don't name such values that way.
 
 Deploying: `cargo build --release && install -m 755 target/release/hearthloom
 ~/.local/bin/hearthloom && launchctl kickstart -k "gui/$(id -u)/com.hearthloom.daemon"`.

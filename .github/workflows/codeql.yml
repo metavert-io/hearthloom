@@ -1,0 +1,49 @@
+# CodeQL code scanning (advanced setup; GitHub's default setup is off for
+# this repository, and must stay off: it refuses results from a workflow
+# while it is on). Advanced setup lets the Rust extractor leave out
+# `#[cfg(test)]` code, which default setup analyses: test fixtures (a test
+# server's password, a loop variable named `uid` in an assertion message)
+# were most of what it reported. The model pack in .github/codeql/extensions
+# is used here too. Results appear under Security → Code scanning, under the
+# same categories default setup used, so earlier alerts and their
+# dismissals carry over.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [rust, javascript-typescript, actions]
+    env:
+      # the Rust extractor turns `test` on unless told otherwise
+      CODEQL_EXTRACTOR_RUST_OPTION_CARGO_CFG_OVERRIDES: "-test"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+      - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          category: /language:${{ matrix.language }}
