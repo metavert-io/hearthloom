@@ -1298,6 +1298,35 @@ pub(crate) fn unheld_live_copy(
     Ok(None)
 }
 
+/// A copy of the photo day `base` (text `body`) arriving after `ahead`, the
+/// higher revision that stands for the day: is `ahead` an owner repair's
+/// correction in view that doesn't hold the arriving copy? Then the
+/// correction goes behind it, as it does when it arrives second
+/// ([`unheld_live_copy`]), until this node can tell it holds the copy
+/// ([`settle_repair_copy`]). A correction whose text can't be read holds
+/// nothing.
+pub(crate) fn repair_copy_misses(
+    conn: &rusqlite::Connection,
+    home: &crate::paths::Home,
+    base: &str,
+    ahead: &str,
+    body: &str,
+) -> Result<bool> {
+    let Some(day) = base.strip_prefix("photos#") else {
+        return Ok(false);
+    };
+    let Some(copy) = day_copies(conn, base)?.into_iter().find(|c| c.id == ahead) else {
+        return Ok(false);
+    };
+    if copy.superseded_by.is_some() || !written_by_repair(conn, &copy.id)? {
+        return Ok(false);
+    }
+    Ok(match copy.body(home) {
+        Some(outer) => !text_holds(conn, day, &outer, body)?,
+        None => true,
+    })
+}
+
 /// A photo day whose newest copy is an owner repair's that stands behind
 /// another copy of the day — it arrived before this node could tell it
 /// held that copy (the photos it names, and the keys they took the place

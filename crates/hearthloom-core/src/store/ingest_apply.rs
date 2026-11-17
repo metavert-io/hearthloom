@@ -105,6 +105,90 @@ fn same_mail_text(stored: &str, arriving: &str) -> bool {
                 .is_some_and(|(text, _)| text == stored_text))
 }
 
+/// A copy of a revisioned record arriving after a fuller one (its base, or
+/// a lower revision — `revision` is the arriving ref's `#r<n>` digits, None
+/// for the base): the copy that stands for the record when it outranks the
+/// arriving one — the highest revision stored that is in view or retired,
+/// as the photo-day repair reads a day's standing copy. A copy standing
+/// behind another (an undone repair run's, a peer's correction this node
+/// doesn't hold yet) stands for nothing, so a base arriving after only such
+/// copies stands. Trips are left out: their revisions are fingerprints of a
+/// day's output, not counts, and the trips pass re-asserts its own set.
+fn standing_above(
+    conn: &rusqlite::Connection,
+    source: &str,
+    base: &str,
+    revision: Option<&str>,
+    episode_id: &str,
+) -> Result<Option<String>> {
+    if source == "trips" {
+        return Ok(None);
+    }
+    let rank = |digits: Option<&str>| match digits {
+        None => Some(1u128),
+        Some(n) => n.parse::<u128>().ok(),
+    };
+    let Some(arriving) = rank(revision) else {
+        return Ok(None);
+    };
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT id, source_ref FROM episodes /* all-episodes: which copy stands, retired too */
+         WHERE source = ?1 AND id != ?3 AND (source_ref = ?2 OR {})
+           AND (superseded_by IS NULL OR superseded_by LIKE 'retired:%')",
+        super::growing::growing_revision_sql(2)
+    ))?;
+    let copies: Vec<(String, String)> = stmt
+        .query_map(rusqlite::params![source, base, episode_id], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    Ok(copies
+        .into_iter()
+        .filter_map(|(id, source_ref)| {
+            let digits = source_ref.strip_prefix(base)?.strip_prefix("#r");
+            Some((rank(digits)?, id))
+        })
+        .filter(|(rank, _)| *rank > arriving)
+        .max()
+        .map(|(_, id)| id))
+}
+
+/// The copy just stored (`episode_id`, text `body`) arriving after `ahead`,
+/// the copy that stands for its record (`standing_above`; `base`: the
+/// record's unversioned ref): it lands behind `ahead` — unless `ahead` is
+/// an owner repair's photo-day correction that doesn't hold it, which then
+/// goes behind the arriving copy, as it would had it arrived second
+/// (`photo::repair_copy_misses`).
+fn land_late(
+    conn: &rusqlite::Connection,
+    home: &crate::paths::Home,
+    source: &str,
+    base: &str,
+    episode_id: &str,
+    body: &str,
+    ahead: &str,
+) -> Result<()> {
+    if source == "photos" && super::photo::repair_copy_misses(conn, home, base, ahead, body)? {
+        land_behind(conn, ahead, episode_id)
+    } else {
+        land_behind(conn, episode_id, ahead)
+    }
+}
+
+/// Put the copy `episode_id` behind `ahead` (its location points go with
+/// it, as every copy behind another's do).
+fn land_behind(conn: &rusqlite::Connection, episode_id: &str, ahead: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE episodes SET superseded_by = ?2 WHERE id = ?1",
+        rusqlite::params![episode_id, ahead],
+    )?;
+    conn.execute(
+        "DELETE FROM location_points WHERE episode_id = ?1",
+        [episode_id],
+    )?;
+    Ok(())
+}
+
 impl Store {
     /// Apply a batch of episode drafts. Raw content is written under the
     /// home's raw dir before the row lands; idempotent on re-runs.
@@ -653,19 +737,41 @@ impl Store {
                     [&episode_id],
                 )?;
             }
-            if let Some((base, _rev)) = draft
+            let revision = draft
                 .source_ref
                 .rsplit_once("#r")
                 .filter(|(_, r)| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit()))
-                .filter(|_| REVISIONED_SOURCES.contains(&draft.source.as_str()))
-            {
+                .filter(|_| REVISIONED_SOURCES.contains(&draft.source.as_str()));
+            if revision.is_none() && REVISIONED_SOURCES.contains(&draft.source.as_str()) {
+                // A base arriving after a revision of it (over the episode
+                // leg, say) lands behind the copy that stands for the record
+                // — or a photo day's correction that doesn't hold it goes
+                // behind the base.
+                if let Some(ahead) =
+                    standing_above(&tx, &draft.source, &draft.source_ref, None, &episode_id)?
+                {
+                    land_late(
+                        &tx,
+                        home,
+                        &draft.source,
+                        &draft.source_ref,
+                        &episode_id,
+                        &draft.body,
+                        &ahead,
+                    )?;
+                }
+            }
+            if let Some((base, rev)) = revision {
                 // Where a copy an owner repair run wrote stands instead of in
                 // view: an undone run's, behind the revision in view — or,
                 // none being here yet, behind the base's id, so the base
                 // arriving later stands and the undone copy never does; and
                 // a peer's photo day that doesn't hold the copy in view here,
-                // behind that copy (store/photo.rs).
-                let behind: Option<String> = if undone_copy {
+                // behind that copy (store/photo.rs). Any other revision lower
+                // than the copy that stands for the record lands behind it
+                // (`late`) — or a photo day's correction standing there that
+                // doesn't hold it goes behind it.
+                let (behind, late): (Option<String>, bool) = if undone_copy {
                     let in_view: Option<String> = tx
                         .query_row(
                             "SELECT id FROM episodes
@@ -676,24 +782,38 @@ impl Store {
                             |r| r.get(0),
                         )
                         .optional()?;
-                    Some(in_view.unwrap_or_else(|| ids::episode_id(&draft.source, base)))
+                    (
+                        Some(in_view.unwrap_or_else(|| ids::episode_id(&draft.source, base))),
+                        false,
+                    )
                 } else if draft.source == "photos"
                     && actor.actor.starts_with("peer:")
                     && writer.as_deref() == Some(super::repair::REPAIR_WRITER)
                 {
-                    super::photo::unheld_live_copy(&tx, home, base, &episode_id, &draft.body)?
+                    (
+                        super::photo::unheld_live_copy(&tx, home, base, &episode_id, &draft.body)?,
+                        false,
+                    )
                 } else {
-                    None
+                    (
+                        standing_above(&tx, &draft.source, base, Some(rev), &episode_id)?,
+                        true,
+                    )
                 };
                 if let Some(ahead) = behind {
-                    tx.execute(
-                        "UPDATE episodes SET superseded_by = ?2 WHERE id = ?1",
-                        rusqlite::params![episode_id, ahead],
-                    )?;
-                    tx.execute(
-                        "DELETE FROM location_points WHERE episode_id = ?1",
-                        [&episode_id],
-                    )?;
+                    if late {
+                        land_late(
+                            &tx,
+                            home,
+                            &draft.source,
+                            base,
+                            &episode_id,
+                            &draft.body,
+                            &ahead,
+                        )?;
+                    } else {
+                        land_behind(&tx, &episode_id, &ahead)?;
+                    }
                 } else {
                     tx.execute(
                         "UPDATE episodes SET superseded_by = ?1
@@ -1622,6 +1742,147 @@ mod tests {
             assert!(superseded(source, base), "{source}");
             assert!(!superseded(source, &format!("{base}#r2")), "{source}");
         }
+    }
+
+    /// A base, or a lower revision, arriving after a higher revision of its
+    /// record is stored lands behind the copy that stands, whatever order
+    /// the episode leg brings them in.
+    #[test]
+    fn test_a_late_base_or_lower_revision_lands_behind_the_copy_that_stands() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = Home::at(tmp.path());
+        home.init().unwrap();
+        let store = Store::open(&home.db_path()).unwrap();
+        let from = |source: &str, source_ref: &str| EpisodeDraft {
+            source: source.into(),
+            entities: vec![],
+            edges: vec![],
+            ..draft(source_ref)
+        };
+        let in_view = |source: &str, prefix: &str| -> Vec<String> {
+            let conn = store.lock();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT source_ref FROM episodes
+                     WHERE source = ?1 AND source_ref LIKE ?2 || '%' AND superseded_by IS NULL
+                     ORDER BY source_ref",
+                )
+                .unwrap();
+            stmt.query_map([source, prefix], |r| r.get(0))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap()
+        };
+        let behind = |source: &str, source_ref: &str| -> Option<String> {
+            store
+                .lock()
+                .query_row(
+                    "SELECT superseded_by FROM episodes WHERE source = ?1 AND source_ref = ?2",
+                    [source, source_ref],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        for (source, base) in [
+            ("photos", "photos#2026-07-20"),
+            ("visits", "visit:2026-07-20:0"),
+            ("contacts", "ABC-DEF"),
+        ] {
+            let r2 = format!("{base}#r2");
+            let r3 = format!("{base}#r3");
+            apply_as(&store, &home, "peer:laptop", vec![from(source, &r2)]);
+            apply_as(&store, &home, "peer:laptop", vec![from(source, base)]);
+            assert_eq!(in_view(source, base), vec![r2.clone()], "{source}");
+            assert_eq!(
+                behind(source, base),
+                Some(ids::episode_id(source, &r2)),
+                "{source}"
+            );
+            // a higher revision still takes the record; a lower one after
+            // it goes behind it, never in front
+            apply_as(&store, &home, "peer:laptop", vec![from(source, &r3)]);
+            apply_as(
+                &store,
+                &home,
+                "peer:laptop",
+                vec![from(source, &format!("{base}#r1"))],
+            );
+            assert_eq!(in_view(source, base), vec![r3.clone()], "{source}");
+        }
+
+        // a copy standing behind another (as an undone run's copy stands
+        // behind the base's id) stands for nothing: the base arriving stands
+        let day = "photos#2026-07-21";
+        let r2 = format!("{day}#r2");
+        apply_as(&store, &home, "peer:laptop", vec![from("photos", &r2)]);
+        store
+            .lock()
+            .execute(
+                "UPDATE episodes SET superseded_by = ?1 WHERE source_ref = ?2",
+                rusqlite::params![ids::episode_id("photos", day), r2],
+            )
+            .unwrap();
+        apply_as(&store, &home, "peer:laptop", vec![from("photos", day)]);
+        assert_eq!(in_view("photos", day), vec![day.to_string()]);
+
+        // a retired revision still stands for its day: the late base stays
+        // out of view, behind it
+        let day = "photos#2026-07-22";
+        let r2 = format!("{day}#r2");
+        apply_as(&store, &home, "peer:laptop", vec![from("photos", &r2)]);
+        store
+            .lock()
+            .execute(
+                "UPDATE episodes SET superseded_by = 'retired:rt_test' WHERE source_ref = ?1",
+                [&r2],
+            )
+            .unwrap();
+        apply_as(&store, &home, "peer:laptop", vec![from("photos", day)]);
+        assert!(in_view("photos", day).is_empty());
+        assert_eq!(behind("photos", day), Some(ids::episode_id("photos", &r2)));
+
+        // a private day keeps the late base private too
+        let day = "photos#2026-07-23";
+        let r2 = format!("{day}#r2");
+        apply_as(
+            &store,
+            &home,
+            "peer:laptop",
+            vec![EpisodeDraft {
+                scope: Some("private".into()),
+                ..from("photos", &r2)
+            }],
+        );
+        apply_as(&store, &home, "peer:laptop", vec![from("photos", day)]);
+        let scope: String = store
+            .lock()
+            .query_row(
+                "SELECT scope FROM episodes WHERE source_ref = ?1",
+                [day],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(scope, "private");
+        assert_eq!(in_view("photos", day), vec![r2]);
+
+        // a trip day's revisions are fingerprints, not counts: the one that
+        // arrives last stands until the trips pass re-asserts its own set
+        apply_as(
+            &store,
+            &home,
+            "peer:laptop",
+            vec![from("trips", "trip:2026-07-20:0#r900")],
+        );
+        apply_as(
+            &store,
+            &home,
+            "peer:laptop",
+            vec![from("trips", "trip:2026-07-20:0#r100")],
+        );
+        assert_eq!(
+            in_view("trips", "trip:2026-07-20:0"),
+            vec!["trip:2026-07-20:0#r100".to_string()]
+        );
     }
 
     #[test]

@@ -1928,6 +1928,187 @@ mod owned_source_tests {
 }
 
 #[cfg(test)]
+mod virtual_register_tests {
+    use super::*;
+    use tower::ServiceExt;
+
+    fn state() -> (AppState, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::paths::Home::at(tmp.path());
+        home.init().unwrap();
+        let state = AppState {
+            store: std::sync::Arc::new(
+                hearthloom_core::store::Store::open(&home.db_path()).unwrap(),
+            ),
+            home,
+            embedder: None,
+            llm: None,
+            auth_locked: Default::default(),
+            bus: Default::default(),
+            killswitch: Default::default(),
+            running: Default::default(),
+        };
+        (state, tmp)
+    }
+
+    /// Through the whole router: an ember registers a name and updates its
+    /// own registration; another ember, or an ordinary key, changes neither
+    /// its registration nor the owner's; the owner changes any; nobody's
+    /// registration turns a source of another kind into a mounted one.
+    #[tokio::test]
+    async fn test_a_registration_changes_only_for_its_writer_or_the_owner() {
+        let (state, tmp) = state();
+        let owner = Actor::new("human:owner");
+        let mint = |name: &str, scopes: &[&str]| -> (String, String) {
+            let scopes: Vec<String> = scopes.iter().map(|s| s.to_string()).collect();
+            let (row, secret) = state
+                .store
+                .create_api_key_scoped(&owner, name, &scopes, None, None)
+                .unwrap();
+            (row.id, secret)
+        };
+        let ember = |name: &str, scopes: &[&str]| -> String {
+            let (id, secret) = mint(&format!("plugin:{name}"), scopes);
+            let granted: Vec<String> = scopes.iter().map(|s| s.to_string()).collect();
+            state
+                .store
+                .install_plugin(
+                    &owner,
+                    name,
+                    "1.0.0",
+                    &json!({ "name": name }),
+                    &granted,
+                    &id,
+                    "local-only",
+                )
+                .unwrap();
+            secret
+        };
+        // scopes that alone would read as an owner's key: an ember's never is
+        let clipper = ember("clipper", &["read", "ingest", "notify"]);
+        let other = ember("other", &["ingest"]);
+        let (_, ordinary) = mint("helper", &["ingest"]);
+        let (_, admin) = mint("cli", &["admin"]);
+        let app = router(state.clone());
+        let missing = tmp.path().join("not-there");
+        let register = |secret: &str, name: &str, folder: &str| {
+            let body = json!({
+                "actor": "human:owner",
+                "name": name,
+                "adapter": "dir",
+                "config": {"mount": missing.join(folder).display().to_string()},
+            });
+            let request = axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/sources/virtual")
+                .header("authorization", format!("Bearer {secret}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap();
+            let app = app.clone();
+            async move { app.oneshot(request).await.unwrap().status() }
+        };
+        let mount = |name: &str| -> String {
+            let def = state.store.virtual_source(name).unwrap().unwrap();
+            def.config["mount"].as_str().unwrap().to_string()
+        };
+        let ends = |name: &str, folder: &str| mount(name).ends_with(folder);
+
+        // a new name is anyone's to register, and its writer may update it
+        assert_eq!(register(&clipper, "clips", "a").await, StatusCode::OK);
+        assert_eq!(register(&clipper, "clips", "b").await, StatusCode::OK);
+        assert!(ends("clips", "b"));
+        assert_eq!(register(&admin, "owner-src", "o").await, StatusCode::OK);
+
+        // another ember, or an ordinary key, changes neither
+        for secret in [&other, &ordinary] {
+            assert_eq!(register(secret, "clips", "x").await, StatusCode::FORBIDDEN);
+            assert_eq!(
+                register(secret, "owner-src", "x").await,
+                StatusCode::FORBIDDEN
+            );
+        }
+        assert_eq!(
+            register(&clipper, "owner-src", "x").await,
+            StatusCode::FORBIDDEN
+        );
+        assert!(ends("clips", "b") && ends("owner-src", "o"));
+
+        // the owner changes any registration — and it is the owner's then
+        assert_eq!(register(&admin, "clips", "c").await, StatusCode::OK);
+        assert!(ends("clips", "c"));
+        assert_eq!(
+            register(&clipper, "clips", "d").await,
+            StatusCode::FORBIDDEN
+        );
+        assert!(ends("clips", "c"));
+
+        // a materialized source (and a friend's connection) is no one's to
+        // register over, the owner's neither
+        state
+            .store
+            .apply_batch(
+                &state.home,
+                &hearthloom_core::ingest::IngestBatch {
+                    actor: "adapter:git".into(),
+                    session_id: None,
+                    episodes: vec![hearthloom_core::EpisodeDraft {
+                        source: "git".into(),
+                        source_ref: "commit-1".into(),
+                        kind: "commit".into(),
+                        title: "a commit".into(),
+                        body: "a commit".into(),
+                        event_time: hearthloom_core::EventTime::parse_rfc3339(
+                            "2026-11-01T00:00:00Z",
+                            hearthloom_core::TimeUncertainty::Exact,
+                        )
+                        .unwrap(),
+                        trust: "imported".into(),
+                        scope: Some("work".into()),
+                        entities: vec![],
+                        edges: vec![],
+                    }],
+                },
+            )
+            .unwrap();
+        state.store.sync_sources().unwrap();
+        state
+            .store
+            .set_friend(&owner, "friend-node", "https://friend.example", None)
+            .unwrap();
+        for name in ["git", "friend-node"] {
+            for secret in [&clipper, &admin] {
+                assert_eq!(
+                    register(secret, name, "x").await,
+                    StatusCode::FORBIDDEN,
+                    "{name}"
+                );
+            }
+            assert!(
+                state.store.virtual_source(name).unwrap().is_none(),
+                "{name}"
+            );
+        }
+        assert!(state
+            .store
+            .register_virtual_source(&owner, "git", "dir", &json!({}), &[])
+            .is_err());
+        let git = state
+            .store
+            .list_sources()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == "git")
+            .unwrap();
+        assert_eq!((git.kind.as_str(), git.adapter), ("materialized", None));
+        assert_eq!(
+            state.store.friends().unwrap()[0].1,
+            "https://friend.example"
+        );
+    }
+}
+
+#[cfg(test)]
 mod mail_hold_route_tests {
     use super::*;
 
@@ -5029,14 +5210,7 @@ async fn ingest(
     // The owner's own import (the CLI's chat-log route) relabels a copy
     // stored before that it now reads as private; a peer's labels travel on
     // the scope leg, and no other key moves a stored record's label.
-    let owners_import = !peer
-        && match &auth.0 {
-            None => true,
-            Some(c) => {
-                is_owner_key(&c.scopes, c.grants.is_some())
-                    && crate::plugins::plugin_for_claims(&state, c).is_none()
-            }
-        };
+    let owners_import = writes_as_owner(&state, &auth);
     // store work off the runtime's threads: a large import holds the store
     // many times over
     let report = crate::scoped::spawn_blocking(move || -> anyhow::Result<Value> {
@@ -5136,9 +5310,20 @@ async fn register_virtual(
             ));
         }
     }
-    state
-        .store
-        .register_virtual_source(&actor, &body.name, &adapter, &config, &capabilities)?;
+    // A name already registered changes only for the owner or for the
+    // writer who registered it (the store reads who that was from its own
+    // record); a source of another kind never changes.
+    let owner = writes_as_owner(&state, &auth);
+    if let Err(why) = state.store.register_virtual_source_as(
+        &actor,
+        owner,
+        &body.name,
+        &adapter,
+        &config,
+        &capabilities,
+    )? {
+        return Err(ApiError(StatusCode::FORBIDDEN, why.into()));
+    }
     // Mail archives need their sidecar index; (re)build it off-request
     // when missing or stale (register again after replacing the archive).
     let mut indexing = false;
@@ -6198,6 +6383,20 @@ fn expiry_from(expires_at: Option<String>, in_secs: Option<i64>) -> Option<Strin
                 .to_string()
         })
     })
+}
+
+/// The caller writes as the owner: a signed-in session (or the open
+/// loopback), an admin key or a paired device's key — never a peer's key,
+/// nor an ember's whatever its scopes.
+fn writes_as_owner(state: &AppState, auth: &AuthInfo) -> bool {
+    match &auth.0 {
+        None => true,
+        Some(c) => {
+            !c.scopes.iter().any(|s| s == "peer")
+                && is_owner_key(&c.scopes, c.grants.is_some())
+                && crate::plugins::plugin_for_claims(state, c).is_none()
+        }
+    }
 }
 
 /// Who a write is recorded under. A key that isn't the owner's — a

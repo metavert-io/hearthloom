@@ -1325,7 +1325,9 @@ the design log 2026-07-14.
   daemon sets it on every read of the hold, at boot, and before the mail
   routes and raw SQL naming a mail table; `MAIL_HELD_SHADOW_VIEWS`): any
   thread or queued message could be the held message, and the threads
-  keep their labels.
+  keep their labels. Not held, locked raw SQL reads a draft or queued
+  match only when its thread (the one it names, else the one its message
+  joined here) is here and not private (`VAULT_SHADOW_VIEWS`).
   A hold is never a label (`virtual_source::MailHold`; readers use
   `MailPrivacy::key_private`, writers `found`/`key_found` and `hold`
   apart): nothing records a message's privacy on its strength, because a
@@ -1646,6 +1648,13 @@ the design log 2026-07-14.
   ordinary key's scopes per tool (`mcp.rs::call_tool`: `read`|`mcp` read,
   `mcp`|`write` propose, `write` commit) and its writes go through
   `write_actor`. A new route that writes for a key uses one of the two.
+  A registered name changes only for the owner or the writer the
+  mutation log records as its maker, and a source row of another kind
+  never does (`Store::register_virtual_source_as`). Each registration is
+  recorded under a key of its own; a record under the name's bare key is
+  an earlier build's, which recorded only a name's first registration, so
+  it names no maker and only the owner changes that name
+  (`browse.rs::registrant_of`).
 - **THE FIRST LOGIN NEEDS PROOF (0.5.96, setup_code.rs).** `auth_bootstrap`
   takes the node's one-time setup code (`<home>/setup-code`, 0600, spent
   on use), or on a node with `HEARTHLOOM_PROVISIONER_SECRET` only the
@@ -2022,13 +2031,16 @@ the design log 2026-07-14.
   only the copies of the day in view there that it holds by THAT node's
   points and replaced keys (`photo::unheld_live_copy`; else it lands
   behind the copy in view — a node whose copy shows a photo the correction
-  lacks keeps it), and is checked again when the run settles there and
+  lacks keeps it; in either arrival order: a copy of the day arriving
+  after the correction that the correction doesn't hold puts it behind
+  itself, `photo::repair_copy_misses`), and is checked again when the run settles there and
   whenever the photos leg brings points of the day
   (`photo::settle_repair_copy`, from `photo_points_apply_and_settle` — the
   points and replaced keys come on their own leg, and a paged or failed
   one brings them after the run; the photos leg applies through that
   method, never `photo_points_apply`, on the blocking pool —
-  `live_photos::apply_peer_points`; the day checked is the one the point
+  `live_photos::apply_peer_points` — and moves its pull cursor only past a
+  page that applied (`sync.rs::take_photos_page`); the day checked is the one the point
   stored here keeps, which a peer's time zone can put elsewhere) or this
   node's own feeds name points of the day (its Mac scan, the phone's
   stream: `photos_add_points_and_settle`, never `photos_add_points`; every
@@ -2083,7 +2095,12 @@ the design log 2026-07-14.
   on two peers CONVERGE on the identical row; (2) the marking is
   receiver-side and derived purely from the ref (`ingest_apply` marks
   base + lower revisions `superseded_by = <new id>` whenever a
-  revisioned episode lands) — supersession therefore syncs with ZERO
+  revisioned episode lands; a base or lower revision arriving after a
+  higher one lands behind the copy that stands — the highest in view or
+  retired, `ingest_apply::standing_above`, unless that is a photo day's
+  correction in view that doesn't hold it, which goes behind it
+  (`ingest_apply::land_late`); not trips, whose revisions are
+  fingerprints) — supersession therefore syncs with ZERO
   wire changes; (3) guard a re-mint with a SUPERSET check against a
   minted-ledger table (photo_day: count + keys-hash) so a node that
   hasn't synced the other source's data yet can never clobber a rich
@@ -2153,7 +2170,12 @@ the design log 2026-07-14.
   `OWNER_ONLY_SOURCES` and its `self` trust becomes `imported`.
 - **The vault defaults LOCKED**: every server-side read path excludes
   `scope='private'` while locked (search/recall/dossier/traverse/ribbons/
-  browse/stats/MCP/Ask; raw-sql via TEMP-VIEW shadowing in `read_query`),
+  browse/stats/MCP/Ask; raw-sql via TEMP-VIEW shadowing in `read_query`,
+  which refuses a `main` schema qualifier in any spelling SQLite reads —
+  quoted, any case, comments or whitespace as SQLite's tokenizer reads it
+  (a vertical tab within a run, a U+FEFF where a token would begin) before
+  the dot — and ATTACH, either of which reaches the tables behind the
+  views: `names_another_schema`),
   with zero leakage (no "N hidden"). Ask history/detail (v9): an ask run
   while unlocked is flagged `ask_log.sensitive` and hides again while
   locked (its answer/transcript can quote private episodes). Persisted

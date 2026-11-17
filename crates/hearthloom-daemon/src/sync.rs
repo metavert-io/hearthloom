@@ -293,6 +293,21 @@ fn take_repairs_page(
     (changed, cursor)
 }
 
+/// Where the photos pull cursor goes once a pulled page of photo points
+/// was applied (`applied`): past the page (`next`) only when it applied.
+/// A page that failed (a busy store, a point that aborted the transaction)
+/// is asked for again next cycle — points apply idempotently by key.
+/// None: leave the cursor at `after`.
+fn take_photos_page(applied: Result<usize>, after: i64, next: Option<i64>) -> Option<i64> {
+    if let Err(err) = applied {
+        tracing::warn!(
+            "sync: a peer's page of photo points couldn't be applied here ({err:#}); asked for again next cycle"
+        );
+        return None;
+    }
+    next.filter(|n| *n > after)
+}
+
 /// One full cycle: push local-new, pull remote-new. The outcome —
 /// success OR failure — is persisted for the status surface.
 pub async fn sync_once(state: &AppState) -> Result<Value> {
@@ -901,12 +916,9 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
         {
             if res.status().is_success() {
                 if let Ok(batch) = res.json::<Value>().await {
-                    let next = batch
-                        .get("next")
-                        .and_then(|n| n.as_i64())
-                        .unwrap_or(pull_seq);
-                    let _ = crate::live_photos::apply_peer_points(state, batch).await;
-                    if next > pull_seq {
+                    let next = batch.get("next").and_then(|n| n.as_i64());
+                    let applied = crate::live_photos::apply_peer_points(state, batch).await;
+                    if let Some(next) = take_photos_page(applied, pull_seq, next) {
                         state
                             .store
                             .set_consolidation_state("peer_photo_pull_seq", &next.to_string())?;
@@ -1814,8 +1826,23 @@ pub async fn run_loop(state: AppState) {
 
 #[cfg(test)]
 mod tests {
-    use super::{take_repairs_page, total_pct};
+    use super::{take_photos_page, take_repairs_page, total_pct};
     use serde_json::json;
+
+    /// A page of photo points that couldn't be applied leaves the pull
+    /// cursor where it was, so the same page is fetched again; one that
+    /// applied moves it past.
+    #[test]
+    fn test_the_photos_pull_cursor_moves_only_past_an_applied_page() {
+        assert_eq!(
+            take_photos_page(Err(anyhow::anyhow!("database is locked")), 40, Some(90)),
+            None
+        );
+        assert_eq!(take_photos_page(Ok(3), 40, Some(90)), Some(90));
+        // nothing new, or no cursor in the page: it stays
+        assert_eq!(take_photos_page(Ok(0), 90, Some(90)), None);
+        assert_eq!(take_photos_page(Ok(0), 90, None), None);
+    }
 
     /// A page of repair runs that couldn't be applied leaves the pull
     /// cursor where it was, so the page — an undo, say — comes again; one
