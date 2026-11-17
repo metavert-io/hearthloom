@@ -8,3 +8,13 @@
 # (via tokenizers) and unsafe-libyaml (via serde_yaml, which is itself
 # deprecated upstream: replacing it is the way to clear this one).
 unmaintained = "workspace"
+
+# Reasoned exceptions: each says why it is safe for now and what clears it.
+ignore = [
+    # chrono and chrono-tz are marked unmaintained (2026-11): no known
+    # vulnerability, and no maintained release to move to. Dates, time
+    # zones and calendar recurrence use them throughout; moving to jiff is
+    # planned as its own change, which removes these two entries.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, no known vulnerability; move to jiff planned" },
+    { id = "RUSTSEC-2026-0555", reason = "chrono-tz unmaintained, no known vulnerability; move to jiff planned" },
+]
