@@ -578,8 +578,7 @@ impl Store {
             return Ok(None);
         };
         let count = content_ref
-            .map(|cr| home.root().join(cr))
-            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|cr| home.read_raw(&cr))
             .and_then(|body| {
                 body.lines().find_map(|l| {
                     l.strip_prefix("photos: ")
@@ -703,7 +702,7 @@ impl Store {
             let body = row
                 .content_ref
                 .as_deref()
-                .and_then(|rel| std::fs::read_to_string(home.root().join(rel)).ok());
+                .and_then(|rel| home.read_raw(rel));
             out.push(PhotoDayRecord {
                 day,
                 id: row.id,
@@ -982,8 +981,7 @@ pub(crate) struct DayCopy {
 
 impl DayCopy {
     fn body(&self, home: &crate::paths::Home) -> Option<String> {
-        let rel = self.content_ref.as_deref()?;
-        std::fs::read_to_string(home.root().join(rel)).ok()
+        home.read_raw(self.content_ref.as_deref()?)
     }
 }
 

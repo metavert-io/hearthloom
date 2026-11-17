@@ -1020,7 +1020,7 @@ impl Store {
                 )?
             };
             let Some(content_ref) = body else { continue };
-            let Ok(text) = std::fs::read_to_string(home.root().join(&content_ref)) else {
+            let Some(text) = home.read_raw(&content_ref) else {
                 continue;
             };
             let Some(payload_line) = text.lines().find_map(|l| l.strip_prefix("payload: ")) else {

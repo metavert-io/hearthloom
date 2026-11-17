@@ -331,9 +331,7 @@ impl Store {
         )?;
         drop(conn);
         let body = content_ref
-            .map(|content_ref| {
-                std::fs::read_to_string(home.root().join(content_ref)).unwrap_or_default()
-            })
+            .and_then(|content_ref| home.read_raw(&content_ref))
             .unwrap_or_default();
         Ok(body.chars().take(64 * 1024).collect())
     }

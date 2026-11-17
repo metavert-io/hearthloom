@@ -312,8 +312,7 @@ fn counted(source: &str, source_ref: &str) -> bool {
 
 impl Stored {
     fn body(&self, home: &Home) -> Option<String> {
-        let rel = self.content_ref.as_deref()?;
-        std::fs::read_to_string(home.root().join(rel)).ok()
+        home.read_raw(self.content_ref.as_deref()?)
     }
 
     fn rank(&self, texts: Texts<'_>, source: &str) -> Rank {
@@ -397,8 +396,7 @@ pub struct GrowingCopy {
 impl GrowingCopy {
     /// Its text, from the raw file (`None` if that can't be read).
     pub fn body(&self, home: &Home) -> Option<String> {
-        let rel = self.content_ref.as_deref()?;
-        std::fs::read_to_string(home.root().join(rel)).ok()
+        home.read_raw(self.content_ref.as_deref()?)
     }
 }
 
@@ -712,7 +710,7 @@ fn read_texts(home: &Home, copies: Vec<(String, Option<String>)>) -> ReadTexts {
     copies
         .into_iter()
         .map(|(id, rel)| {
-            let text = rel.and_then(|rel| std::fs::read_to_string(home.root().join(rel)).ok());
+            let text = rel.and_then(|rel| home.read_raw(&rel));
             (id, text)
         })
         .collect()

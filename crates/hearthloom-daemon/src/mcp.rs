@@ -213,9 +213,7 @@ fn tool_search(state: &AppState, args: &Value) -> anyhow::Result<Value> {
                     .ok()
                     .flatten()
                     .and_then(|episode| episode.content_ref)
-                    .and_then(|content_ref| {
-                        std::fs::read_to_string(state.home.root().join(content_ref)).ok()
-                    });
+                    .and_then(|content_ref| state.home.read_raw(&content_ref));
                 json!({
                     "id": hit.episode_id, "title": hit.title, "snippet": hit.snippet,
                     "source": hit.source, "kind": hit.kind, "event_time": hit.event_time,
