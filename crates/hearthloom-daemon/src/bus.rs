@@ -118,6 +118,13 @@ impl Bus {
         format!("{millis:012x}-{seq:08x}")
     }
 
+    /// Was `topic` touched — waiting out its debounce, or published?
+    #[cfg(test)]
+    pub(crate) fn touched(&self, topic: &str) -> bool {
+        self.pending.lock().unwrap().contains(topic)
+            || self.ring.lock().unwrap().iter().any(|e| e.topic == topic)
+    }
+
     /// Append to the ring (pruning cap + TTL) and fan out to live
     /// subscribers. Returns the event as enveloped.
     fn insert(

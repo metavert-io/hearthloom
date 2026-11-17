@@ -57,6 +57,9 @@ imap-proto = "0.16.7"
 # the TLS imap uses: the Gmail adapter opens the connection itself so every
 # step has a deadline (imap's ClientBuilder sets none)
 native-tls = "0.2"
+# the normalizer url/idna already build: the ChatGPT adapter compares image
+# file names the way a Mac's disk does (one name in any case or Unicode form)
+icu_normalizer = { version = "2", default-features = false, features = ["compiled_data"] }
 tract-onnx = "0.23"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

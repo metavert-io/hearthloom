@@ -77,10 +77,45 @@ pub fn detect_dir(path: &Path) -> Option<&'static str> {
         return Some("apple-health");
     }
     let name = path.file_name()?.to_string_lossy().into_owned();
-    if name.starts_with("Export-") {
+    if name.starts_with("Export-") && holds_notion_pages(path) {
         return Some("notion");
     }
     None
+}
+
+/// Whether a folder holds a Notion page — a `.md` or `.csv` file, or a
+/// folder, named `<title> <32-hex page id>`, as Notion's exporter writes
+/// them — at its top or one folder down. A folder named `Export-…` alone
+/// (a backup's, at any depth of a dropped archive) is no Notion export.
+fn holds_notion_pages(dir: &Path) -> bool {
+    let is_page = |entry: &std::fs::DirEntry| {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let stem = name
+            .strip_suffix(".md")
+            .or_else(|| name.strip_suffix(".csv"))
+            .unwrap_or(&name);
+        stem.rsplit_once(' ')
+            .is_some_and(|(_, id)| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let mut folders = Vec::new();
+    for entry in entries.flatten() {
+        if is_page(&entry) {
+            return true;
+        }
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            folders.push(entry.path());
+        }
+    }
+    folders.iter().any(|folder| {
+        std::fs::read_dir(folder)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| is_page(&entry))
+    })
 }
 
 /// Dirs stage into archives/<key> (their adapters read there); files go
@@ -347,8 +382,22 @@ mod tests {
         std::fs::create_dir_all(fb.join("your_facebook_activity")).unwrap();
         assert_eq!(detect_dir(&fb), Some("facebook"));
         let notion = root.join("Export-abc123");
-        std::fs::create_dir(&notion).unwrap();
+        std::fs::create_dir_all(notion.join("Projects 0123456789abcdef0123456789abcdef")).unwrap();
         assert_eq!(detect_dir(&notion), Some("notion"));
+        // the name alone isn't enough: a page, at the top or one folder down
+        let pages = root.join("Export-def456");
+        std::fs::create_dir_all(pages.join("Private & Shared")).unwrap();
+        assert_eq!(detect_dir(&pages), None);
+        std::fs::write(
+            pages.join("Private & Shared/Roadmap 11112222333344445555666677778888.md"),
+            b"# Roadmap",
+        )
+        .unwrap();
+        assert_eq!(detect_dir(&pages), Some("notion"));
+        let backup = root.join("Export-2024-03");
+        std::fs::create_dir(&backup).unwrap();
+        std::fs::write(backup.join("calendar.ics"), b"BEGIN:VCALENDAR").unwrap();
+        assert_eq!(detect_dir(&backup), None);
         assert_eq!(detect_dir(&root.join("nope")), None);
     }
 

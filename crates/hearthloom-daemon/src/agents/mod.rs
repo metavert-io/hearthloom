@@ -1265,13 +1265,14 @@ async fn run_one(state: AppState, agent: AgentRow, task: AgentTaskRow) {
         .error
         .as_deref()
         .is_some_and(|e| e.starts_with("waiting"));
+    // the task keeps the harness this run starts on, whatever the agent is
+    // set to later (core store/owned.rs)
     if state
         .store
-        .set_agent_task_status(
+        .start_agent_task_run(
             &actor,
             &task.id,
-            "running",
-            None,
+            &agent.harness,
             clear.then_some(""),
             Some(&node),
         )

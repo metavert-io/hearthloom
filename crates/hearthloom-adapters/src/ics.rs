@@ -7,9 +7,16 @@
 //! sits directly in: what an event's nested components carry (an alarm's
 //! ATTENDEE and DESCRIPTION) never becomes the event's.
 //!
-//! Time zones: a TZID resolves as an IANA name (chrono-tz), a Windows zone
-//! name (what Outlook and Exchange write), or the file's own VTIMEZONE
-//! definition, in that order. Timezone honesty: all-day events get
+//! A VEVENT never holds another: one that begins while an event is still
+//! open ends that one (its END:VEVENT is missing), and the rest of the file
+//! still imports.
+//!
+//! Time zones: a TZID resolves as an IANA name (chrono-tz, with the zone's
+//! history), else the file's own VTIMEZONE definition, else a Windows zone
+//! name (what Outlook and Exchange write) or an IANA name behind a vendor
+//! prefix — so a name the file defines keeps the file's rules. A
+//! definition's rule that ended (UNTIL) keeps its last change in force.
+//! Timezone honesty: all-day events get
 //! day-level uncertainty; floating times (no TZID, no Z — or a TZID none
 //! of the above resolves) get hour-level uncertainty instead of a
 //! fabricated offset. A wall-clock time a daylight-saving change skips is
@@ -24,17 +31,22 @@
 //! when it can stand in for it: its start can be read, or it cancels the
 //! occurrence. The first occurrence keeps the bare UID as its ref; each
 //! later one is `<UID>#<start>`, the start written the way the series'
-//! DTSTART writes it (as RECURRENCE-ID usually does), so an override, a
-//! phone-synced instance and a later import of the same occurrence share
-//! one ref. An occurrence only an RDATE adds is written the way that RDATE
-//! writes it; one a rule makes as well keeps the rule's ref, also in an
-//! import made after the series has left that start out (it keeps its
-//! latest `MAX_OCCURRENCES`). An override's ref is the one the series
-//! gives the occurrence it names, however its RECURRENCE-ID is written;
-//! without the series' own event in the file, or when a RECURRENCE-ID
-//! written as a DATE names a day of a series of date-times, it is
-//! `<UID>#<RECURRENCE-ID>`. A start the rule makes at a time a
-//! daylight-saving change skips is no occurrence (RFC 5545 §3.3.10).
+//! DTSTART writes it. An occurrence only an RDATE adds is written the way
+//! that RDATE writes it — except a wall-clock time in another zone than
+//! DTSTART's, written by its instant in UTC (the same wall-clock time in
+//! two zones is two occurrences, and must be two refs); one a rule makes as
+//! well keeps the rule's ref, also in an import made after the series has
+//! left that start out (it keeps its latest `MAX_OCCURRENCES`). An
+//! override's ref is `<UID>#<RECURRENCE-ID as written>`, the first
+//! occurrence's too — what earlier versions stored overrides under and the
+//! phone's calendar feed sends; written the way DTSTART is (RFC 5545 asks
+//! for the same value type), it is the ref the series gives that
+//! occurrence (the first excepted). A wall-clock RECURRENCE-ID the series
+//! would read as another instant (another zone than DTSTART's, or floating
+//! time next to a zoned DTSTART) is written by its instant in UTC, as such
+//! an RDATE is, so it can't take another occurrence's ref.
+//! A start the rule makes at a time a daylight-saving change skips is no
+//! occurrence (RFC 5545 §3.3.10).
 //!
 //! The occurrences of a recurring event — its first, the ones its rules
 //! and RDATEs add, and the ones its overrides move — are made only once
@@ -43,8 +55,9 @@
 //! revisions — a sender chooses the UID), so a pre-made future occurrence
 //! would hide the later correction. A later import adds the occurrences
 //! that have begun since, with the overrides and EXDATEs its file
-//! carries. A series keeps its latest `MAX_OCCURRENCES`. An event that
-//! doesn't recur imports whatever its date.
+//! carries. A series keeps its latest `MAX_OCCURRENCES` up to the import
+//! (and the later ones a RANGE=THISANDFUTURE override moves before it).
+//! An event that doesn't recur imports whatever its date.
 //!
 //! A cancelled event or occurrence (STATUS:CANCELLED) becomes no episode.
 //! One event that can't be read (no DTSTART, a malformed one) is left out
@@ -210,67 +223,92 @@ fn strip_prefix_ci<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
         .then(|| &line[prefix.len()..])
 }
 
+/// The components a parse has open, outermost first, and what closing
+/// them adds to the calendar.
+struct Parse {
+    cal: Calendar,
+    /// The open components; a property line lands in the innermost one.
+    open: Vec<(String, Component)>,
+    /// Observances read inside the VTIMEZONE being parsed (None = one that
+    /// can't be used, which makes the whole definition unusable).
+    observances: Vec<Option<Observance>>,
+}
+
+impl Parse {
+    /// Close the open component at `at` and everything inside it.
+    fn close(&mut self, at: usize) {
+        while self.open.len() > at {
+            let (name, component) = self.open.pop().expect("open component");
+            let parent = self.open.last().map(|(n, _)| n.as_str());
+            match name.as_str() {
+                // A VEVENT inside another component isn't an event of
+                // this calendar.
+                "VEVENT" if parent.is_none_or(|p| p == "VCALENDAR") => {
+                    self.cal.events.push(component)
+                }
+                "STANDARD" | "DAYLIGHT" if parent == Some("VTIMEZONE") => {
+                    self.observances.push(observance(&component))
+                }
+                "VTIMEZONE" => {
+                    let tzid = component.value("TZID").map(|t| t.trim().to_string());
+                    let parts: Option<Vec<Observance>> =
+                        std::mem::take(&mut self.observances).into_iter().collect();
+                    if let (Some(tzid), Some(parts)) = (tzid, parts) {
+                        if !parts.is_empty() {
+                            self.cal
+                                .timezones
+                                .insert(tzid, VTimezone { observances: parts });
+                        }
+                    }
+                }
+                // Everything else (an event's VALARM, a VTODO, …) is
+                // dropped with its properties.
+                _ => {}
+            }
+        }
+    }
+}
+
 fn parse_calendar(raw: &str) -> Calendar {
-    let mut cal = Calendar::default();
-    // The open components, outermost first; a property line lands in the
-    // innermost one.
-    let mut open: Vec<(String, Component)> = Vec::new();
-    // Observances read inside the VTIMEZONE being parsed (None = one that
-    // can't be used, which makes the whole definition unusable).
-    let mut observances: Vec<Option<Observance>> = Vec::new();
+    let mut parse = Parse {
+        cal: Calendar::default(),
+        open: Vec::new(),
+        observances: Vec::new(),
+    };
     for line in unfold(raw) {
         let line = line.trim_end();
         if let Some(name) = strip_prefix_ci(line, "BEGIN:") {
             let name = name.trim().to_ascii_uppercase();
             if name == "VTIMEZONE" {
-                observances.clear();
+                parse.observances.clear();
             }
-            open.push((name, Component::default()));
+            // An event never holds another: one that begins while an event
+            // is still open ends that one (its END:VEVENT is missing), so
+            // the later events aren't read as nested in it and dropped.
+            if name == "VEVENT" {
+                if let Some(at) = parse.open.iter().rposition(|(n, _)| n == "VEVENT") {
+                    parse.close(at);
+                }
+            }
+            parse.open.push((name, Component::default()));
             continue;
         }
         if let Some(name) = strip_prefix_ci(line, "END:") {
             let name = name.trim().to_ascii_uppercase();
             // Close up to the matching BEGIN: a component left without
             // its END closes with its parent.
-            let Some(at) = open.iter().rposition(|(n, _)| *n == name) else {
-                continue;
-            };
-            while open.len() > at {
-                let (name, component) = open.pop().expect("open component");
-                let parent = open.last().map(|(n, _)| n.as_str());
-                match name.as_str() {
-                    // A VEVENT inside another component isn't an event of
-                    // this calendar.
-                    "VEVENT" if parent.is_none_or(|p| p == "VCALENDAR") => {
-                        cal.events.push(component)
-                    }
-                    "STANDARD" | "DAYLIGHT" if parent == Some("VTIMEZONE") => {
-                        observances.push(observance(&component))
-                    }
-                    "VTIMEZONE" => {
-                        let tzid = component.value("TZID").map(|t| t.trim().to_string());
-                        let parts: Option<Vec<Observance>> =
-                            std::mem::take(&mut observances).into_iter().collect();
-                        if let (Some(tzid), Some(parts)) = (tzid, parts) {
-                            if !parts.is_empty() {
-                                cal.timezones.insert(tzid, VTimezone { observances: parts });
-                            }
-                        }
-                    }
-                    // Everything else (an event's VALARM, a VTODO, …) is
-                    // dropped with its properties.
-                    _ => {}
-                }
+            if let Some(at) = parse.open.iter().rposition(|(n, _)| *n == name) {
+                parse.close(at);
             }
             continue;
         }
-        if let Some((_, component)) = open.last_mut() {
+        if let Some((_, component)) = parse.open.last_mut() {
             if let Some((name, prop)) = parse_prop_line(line) {
                 component.props.entry(name).or_default().push(prop);
             }
         }
     }
-    cal
+    parse.cal
 }
 
 /// `-0500`, `+0530`, `+013045` → seconds east of UTC.
@@ -394,12 +432,11 @@ enum Zone<'a> {
     Floating,
 }
 
-/// A TZID chrono-tz knows: an IANA name, a Windows zone name, or an IANA
-/// name behind a vendor prefix (`/mozilla.org/20050126_1/America/New_York`).
-fn known_zone(tzid: &str) -> Option<chrono_tz::Tz> {
-    if let Ok(tz) = tzid.parse() {
-        return Some(tz);
-    }
+/// A TZID that names a zone chrono-tz knows without being an IANA name: a
+/// Windows zone name, or an IANA name behind a vendor prefix
+/// (`/mozilla.org/20050126_1/America/New_York`). Read only for a TZID the
+/// file doesn't define.
+fn named_like_a_known_zone(tzid: &str) -> Option<chrono_tz::Tz> {
     if let Some(tz) = windows_zones::iana(tzid) {
         return Some(tz);
     }
@@ -465,11 +502,19 @@ impl Calendar {
         let Some(tzid) = tzid.map(|t| t.trim()).filter(|t| !t.is_empty()) else {
             return Zone::Floating;
         };
-        if let Some(tz) = known_zone(tzid) {
+        // An IANA name is that zone, with its history (a file's definition
+        // of one usually carries only its current rule).
+        if let Ok(tz) = tzid.parse() {
             return Zone::Named(tz);
         }
-        match self.timezones.get(tzid) {
-            Some(def) => Zone::Defined(def),
+        // Any other name means what the file defines it as; a Windows name
+        // or a vendor-prefixed IANA name is read as that zone only when the
+        // file doesn't define it.
+        if let Some(def) = self.timezones.get(tzid) {
+            return Zone::Defined(def);
+        }
+        match named_like_a_known_zone(tzid) {
+            Some(tz) => Zone::Named(tz),
             None => Zone::Floating,
         }
     }
@@ -491,6 +536,9 @@ impl Calendar {
     fn expansion(&self, horizon: NaiveDateTime) -> Expansion<'_> {
         let mut overrides: HashMap<&str, SeriesOverrides<'_>> = HashMap::new();
         let mut masters = HashMap::new();
+        // For each series a RANGE=THISANDFUTURE override carries on: the
+        // farthest its starts are needed (see `range_reach`).
+        let mut reach: HashMap<&str, NaiveDateTime> = HashMap::new();
         for event in &self.events {
             let Some(uid) = event.value("UID") else {
                 continue;
@@ -504,36 +552,39 @@ impl Calendar {
             };
             // An override takes its occurrence from the series only when
             // it stands in for it: it imports itself, or cancels it.
-            if !cancelled(event) && self.dtstart(event).is_err() {
+            let start = self.dtstart(event);
+            if !cancelled(event) && start.is_err() {
                 continue;
             }
             let series = overrides.entry(uid).or_default();
             if this_and_future(rid) {
                 series.ranges.push(replaced);
+                // A cancelled one carries nothing on.
+                if let (false, Ok(start)) = (cancelled(event), start) {
+                    let needed = range_reach(horizon, &replaced, &start);
+                    let far = reach.entry(uid).or_insert(needed);
+                    *far = (*far).max(needed);
+                }
             } else {
                 series.single.push(replaced);
             }
         }
-        let rdate_only = masters
-            .iter()
-            .filter(|(uid, _)| {
-                overrides.get(*uid).is_some_and(|o| {
-                    o.single
-                        .iter()
-                        .chain(&o.ranges)
-                        .any(|r| !matches!(r.stamp, Stamp::Date(_)))
-                })
-            })
-            .filter_map(|(uid, master)| {
+        // Each such series is expanded once, as far as its overrides need:
+        // the series' own event and every one of them read from that.
+        let walked = reach
+            .into_iter()
+            .filter_map(|(uid, reach)| {
+                let master = masters.get(uid)?;
                 let first = self.dtstart(master).ok()?;
-                Some((*uid, rdate_only(self, master, first)))
+                let starts = series_starts(self, master, uid, first, horizon, reach.max(horizon));
+                Some((uid, Walked { first, starts }))
             })
             .collect();
         Expansion {
             overrides,
             masters,
             horizon,
-            rdate_only,
+            walked,
         }
     }
 
@@ -849,9 +900,20 @@ struct Expansion<'a> {
     masters: HashMap<&'a str, &'a Component>,
     /// No occurrence the rules make begins after this (the import).
     horizon: NaiveDateTime,
-    /// For each series an override names by a date-time: the occurrences
-    /// only an RDATE adds, by instant (`rdate_only`), worked out once.
-    rdate_only: HashMap<&'a str, HashMap<NaiveDateTime, Start<'a>>>,
+    /// For each series with a RANGE=THISANDFUTURE override that carries
+    /// on: its starts, expanded once.
+    walked: HashMap<&'a str, Walked<'a>>,
+}
+
+/// A series' starts, expanded once (`series_starts`) as far as its
+/// RANGE=THISANDFUTURE overrides need them, at least to the import: the
+/// cap on the rule's starts counts only those up to the import, so the
+/// series' own event keeps the occurrences a walk to the import keeps, and
+/// each override has at least those a walk to its own reach would.
+struct Walked<'a> {
+    /// The series' DTSTART.
+    first: Start<'a>,
+    starts: Vec<Start<'a>>,
 }
 
 /// Extract (email, display name) from an ATTENDEE/ORGANIZER property.
@@ -899,25 +961,29 @@ fn rule_instant(first: Start, wall: NaiveDateTime) -> Option<NaiveDateTime> {
     start.exists().then(|| start.instant())
 }
 
-/// Every occurrence of a series' own event up to `horizon`, in order and
-/// before any override: DTSTART, then what its rules and RDATEs add (a
-/// start its zone skips isn't one), minus its EXDATEs. An event that
-/// doesn't recur keeps its DTSTART whatever the horizon.
+/// Every occurrence of a series' own event up to `reach` (at least
+/// `horizon`, the import), in order and before any override: DTSTART, then
+/// what its rules and RDATEs add (a start its zone skips isn't one), minus
+/// its EXDATEs. Of the starts its rules make up to `horizon` it keeps the
+/// latest `MAX_OCCURRENCES`, and every one after: the occurrences up to the
+/// import are those a walk to the import alone keeps, whatever the reach.
+/// An event that doesn't recur keeps its DTSTART whatever the horizon.
 fn series_starts<'a>(
     cal: &'a Calendar,
     event: &Component,
     uid: &str,
     first: Start<'a>,
     horizon: NaiveDateTime,
+    reach: NaiveDateTime,
 ) -> Vec<Start<'a>> {
     let mut starts: Vec<Start<'a>> = Vec::new();
-    if !recurs(event) || first.instant() <= horizon {
+    if !recurs(event) || first.instant() <= reach {
         starts.push(first);
     }
     let listed: Vec<Start<'a>> = cal
         .listed(event, "RDATE")
         .into_iter()
-        .filter(|s| s.instant() <= horizon)
+        .filter(|s| s.instant() <= reach)
         .collect();
     let wanted: HashSet<NaiveDateTime> = listed.iter().map(Start::instant).collect();
     // The RDATEs' instants a rule makes too, with the rule's start there.
@@ -927,10 +993,11 @@ fn series_starts<'a>(
         match rrule::Rule::parse(&prop.value) {
             Ok(rule) => {
                 // The rule walks wall-clock time: a day's margin, then
-                // the horizon itself is applied to each instant.
+                // the reach itself is applied to each instant.
                 let (made, left_out, found) = rule.after_start(
                     first.stamp.wall(),
                     horizon + Duration::days(1),
+                    reach + Duration::days(1),
                     MAX_OCCURRENCES,
                     &instant,
                     &wanted,
@@ -944,7 +1011,7 @@ fn series_starts<'a>(
                 starts.extend(
                     made.into_iter()
                         .map(|wall| rule_start(first, wall))
-                        .filter(|s| s.instant() <= horizon),
+                        .filter(|s| s.instant() <= reach),
                 );
                 for (utc, wall) in found {
                     by_rule.entry(utc).or_insert(wall);
@@ -973,105 +1040,63 @@ fn series_starts<'a>(
     starts
 }
 
-/// The ref a series gives one of its occurrences.
+/// The ref a series gives one of its occurrences: the bare UID for its
+/// first, else `<UID>#<start>`, the start as the series writes it. A
+/// wall-clock start in another zone than DTSTART's (an RDATE's own TZID,
+/// or floating time next to a zoned DTSTART) is written by its instant, in
+/// UTC: the same wall-clock time in two zones is two occurrences, which
+/// must not share a ref (the store would keep only the first).
 fn occurrence_ref(uid: &str, first: &Start, occurrence: &Start) -> String {
-    if occurrence.stamp == first.stamp {
+    let stamp = match occurrence.stamp {
+        Stamp::Wall(_) if !occurrence.zone.same(&first.zone) => Stamp::Utc(occurrence.instant()),
+        stamp => stamp,
+    };
+    if stamp == first.stamp {
         uid.to_string()
     } else {
-        format!("{uid}#{}", occurrence.stamp.recurrence_id())
+        format!("{uid}#{}", stamp.recurrence_id())
     }
 }
 
-/// The ref of the occurrence an override's RECURRENCE-ID names. With the
-/// series' own event in the file, it is the ref the series gives that
-/// occurrence — the bare UID for the first one, the RDATE's own for one
-/// only an RDATE adds, and the same ref whatever form or zone the
-/// RECURRENCE-ID is written in; without it, `<UID>#<RECURRENCE-ID>`. A
-/// RECURRENCE-ID written as a DATE on a series of date-times names a day,
-/// not one occurrence: its ref is `<UID>#<RECURRENCE-ID>` too.
+/// The ref of the occurrence an override's RECURRENCE-ID names:
+/// `<UID>#<RECURRENCE-ID as written>`, the ref earlier versions stored
+/// every override under (the first occurrence's too) and the one the
+/// phone's calendar feed sends. A RECURRENCE-ID written the way DTSTART is
+/// (RFC 5545 asks for the same value type; the zone is usually the same
+/// too) is the ref the series gives that occurrence, the first excepted.
+/// One the series' own event would read as another instant — a wall-clock
+/// time in another zone than DTSTART's, or floating time next to a zoned
+/// one — is written by its instant, in UTC, as such an RDATE is: as
+/// written, it would be the ref of the series' occurrence at that
+/// wall-clock time (the store would keep only the first).
 fn override_ref(cal: &Calendar, expansion: &Expansion, uid: &str, rid: &Prop) -> String {
-    let as_written = || format!("{uid}#{}", rid.value);
-    let Some(replaced) = cal.start(rid) else {
-        return as_written();
-    };
-    let Some(first) = expansion
+    let first = expansion
         .masters
         .get(uid)
-        .and_then(|master| cal.dtstart(master).ok())
-    else {
-        return as_written();
-    };
-    if replaced.is(&first) {
-        return uid.to_string();
-    }
-    if !matches!(replaced.stamp, Stamp::Date(_)) {
-        if let Some(listed) = expansion
-            .rdate_only
-            .get(uid)
-            .and_then(|only| only.get(&replaced.instant()))
-            .filter(|listed| listed.is(&replaced))
-        {
-            return occurrence_ref(uid, &first, listed);
+        .and_then(|master| cal.dtstart(master).ok());
+    if let Some((replaced, first)) = cal.start(rid).zip(first) {
+        if let (Stamp::Wall(wall), Stamp::Wall(_)) = (replaced.stamp, first.stamp) {
+            if rule_start(first, wall).instant() != replaced.instant() {
+                return format!("{uid}#{}", Stamp::Utc(replaced.instant()).recurrence_id());
+            }
         }
     }
-    match first.express(&replaced) {
-        Some(stamp) => occurrence_ref(
-            uid,
-            &first,
-            &Start {
-                stamp,
-                zone: first.zone,
-            },
-        ),
-        None => as_written(),
-    }
+    format!("{uid}#{}", rid.value)
 }
 
-/// The occurrences only an RDATE adds to a series, by instant: at each
-/// instant an RDATE lists that neither DTSTART nor a rule makes, the first
-/// RDATE listed there. `series_starts` keeps that start, under the RDATE's
-/// own ref, at every import that reaches it (RDATEs still to come
-/// included), so an override naming it can take the same ref.
-fn rdate_only<'a>(
-    cal: &'a Calendar,
-    event: &Component,
-    first: Start<'a>,
-) -> HashMap<NaiveDateTime, Start<'a>> {
-    let listed: Vec<Start<'a>> = cal
-        .listed(event, "RDATE")
-        .into_iter()
-        .filter(|s| s.instant() != first.instant())
-        .collect();
-    let wanted: HashSet<NaiveDateTime> = listed.iter().map(Start::instant).collect();
-    let Some(last) = wanted.iter().max().copied() else {
-        return HashMap::new();
-    };
-    let instant = |wall: NaiveDateTime| rule_instant(first, wall);
-    let mut by_rule = HashSet::new();
-    for rule in event
-        .all("RRULE")
-        .iter()
-        .filter_map(|prop| rrule::Rule::parse(&prop.value).ok())
-    {
-        // One walk per rule, up to a day past the last RDATE (the rule
-        // walks wall-clock time; a day reaches it in any zone). Only the
-        // instants it finds are needed: it keeps no start.
-        let (_, _, found) = rule.after_start(
-            first.stamp.wall(),
-            last + Duration::days(1),
-            0,
-            &instant,
-            &wanted,
-        );
-        by_rule.extend(found.into_keys());
-    }
-    let mut only = HashMap::new();
-    for start in listed {
-        if !by_rule.contains(&start.instant()) {
-            only.entry(start.instant()).or_insert(start);
-        }
-    }
-    only
+/// How far a RANGE=THISANDFUTURE override moves its occurrences: the
+/// series' starts, the RECURRENCE-ID and the override's DTSTART may each be
+/// written in another zone, so the move is measured, and made, in the wall
+/// clock of the override's.
+fn range_shift(replaced: &Start, start: &Start) -> Duration {
+    start.stamp.wall() - start.wall_of(replaced)
+}
+
+/// How far a RANGE=THISANDFUTURE override needs its series' starts: the
+/// import, or past it by as much as the override moves its occurrences
+/// earlier (one moved earlier may come from past the import).
+fn range_reach(horizon: NaiveDateTime, replaced: &Start, start: &Start) -> NaiveDateTime {
+    horizon - range_shift(replaced, start).min(Duration::zero())
 }
 
 /// The occurrences a series' own event imports, in order, each with its
@@ -1084,7 +1109,29 @@ fn occurrences<'a>(
     first: Start<'a>,
 ) -> Vec<(Start<'a>, String)> {
     let overrides = event.value("UID").and_then(|u| expansion.overrides.get(u));
-    series_starts(cal, event, uid, first, expansion.horizon)
+    // When this is the series' own event and its starts were expanded for
+    // its RANGE=THISANDFUTURE overrides: those, up to the import.
+    let walked = expansion
+        .walked
+        .get(uid)
+        .filter(|_| {
+            expansion
+                .masters
+                .get(uid)
+                .is_some_and(|master| std::ptr::eq(*master, event))
+        })
+        .map(|walked| {
+            walked
+                .starts
+                .iter()
+                .copied()
+                .filter(|s| !recurs(event) || s.instant() <= expansion.horizon)
+                .collect()
+        });
+    walked
+        .unwrap_or_else(|| {
+            series_starts(cal, event, uid, first, expansion.horizon, expansion.horizon)
+        })
         .into_iter()
         .filter(|s| overrides.is_none_or(|o| !o.take(s)))
         .map(|s| (s, occurrence_ref(uid, &first, &s)))
@@ -1095,30 +1142,26 @@ fn occurrences<'a>(
 /// series' occurrences after `replaced` that follow this override (not
 /// a later one, not a single override), each moved as the override moved
 /// its own occurrence — by the same wall-clock difference, both read in
-/// the override's zone — and under the ref the series gives it.
+/// the override's zone — and under the ref the series gives it. The
+/// series' starts are the ones expanded once for all its overrides (see
+/// `Walked`).
 fn carried_on<'a>(
-    cal: &'a Calendar,
     expansion: &Expansion<'a>,
     uid: &str,
     replaced: Start<'a>,
     start: Start<'a>,
 ) -> Vec<(Start<'a>, String)> {
-    let (Some(master), Some(overrides)) =
-        (expansion.masters.get(uid), expansion.overrides.get(uid))
+    let (Some(walked), Some(overrides)) = (expansion.walked.get(uid), expansion.overrides.get(uid))
     else {
         return Vec::new();
     };
-    let Ok(first) = cal.dtstart(master) else {
-        return Vec::new();
-    };
-    // The series' starts, the RECURRENCE-ID and the override's DTSTART
-    // may each be written in another zone: the move is measured, and
-    // made, in the wall clock of the override's.
-    let shift = start.stamp.wall() - start.wall_of(&replaced);
-    // An occurrence moved earlier may come from past the horizon.
-    let reach = expansion.horizon - shift.min(Duration::zero());
-    series_starts(cal, master, uid, first, reach)
-        .into_iter()
+    let shift = range_shift(&replaced, &start);
+    let reach = range_reach(expansion.horizon, &replaced, &start);
+    walked
+        .starts
+        .iter()
+        .copied()
+        .filter(|s| s.instant() <= reach)
         .filter(|s| s.at_or_after(&replaced) && !s.is(&replaced))
         .filter(|s| overrides.range_of(s) == Some(replaced.instant()))
         .filter(|s| !overrides.single.iter().any(|x| s.is(x)))
@@ -1128,7 +1171,7 @@ fn carried_on<'a>(
                 zone: start.zone,
             };
             (moved.exists() && moved.instant() <= expansion.horizon)
-                .then(|| (moved, occurrence_ref(uid, &first, &s)))
+                .then(|| (moved, occurrence_ref(uid, &walked.first, &s)))
         })
         .collect()
 }
@@ -1177,7 +1220,7 @@ fn event_drafts<'a>(
                 own.push((start, override_ref(cal, expansion, &uid, rid)));
             }
             if let Some(replaced) = cal.start(rid).filter(|_| this_and_future(rid)) {
-                own.extend(carried_on(cal, expansion, &uid, replaced, start));
+                own.extend(carried_on(expansion, &uid, replaced, start));
             }
             own
         }
@@ -1524,6 +1567,53 @@ END:VCALENDAR\r\n";
         let names: Vec<&str> = draft.entities.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["Dentist", "Jane Doe"]);
         assert_eq!(draft.edges.len(), 1);
+    }
+
+    /// An event missing its END:VEVENT (here with an alarm left open too)
+    /// ends where the next event begins: every later event still imports,
+    /// each with only its own properties.
+    #[test]
+    fn test_an_event_left_open_ends_where_the_next_begins() {
+        const OPEN: &str = "BEGIN:VCALENDAR\r\n\
+VERSION:2.0\r\n\
+BEGIN:VEVENT\r\n\
+UID:open-1\r\n\
+SUMMARY:First\r\n\
+DTSTART:20260301T090000Z\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:open-2\r\n\
+SUMMARY:Left open\r\n\
+DTSTART:20260302T090000Z\r\n\
+BEGIN:VALARM\r\n\
+TRIGGER:-PT15M\r\n\
+BEGIN:VEVENT\r\n\
+UID:open-3\r\n\
+SUMMARY:Third\r\n\
+DTSTART:20260303T090000Z\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:open-4\r\n\
+SUMMARY:Fourth\r\n\
+DTSTART:20260304T090000Z\r\n\
+ATTENDEE:mailto:ada@example.com\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+        let drafts = all(OPEN);
+        assert_eq!(
+            by_ref(&drafts),
+            [
+                ("open-1", ("2026-03-01T09:00:00Z", "First")),
+                ("open-2", ("2026-03-02T09:00:00Z", "Left open")),
+                ("open-3", ("2026-03-03T09:00:00Z", "Third")),
+                ("open-4", ("2026-03-04T09:00:00Z", "Fourth")),
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>()
+        );
+        let left_open = drafts.iter().find(|d| d.source_ref == "open-2").unwrap();
+        assert!(!left_open.body.contains("ada@"), "{}", left_open.body);
+        assert_eq!(left_open.entities.len(), 1);
     }
 
     /// A Windows zone name, a zone only the file defines, and a time a
@@ -2031,40 +2121,75 @@ END:VCALENDAR\r\n";
         assert_eq!(refs, ["r-2", "r-2#20260309T090000"]);
     }
 
-    /// An override's ref is the one the series gives the occurrence it
-    /// names: the bare UID for the first, and the same ref when its
-    /// RECURRENCE-ID is written in another zone than DTSTART. Without the
-    /// series' own event in the file, it is the RECURRENCE-ID as written.
+    /// An override's ref is `<UID>#<RECURRENCE-ID as written>`, the ref
+    /// earlier versions stored it under, also when the RECURRENCE-ID is
+    /// written in another form than DTSTART (a re-import of a calendar they
+    /// imported adds no second copy), and for an override of the first
+    /// occurrence. With the series' own event in the file or without it,
+    /// an override lands under one ref — the one the phone's calendar feed
+    /// stores it under.
     #[test]
-    fn test_override_refs_follow_the_series() {
-        const SERIES: &str = "BEGIN:VCALENDAR\r\n\
+    fn test_override_refs_are_the_recurrence_id_as_written() {
+        const EARLIER: &str = "BEGIN:VCALENDAR\r\n\
 BEGIN:VEVENT\r\n\
+UID:w-1\r\n\
+SUMMARY:Review\r\n\
+DTSTART;TZID=America/New_York:20260105T140000\r\n\
+RRULE:FREQ=WEEKLY;COUNT=3\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:w-1\r\n\
+RECURRENCE-ID:20260112T190000Z\r\n\
+SUMMARY:Review (moved)\r\n\
+DTSTART;TZID=America/New_York:20260112T160000\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+        let drafts = all(EARLIER);
+        assert_eq!(
+            by_ref(&drafts),
+            [
+                ("w-1", ("2026-01-05T19:00:00Z", "Review")),
+                (
+                    "w-1#20260112T190000Z",
+                    ("2026-01-12T21:00:00Z", "Review (moved)")
+                ),
+                ("w-1#20260119T140000", ("2026-01-19T19:00:00Z", "Review")),
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>()
+        );
+        assert_eq!(drafts.len(), 3);
+
+        const MASTER: &str = "BEGIN:VEVENT\r\n\
 UID:o-1\r\n\
 SUMMARY:Standup\r\n\
 DTSTART:20260302T090000Z\r\n\
 RRULE:FREQ=DAILY;COUNT=3\r\n\
-END:VEVENT\r\n\
-BEGIN:VEVENT\r\n\
+END:VEVENT\r\n";
+        const FIRST: &str = "BEGIN:VEVENT\r\n\
 UID:o-1\r\n\
 RECURRENCE-ID:20260302T090000Z\r\n\
 SUMMARY:Standup (first, later)\r\n\
 DTSTART:20260302T100000Z\r\n\
-END:VEVENT\r\n\
-BEGIN:VEVENT\r\n\
+END:VEVENT\r\n";
+        const SECOND: &str = "BEGIN:VEVENT\r\n\
 UID:o-1\r\n\
 RECURRENCE-ID;TZID=Europe/London:20260303T090000\r\n\
 SUMMARY:Standup (second, later)\r\n\
 DTSTART:20260303T110000Z\r\n\
-END:VEVENT\r\n\
-END:VCALENDAR\r\n";
-        let drafts = all(SERIES);
+END:VEVENT\r\n";
+        let calendar = |events: &str| format!("BEGIN:VCALENDAR\r\n{events}END:VCALENDAR\r\n");
+        let drafts = all(&calendar(&format!("{MASTER}{FIRST}{SECOND}")));
         assert_eq!(drafts.len(), 3);
         assert_eq!(
             by_ref(&drafts),
             [
-                ("o-1", ("2026-03-02T10:00:00Z", "Standup (first, later)")),
                 (
-                    "o-1#20260303T090000Z",
+                    "o-1#20260302T090000Z",
+                    ("2026-03-02T10:00:00Z", "Standup (first, later)")
+                ),
+                (
+                    "o-1#20260303T090000",
                     ("2026-03-03T11:00:00Z", "Standup (second, later)")
                 ),
                 ("o-1#20260304T090000Z", ("2026-03-04T09:00:00Z", "Standup")),
@@ -2073,24 +2198,28 @@ END:VCALENDAR\r\n";
             .collect::<std::collections::BTreeMap<_, _>>()
         );
 
-        const ALONE: &str = "BEGIN:VCALENDAR\r\n\
-BEGIN:VEVENT\r\n\
-UID:o-2\r\n\
-RECURRENCE-ID:20260302T090000Z\r\n\
-SUMMARY:Standup (moved)\r\n\
-DTSTART:20260302T100000Z\r\n\
-END:VEVENT\r\n\
-END:VCALENDAR\r\n";
-        let refs: Vec<String> = all(ALONE).into_iter().map(|d| d.source_ref).collect();
-        assert_eq!(refs, ["o-2#20260302T090000Z"]);
+        // The overrides alone (as the phone's feed or an earlier import
+        // stored them) land under the refs they have next to the series.
+        for event in [FIRST, SECOND] {
+            let alone = all(&calendar(event));
+            assert_eq!(alone.len(), 1);
+            assert!(
+                drafts
+                    .iter()
+                    .any(|d| d.source_ref == alone[0].source_ref && d.title == alone[0].title),
+                "{}",
+                alone[0].source_ref
+            );
+        }
     }
 
-    /// An occurrence an RDATE adds to a zoned series, written in UTC or in
-    /// another zone, keeps its ref when an override names it, however the
-    /// RECURRENCE-ID is written: the ref an import before the override
-    /// stored it under. One the rule makes as well keeps the rule's ref.
+    /// An occurrence an RDATE adds to a zoned series keeps its ref written
+    /// in UTC (its own, or by its instant when it is a wall-clock time in
+    /// another zone); one the rule makes as well keeps the rule's ref. An
+    /// override takes the occurrence it names however its RECURRENCE-ID is
+    /// written, under that RECURRENCE-ID as written.
     #[test]
-    fn test_override_of_an_rdate_keeps_its_ref() {
+    fn test_override_of_an_rdate_takes_its_occurrence() {
         const SERIES: &str = "BEGIN:VEVENT\r\n\
 UID:rd-1\r\n\
 SUMMARY:Sync\r\n\
@@ -2125,7 +2254,7 @@ END:VEVENT\r\n";
             [
                 ("rd-1", ("2026-03-02T14:00:00Z", "Sync")),
                 ("rd-1#20260304T200000Z", ("2026-03-04T20:00:00Z", "Sync")),
-                ("rd-1#20260305T160000", ("2026-03-05T16:00:00Z", "Sync")),
+                ("rd-1#20260305T160000Z", ("2026-03-05T16:00:00Z", "Sync")),
                 ("rd-1#20260309T090000", ("2026-03-09T13:00:00Z", "Sync")),
                 ("rd-1#20260316T090000", ("2026-03-16T13:00:00Z", "Sync")),
             ]
@@ -2138,15 +2267,15 @@ END:VEVENT\r\n";
             [
                 ("rd-1", ("2026-03-02T14:00:00Z", "Sync")),
                 (
-                    "rd-1#20260304T200000Z",
+                    "rd-1#20260304T150000",
                     ("2026-03-04T22:00:00Z", "Sync (moved)")
                 ),
                 (
-                    "rd-1#20260305T160000",
+                    "rd-1#20260305T160000Z",
                     ("2026-03-05T18:00:00Z", "Sync (moved)")
                 ),
                 (
-                    "rd-1#20260309T090000",
+                    "rd-1#20260309T130000Z",
                     ("2026-03-09T15:00:00Z", "Sync (moved)")
                 ),
                 ("rd-1#20260316T090000", ("2026-03-16T13:00:00Z", "Sync")),
@@ -2194,7 +2323,8 @@ END:VCALENDAR\r\n";
     /// An RDATE at an instant the rule makes is the rule's occurrence. It
     /// keeps the rule's ref in an import made after the series has left
     /// that start out (a series keeps its latest `MAX_OCCURRENCES`), and an
-    /// override naming it takes the same ref.
+    /// override naming it takes that occurrence, under its RECURRENCE-ID
+    /// as written.
     #[test]
     fn test_an_rdate_the_rule_makes_keeps_its_ref_as_the_series_moves_on() {
         const SERIES: &str = "BEGIN:VEVENT\r\n\
@@ -2233,15 +2363,14 @@ END:VEVENT\r\n";
         assert_eq!(
             on_the_day(&format!("{SERIES}{OVERRIDE}"), "20260101T000000"),
             [(
-                "long-1#20120601T090000".to_string(),
+                "long-1#20120601T130000Z".to_string(),
                 "Daily (moved)".to_string()
             )]
         );
     }
 
     /// However many overrides name an occurrence an RDATE adds, an import
-    /// walks the series' rule twice: once for the series, once for the
-    /// occurrences only its RDATEs add.
+    /// walks the series' rule once.
     #[test]
     fn test_overrides_of_an_rdate_add_no_rule_walks() {
         let mut ics = String::from(
@@ -2267,7 +2396,7 @@ END:VEVENT\r\n"
         ics.push_str("END:VCALENDAR\r\n");
         let before = rrule::WALKS.with(std::cell::Cell::get);
         let drafts = all(&ics);
-        assert_eq!(rrule::WALKS.with(std::cell::Cell::get) - before, 2);
+        assert_eq!(rrule::WALKS.with(std::cell::Cell::get) - before, 1);
         let moved: Vec<&EpisodeDraft> = drafts
             .iter()
             .filter(|d| d.title.starts_with("Moved"))
@@ -2278,9 +2407,139 @@ END:VEVENT\r\n"
             .all(|d| d.source_ref == "many-1#20260304T200000Z"));
     }
 
+    /// However many RANGE=THISANDFUTURE overrides a series has, each
+    /// moving its occurrences by its own amount (earlier ones reaching past
+    /// the import), an import walks the series' rule once, and each
+    /// override carries on the occurrences up to the next one.
+    #[test]
+    fn test_range_overrides_add_no_rule_walks() {
+        let mut ics = String::from(
+            "BEGIN:VCALENDAR\r\n\
+BEGIN:VEVENT\r\n\
+UID:ranges-1\r\n\
+SUMMARY:Daily\r\n\
+DTSTART:20260301T120000Z\r\n\
+RRULE:FREQ=DAILY;COUNT=40\r\n\
+END:VEVENT\r\n",
+        );
+        // From 2 March on, every second day moves the series by its own
+        // number of minutes: later, then earlier (the last one, on 5 April,
+        // by 27 minutes).
+        for i in 0..18u32 {
+            let day = 2 + 2 * i;
+            let (month, day) = if day > 31 { (4, day - 31) } else { (3, day) };
+            let (hour, minute) = if i % 2 == 0 {
+                (12, 10 + i)
+            } else {
+                (11, 50 - i)
+            };
+            ics.push_str(&format!(
+                "BEGIN:VEVENT\r\n\
+UID:ranges-1\r\n\
+RECURRENCE-ID;RANGE=THISANDFUTURE:2026{month:02}{day:02}T120000Z\r\n\
+SUMMARY:Moved {i}\r\n\
+DTSTART:2026{month:02}{day:02}T{hour:02}{minute:02}00Z\r\n\
+END:VEVENT\r\n"
+            ));
+        }
+        ics.push_str("END:VCALENDAR\r\n");
+        // Imported at 11:55 on 7 April: that day's occurrence, moved to
+        // 11:33 by the last override, comes from past the import.
+        let imported = at("20260407T115500");
+        let before = rrule::WALKS.with(std::cell::Cell::get);
+        let drafts = drafts(&ics, None, imported, "test.ics").unwrap();
+        assert_eq!(rrule::WALKS.with(std::cell::Cell::get) - before, 1);
+        let mut titles: Vec<(String, String)> = drafts
+            .iter()
+            .map(|d| (d.source_ref.clone(), d.title.clone()))
+            .collect();
+        titles.sort();
+        // 1 March, each override's own day and the next, and 7 April.
+        assert_eq!(titles.len(), 38, "{titles:?}");
+        let seventh = drafts
+            .iter()
+            .find(|d| d.source_ref == "ranges-1#20260407T120000Z")
+            .unwrap();
+        assert_eq!(
+            (seventh.title.as_str(), seventh.event_time.utc.as_deref()),
+            ("Moved 17", Some("2026-04-07T11:33:00Z"))
+        );
+        assert_eq!(
+            titles.first(),
+            Some(&("ranges-1".to_string(), "Daily".to_string()))
+        );
+        for i in 0..18u32 {
+            let day = 2 + 2 * i;
+            for d in [day, day + 1] {
+                let (month, d) = if d > 31 { (4, d - 31) } else { (3, d) };
+                let r = format!("ranges-1#2026{month:02}{d:02}T120000Z");
+                assert!(
+                    titles.contains(&(r.clone(), format!("Moved {i}"))),
+                    "{r} {titles:?}"
+                );
+            }
+        }
+    }
+
+    /// The series' starts are walked once, as far as an override that
+    /// moves its occurrences far earlier needs them; the occurrences up to
+    /// the import — the series' own, and another override's — are still
+    /// the latest `MAX_OCCURRENCES` before the import, not the ones before
+    /// that farthest reach.
+    #[test]
+    fn test_a_far_reaching_override_keeps_the_history() {
+        let hours = (0..24).map(|h| h.to_string()).collect::<Vec<_>>().join(",");
+        let ics = format!(
+            "BEGIN:VCALENDAR\r\n\
+BEGIN:VEVENT\r\n\
+UID:h-1\r\n\
+SUMMARY:Hourly\r\n\
+DTSTART:20250101T000000Z\r\n\
+RRULE:FREQ=DAILY;BYHOUR={hours}\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:h-1\r\n\
+RECURRENCE-ID;RANGE=THISANDFUTURE:20260201T000000Z\r\n\
+SUMMARY:Five past\r\n\
+DTSTART:20260201T000500Z\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:h-1\r\n\
+RECURRENCE-ID;RANGE=THISANDFUTURE:20270101T000000Z\r\n\
+SUMMARY:Seven months earlier\r\n\
+DTSTART:20260601T000000Z\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n"
+        );
+        let before = rrule::WALKS.with(std::cell::Cell::get);
+        let drafts = drafts(&ics, None, at("20260301T000000"), "test.ics").unwrap();
+        assert_eq!(rrule::WALKS.with(std::cell::Cell::get) - before, 1);
+        let found = |r: &str| {
+            drafts
+                .iter()
+                .find(|d| d.source_ref == r)
+                .map(|d| (d.title.as_str(), d.event_time.utc.as_deref().unwrap_or("")))
+        };
+        assert_eq!(
+            found("h-1#20260115T120000Z"),
+            Some(("Hourly", "2026-01-15T12:00:00Z"))
+        );
+        assert_eq!(
+            found("h-1#20260215T120000Z"),
+            Some(("Five past", "2026-02-15T12:05:00Z"))
+        );
+        // The cap still holds: nothing from five months before.
+        assert!(!drafts.iter().any(|d| d
+            .event_time
+            .utc
+            .as_deref()
+            .is_some_and(|t| t.starts_with("2025-08"))));
+        assert!(!drafts.iter().any(|d| d.title == "Seven months earlier"));
+    }
+
     /// A RANGE=THISANDFUTURE override naming an occurrence only an RDATE
-    /// adds takes that RDATE's ref, and the later occurrences it carries
-    /// keep the refs the series gives them.
+    /// adds takes its RECURRENCE-ID as written for its own ref, and the
+    /// later occurrences it carries keep the refs the series gives them.
     #[test]
     fn test_range_override_of_an_rdate_keeps_the_refs() {
         const CAL: &str = "BEGIN:VCALENDAR\r\n\
@@ -2303,7 +2562,7 @@ END:VCALENDAR\r\n";
             [
                 ("rr-1", ("2026-03-02T14:00:00Z", "Sync")),
                 (
-                    "rr-1#20260304T200000Z",
+                    "rr-1#20260304T150000",
                     ("2026-03-04T21:00:00Z", "Sync (later)")
                 ),
                 (
@@ -2321,7 +2580,10 @@ END:VCALENDAR\r\n";
     }
 
     /// On a series written in UTC, or in floating time, an RDATE written
-    /// in a zone keeps its ref when an override names it.
+    /// in a zone is written by its instant, in UTC; an override naming it
+    /// takes it — on the UTC series under its RECURRENCE-ID as written, on
+    /// the floating one, whose wall clock would read that RECURRENCE-ID as
+    /// another time, by its instant too.
     #[test]
     fn test_override_of_a_zoned_rdate_on_a_utc_or_floating_series() {
         const SERIES: &str = "BEGIN:VEVENT\r\n\
@@ -2359,31 +2621,107 @@ END:VEVENT\r\n";
             refs.sort();
             refs
         };
-        let expected = [
-            "f-1",
-            "f-1#20260304T150000",
-            "f-1#20260309T090000",
-            "u-1",
-            "u-1#20260304T150000",
-            "u-1#20260309T140000Z",
-        ];
-        assert_eq!(refs(SERIES), expected);
-        assert_eq!(refs(&format!("{SERIES}{OVERRIDES}")), expected);
+        assert_eq!(
+            refs(SERIES),
+            [
+                "f-1",
+                "f-1#20260304T200000Z",
+                "f-1#20260309T090000",
+                "u-1",
+                "u-1#20260304T200000Z",
+                "u-1#20260309T140000Z",
+            ]
+        );
+        assert_eq!(refs(&format!("{SERIES}{OVERRIDES}")), refs(SERIES));
         let after = all(&calendar(&format!("{SERIES}{OVERRIDES}")));
         let after = by_ref(&after);
         assert_eq!(
-            after["u-1#20260304T150000"],
+            after["u-1#20260304T200000Z"],
             ("2026-03-04T21:00:00Z", "Utc (moved)")
         );
         assert_eq!(
-            after["f-1#20260304T150000"],
+            after["f-1#20260304T200000Z"],
             ("2026-03-04T21:00:00Z", "Floating (moved)")
+        );
+    }
+
+    /// One wall-clock time in two zones is two occurrences with two refs:
+    /// an RDATE in another zone at DTSTART's wall-clock time, or at the
+    /// wall-clock time of a later occurrence the rule makes, is written by
+    /// its instant, so neither shares a ref (the store would keep only the
+    /// first).
+    #[test]
+    fn test_one_wall_clock_time_in_two_zones_is_two_refs() {
+        const CAL: &str = "BEGIN:VCALENDAR\r\n\
+BEGIN:VEVENT\r\n\
+UID:tz-1\r\n\
+SUMMARY:Sync\r\n\
+DTSTART;TZID=America/New_York:20260302T090000\r\n\
+RRULE:FREQ=WEEKLY;COUNT=2\r\n\
+RDATE;TZID=America/Los_Angeles:20260302T090000\r\n\
+RDATE;TZID=America/Los_Angeles:20260309T090000\r\n\
+RDATE:20260310T090000\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+        let drafts = all(CAL);
+        assert_eq!(drafts.len(), 5);
+        let starts: Vec<(&str, &str)> =
+            by_ref(&drafts).iter().map(|(r, (t, _))| (*r, *t)).collect();
+        assert_eq!(
+            starts,
+            [
+                ("tz-1", "2026-03-02T14:00:00Z"),
+                ("tz-1#20260302T170000Z", "2026-03-02T17:00:00Z"),
+                ("tz-1#20260309T090000", "2026-03-09T13:00:00Z"),
+                ("tz-1#20260309T160000Z", "2026-03-09T16:00:00Z"),
+                // Floating time next to a zoned DTSTART: read as UTC.
+                ("tz-1#20260310T090000Z", "2026-03-10T09:00:00Z"),
+            ]
+        );
+    }
+
+    /// An override whose RECURRENCE-ID is a wall-clock time in another
+    /// zone than DTSTART's is written by its instant: as written, it would
+    /// be the ref of the series' occurrence at that wall-clock time in
+    /// DTSTART's zone, and the store would keep only one of the two.
+    #[test]
+    fn test_an_override_in_another_zone_keeps_a_ref_of_its_own() {
+        const CAL: &str = "BEGIN:VCALENDAR\r\n\
+BEGIN:VEVENT\r\n\
+UID:x-1\r\n\
+SUMMARY:Sync\r\n\
+DTSTART;TZID=America/New_York:20260301T090000\r\n\
+RRULE:FREQ=DAILY;BYHOUR=9,12;COUNT=4\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:x-1\r\n\
+RECURRENCE-ID;TZID=America/Los_Angeles:20260302T090000\r\n\
+SUMMARY:Sync (moved)\r\n\
+DTSTART;TZID=America/Los_Angeles:20260302T100000\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+        let drafts = all(CAL);
+        assert_eq!(drafts.len(), 4);
+        assert_eq!(
+            by_ref(&drafts),
+            [
+                ("x-1", ("2026-03-01T14:00:00Z", "Sync")),
+                ("x-1#20260301T120000", ("2026-03-01T17:00:00Z", "Sync")),
+                ("x-1#20260302T090000", ("2026-03-02T14:00:00Z", "Sync")),
+                // 09:00 in Los Angeles is noon in New York.
+                (
+                    "x-1#20260302T170000Z",
+                    ("2026-03-02T18:00:00Z", "Sync (moved)")
+                ),
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>()
         );
     }
 
     /// Two RDATEs naming one instant are one occurrence, under the ref of
     /// the one listed first; an override naming it, in either form, takes
-    /// that ref.
+    /// it, under its RECURRENCE-ID as written.
     #[test]
     fn test_two_rdates_at_one_instant_keep_the_first_ref() {
         for (rdates, kept) in [
@@ -2410,9 +2748,12 @@ RRULE:FREQ=WEEKLY;COUNT=2\r\n\
                 ["two-1", kept, "two-1#20260309T090000"],
                 "{rdates}"
             );
-            for rid in [
-                "RECURRENCE-ID:20260304T200000Z",
-                "RECURRENCE-ID;TZID=America/New_York:20260304T150000",
+            for (rid, written) in [
+                ("RECURRENCE-ID:20260304T200000Z", "two-1#20260304T200000Z"),
+                (
+                    "RECURRENCE-ID;TZID=America/New_York:20260304T150000",
+                    "two-1#20260304T150000",
+                ),
             ] {
                 let raw = format!(
                     "BEGIN:VCALENDAR\r\n{series}BEGIN:VEVENT\r\n\
@@ -2427,7 +2768,7 @@ END:VCALENDAR\r\n"
                 let drafts = by_ref(&drafts);
                 assert_eq!(drafts.len(), 3, "{rdates} {rid}");
                 assert_eq!(
-                    drafts[kept],
+                    drafts[written],
                     ("2026-03-04T21:00:00Z", "Sync (moved)"),
                     "{rdates} {rid}"
                 );
@@ -2438,7 +2779,7 @@ END:VCALENDAR\r\n"
     /// A RANGE=THISANDFUTURE override whose RECURRENCE-ID is in UTC and
     /// whose DTSTART is in the series' zone moves the later occurrences by
     /// the move it made, both read in one zone: 09:00 to 10:00 New York
-    /// time, every week.
+    /// time, every week. Its own ref is its RECURRENCE-ID as written.
     #[test]
     fn test_range_override_written_in_two_zones() {
         const RANGE: &str = "BEGIN:VCALENDAR\r\n\
@@ -2462,7 +2803,7 @@ END:VCALENDAR\r\n";
             [
                 ("z-1", ("2026-03-02T14:00:00Z", "Sync")),
                 (
-                    "z-1#20260309T090000",
+                    "z-1#20260309T130000Z",
                     ("2026-03-09T14:00:00Z", "Sync (later)")
                 ),
                 (
@@ -2512,6 +2853,184 @@ END:VCALENDAR\r\n";
         ] {
             assert_eq!(def.local(at(utc)), Some(at(wall)), "{utc}");
         }
+    }
+
+    /// A TZID the file defines is read with the file's own rules, also
+    /// when it is a Windows zone name or ends in an IANA name; only one the
+    /// file doesn't define is read as the zone it looks like.
+    #[test]
+    fn test_the_files_definition_wins_over_a_look_alike_name() {
+        const DEFINED: &str = "BEGIN:VCALENDAR\r\n\
+BEGIN:VTIMEZONE\r\n\
+TZID:Custom/Europe/Paris\r\n\
+BEGIN:STANDARD\r\n\
+DTSTART:19700101T000000\r\n\
+TZOFFSETFROM:+0300\r\n\
+TZOFFSETTO:+0300\r\n\
+END:STANDARD\r\n\
+END:VTIMEZONE\r\n\
+BEGIN:VTIMEZONE\r\n\
+TZID:Eastern Standard Time\r\n\
+BEGIN:STANDARD\r\n\
+DTSTART:19671029T020000\r\n\
+RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU\r\n\
+TZOFFSETFROM:-0400\r\n\
+TZOFFSETTO:-0500\r\n\
+END:STANDARD\r\n\
+BEGIN:DAYLIGHT\r\n\
+DTSTART:19870405T020000\r\n\
+RRULE:FREQ=YEARLY;BYMONTH=4;BYDAY=1SU\r\n\
+TZOFFSETFROM:-0500\r\n\
+TZOFFSETTO:-0400\r\n\
+END:DAYLIGHT\r\n\
+END:VTIMEZONE\r\n\
+BEGIN:VEVENT\r\n\
+UID:suffix-1\r\n\
+SUMMARY:Custom zone named like Paris\r\n\
+DTSTART;TZID=Custom/Europe/Paris:20260701T090000\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:windows-1\r\n\
+SUMMARY:Windows name with the file's own rules\r\n\
+DTSTART;TZID=Eastern Standard Time:20260315T090000\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:vendor-1\r\n\
+SUMMARY:Vendor prefix, not defined\r\n\
+DTSTART;TZID=/vendor.example/2005_1/America/Chicago:20260701T090000\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+        let drafts = all(DEFINED);
+        let times: Vec<(&str, &str, Option<i32>)> = by_ref(&drafts)
+            .keys()
+            .map(|r| {
+                let d = drafts.iter().find(|d| d.source_ref == *r).unwrap();
+                (
+                    *r,
+                    d.event_time.utc.as_deref().unwrap_or(""),
+                    d.event_time.tz_offset_minutes,
+                )
+            })
+            .collect();
+        assert_eq!(
+            times,
+            [
+                ("suffix-1", "2026-07-01T06:00:00Z", Some(180)),
+                ("vendor-1", "2026-07-01T14:00:00Z", Some(-300)),
+                ("windows-1", "2026-03-15T14:00:00Z", Some(-300)),
+            ]
+        );
+    }
+
+    /// A zone the file defines whose daylight-saving rules ended years
+    /// before the event keeps the offset of its last change, not the one
+    /// of its first onset.
+    #[test]
+    fn test_defined_zone_whose_rules_ended_keeps_the_last_change() {
+        const ENDED: &str = "BEGIN:VCALENDAR\r\n\
+BEGIN:VTIMEZONE\r\n\
+TZID:Old Rules Zone\r\n\
+BEGIN:STANDARD\r\n\
+DTSTART:19700215T000000\r\n\
+TZOFFSETFROM:-0200\r\n\
+TZOFFSETTO:-0300\r\n\
+RRULE:FREQ=YEARLY;BYMONTH=2;BYDAY=3SU;UNTIL=20190217T020000Z\r\n\
+END:STANDARD\r\n\
+BEGIN:DAYLIGHT\r\n\
+DTSTART:19701101T000000\r\n\
+TZOFFSETFROM:-0300\r\n\
+TZOFFSETTO:-0200\r\n\
+RRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=1SU;UNTIL=20181104T030000Z\r\n\
+END:DAYLIGHT\r\n\
+END:VTIMEZONE\r\n\
+BEGIN:VEVENT\r\n\
+UID:ended-2026\r\n\
+SUMMARY:Long after the last change\r\n\
+DTSTART;TZID=Old Rules Zone:20260615T090000\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:ended-2019\r\n\
+SUMMARY:In the last summer time\r\n\
+DTSTART;TZID=Old Rules Zone:20190110T090000\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:ended-2017\r\n\
+SUMMARY:Standard time while the rules ran\r\n\
+DTSTART;TZID=Old Rules Zone:20170615T090000\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+        let drafts = all(ENDED);
+        let offsets: Vec<(&str, &str, Option<i32>)> = by_ref(&drafts)
+            .keys()
+            .map(|r| {
+                let d = drafts.iter().find(|d| d.source_ref == *r).unwrap();
+                (
+                    *r,
+                    d.event_time.utc.as_deref().unwrap_or(""),
+                    d.event_time.tz_offset_minutes,
+                )
+            })
+            .collect();
+        assert_eq!(
+            offsets,
+            [
+                ("ended-2017", "2017-06-15T12:00:00Z", Some(-180)),
+                ("ended-2019", "2019-01-10T11:00:00Z", Some(-120)),
+                ("ended-2026", "2026-06-15T12:00:00Z", Some(-180)),
+            ]
+        );
+    }
+
+    /// A definition's rule that makes a change only every few years
+    /// (February 29) and ended years before the event keeps its last
+    /// change in force, also when another part's change came between that
+    /// rule's first change and its last.
+    #[test]
+    fn test_defined_zone_with_a_sparse_rule_keeps_its_last_change() {
+        const SPARSE: &str = "BEGIN:VCALENDAR\r\n\
+BEGIN:VTIMEZONE\r\n\
+TZID:Leap Day Zone\r\n\
+BEGIN:DAYLIGHT\r\n\
+DTSTART:20000229T000000\r\n\
+TZOFFSETFROM:+0100\r\n\
+TZOFFSETTO:+0200\r\n\
+RRULE:FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=29;UNTIL=20220228T230000Z\r\n\
+END:DAYLIGHT\r\n\
+BEGIN:STANDARD\r\n\
+DTSTART:20190115T000000\r\n\
+TZOFFSETFROM:+0200\r\n\
+TZOFFSETTO:+0100\r\n\
+END:STANDARD\r\n\
+END:VTIMEZONE\r\n\
+BEGIN:VEVENT\r\n\
+UID:leap-2026\r\n\
+SUMMARY:After the last change\r\n\
+DTSTART;TZID=Leap Day Zone:20260615T090000\r\n\
+END:VEVENT\r\n\
+BEGIN:VEVENT\r\n\
+UID:leap-2019\r\n\
+SUMMARY:Between the one-off change and the last\r\n\
+DTSTART;TZID=Leap Day Zone:20190615T090000\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR\r\n";
+        let drafts = all(SPARSE);
+        let offsets: Vec<(&str, &str, Option<i32>)> = drafts
+            .iter()
+            .map(|d| {
+                (
+                    d.source_ref.as_str(),
+                    d.event_time.utc.as_deref().unwrap_or(""),
+                    d.event_time.tz_offset_minutes,
+                )
+            })
+            .collect();
+        assert_eq!(
+            offsets,
+            [
+                ("leap-2026", "2026-06-15T07:00:00Z", Some(120)),
+                ("leap-2019", "2019-06-15T08:00:00Z", Some(60)),
+            ]
+        );
     }
 
     /// A daily series at a set time of day (BYHOUR/BYMINUTE/BYSECOND)

@@ -178,8 +178,11 @@ the scope leg takes it to every node whatever copies each holds) — and a
 retirement takes every copy, and what any of them seeded, whichever
 arrives first. A Chrome day keyed by its profile replaces a day earlier
 versions stored under the profile's shown name only when it holds all of
-it — at least its visit count and every visit line — so same-named
-profiles never displace each other.
+it — at least its visit count, the visit it opens with, and every visit
+line it shows except where the newer day leaves lines out (a long day
+keeps its first and latest lines) and the older one does too (a day shown
+whole must show in full) — so same-named profiles never displace each
+other.
 
 **Retirement** (schema v59) is supersession by nothing: the person takes
 a memory, or a whole source, out of the record (a phishing mail, a bad
@@ -215,13 +218,17 @@ replaces another is decided by that recorded writer, never by its ref —
 mail and calendar refs are chosen by senders — and only the repair itself
 may write as it, so a look-alike ref from anyone else replaces nothing, on
 any node. Each node settles a repaired record (the memory and its
-corrected copies) from what it holds: the newest copy whose run wasn't
-undone stands in view, the rest behind it; copies share the record's
-label (a private one spreads; one the owner takes out of the vault comes
-out for the whole record), and its retirement (also on a node that held a
-copy from before it knew the rule, once the run reaches it). A run is a
-synced row carrying the copies it made (`repair_copies`, v71, a set every
-node unions — two nodes can make the same copy under runs of their own);
+corrected copies) from what it holds: the newest copy (by when the
+newest run that made it began, which every node knows alike) whose run
+wasn't undone stands in view, the rest behind it; copies share the
+record's label (a private one spreads — also to corrected copies whose
+original never reached the node, which keep the message private there; one
+the owner takes out of the vault comes out for the whole record), and its
+retirement (also on a node that held a copy from before it knew the rule,
+once the run reaches it). A run is a synced row carrying the copies it
+made (`repair_copies`, v71, a set every node unions — two nodes can make
+the same copy under runs of their own; a row sent again carries only the
+copies recorded since the peer's cursor);
 undoing it brings the original back in view on every node, hides the
 copies it made even where the original hasn't arrived yet, and can't
 itself be taken back. Every node publishes `roles.repairs` in
@@ -387,9 +394,16 @@ Four ways in:
    shows its labels as they are now in search. The labels are recorded
    together with the list of messages still to be shown to triage and the
    watches, so work a stopped pull left undone is finished by the next
-   re-read; a list or labels that can't be read stay for the next try,
+   pull, before it connects; a list or labels that can't be read stay for the next try,
    never read as done, and an index rebuild that can't read the old index
-   leaves it in place. A message's privacy is read again after its memory
+   leaves it in place (the pull's cursor and the re-read's place in the
+   archive likewise: an index that can't be read is an error, never
+   "nothing recorded"). A message Gmail can't answer about is left out of
+   a re-read, not the rest of its batch, and the mail still to be shown is
+   shown even when Gmail can't be reached; a message that joins a thread
+   later but was written earlier leaves the thread's latest message — what
+   triage reads — as it is (a latest dated in the future isn't believed: a
+   sender chooses the date). A message's privacy is read again after its memory
    is made, since the memory can arrive private; a message found private
    then makes the thread it joined private, so no model sorts it — a label
    re-read does so straight from the record, before it reads the index
@@ -402,16 +416,19 @@ Four ways in:
    has those keys read from its live archive here, and a thread whose
    keys can't be read there waits — not sorted, its label left as it is —
    until they can be (a node that took over another node's mailbox holds
-   none of its archive). While a
+   none of its archive); a thread found waiting is passed over unread until
+   it or the live archives here change, or ten minutes pass. While a
    private promotion an earlier version kept under a Gmail uid is in the
    vault, no message can be told apart from it: mail is held (readers
    count every message private; a viewer whose vault is locked sees no
    mail thread, draft or ember's queued message at all, though no thread
    is relabelled; nothing records a thread as private on that account —
-   the pull, triage, embers' queues and the backfill wait), the log names
+   the pull, triage, embers' queues, draft requests and the backfill
+   wait), the log names
    that memory, and so does the triage status for an owner whose vault is
    open. Only a promotion a person may have made holds mail — not a
-   memory an importer or someone else's key wrote; one whose writer isn't
+   memory an importer, someone else's key or one of the owner's own
+   devices wrote; one whose writer isn't
    known does — whatever its source is registered as now, or whether it
    is registered at all.
    Mail from any of the owner's mailboxes, or an alias listed on one, is
@@ -487,7 +504,19 @@ A mail archive's sidecar indexes the headers when it is built, and its
 message text and links in the background afterwards (`mbox_text.rs`; big
 archives wait for the owner). It keys each message by the mail import's
 key for its Message-ID, and a rebuild and the writes it carries over
-(labels re-read, the pull's cursor) take turns on one lock per archive. Archives are read in place, so every read
+(labels re-read, the pull's cursor) take turns on one lock per archive.
+The mail imports read the privacy rules over each whole message too
+(`mbox_text::rules_match_message`), so a memory, whose stored text is
+cut, is labelled as its archived message reads. A copy stored before
+under the same Message-ID keeps its own label: what the rule matched can
+lie where its stored text doesn't reach, and other mail written under
+that Message-ID (the sender's choice) reads the same there. Only an
+import asked to be private moves such a copy into the vault, when it has
+the same date, sender and text (a copy an earlier version left encoded
+counts through its repair's corrected copy). A link target the cut leaves out keeps its
+host in the stored text, so a domain rule made later still finds the
+memory; a message with more hosts than their room holds is stored
+private. Archives are read in place, so every read
 goes through `virtual_source::{search,fetch}_for_viewer`, which applies
 the privacy rules and the caller's vault — the rules to the whole message,
 decoded, and the vault to the message's memory under any path that
@@ -739,7 +768,9 @@ What counts as the user's own words is decided when a check reads, not
 when the text lands: `trust = 'self'` from a source the user writes. A
 source others can write (`OTHERS_WORDS_SOURCES`: message threads, web
 titles, assistants' replies, invitations, scans, and also git histories
-and Substack publications) is outside text however it was stored — with
+and Substack publications) is outside text however it was stored (and
+is stored `imported`: on arrival, and for rows stored before by the v61
+and v73 relabels) — with
 one owner setting on top, "this source is mine" (v68,
 `store/owned.rs`). The user lists a repository (by its remote address)
 or a publication (by its host); within a listed repository, commits whose
@@ -752,7 +783,16 @@ date and their commit time (a rewrite keeps the author date and the
 last one sets the commit time, so an agent's rewrite in between leaves
 no time of its own).
 The git importer records each commit's parents and commit time for this;
-a commit an earlier version imported has neither and stays outside text.
+a commit an earlier version imported has neither and stays outside text,
+as does one at a shallow clone's cut-off, whose parents git doesn't show
+(recorded as not fetched). An agent task never closed counts as running
+for at most the longest run can last after its latest stamp when the run
+started in Claude Code, which Hearthloom stops at its time limit (each
+task keeps the harness its run started on; the agent's setting can
+change while a job is out); a task sent to a harness that runs on its
+own (Hermes, OpenClaw), or whose harness wasn't kept, counts as running
+until it is closed. The idle
+refresh leaves out a checkout that overlaps an agent's working folder.
 Git doesn't check an author address, so a listed repository is only as
 trustworthy as who can get commits into it. A listed publication counts
 whole, guest posts included; the Substack importer files a post only

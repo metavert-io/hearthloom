@@ -672,6 +672,30 @@ async fn compose(
     ))
 }
 
+/// Take one waiting request and write it: the outcome, or None when it was
+/// left waiting — taken meanwhile, or mail is held. While mail is held
+/// (virtual_source::MailHold) every message reads as private to a reader,
+/// so a request then would end as "private" for good though nothing about
+/// its mail is: it waits, untaken, until the hold ends.
+async fn draft_one(state: &AppState, d: &MailDraft, me: &str) -> Result<Option<DraftOutcome>> {
+    let st = state.clone();
+    let held = tokio::task::spawn_blocking(move || crate::virtual_source::refresh_mail_hold(&st))
+        .await
+        .unwrap_or(true);
+    if held || !state.store.mail_draft_take(&actor(), &d.id, me)? {
+        return Ok(None);
+    }
+    let outcome = match write(state, d).await {
+        Ok(o) => o,
+        Err(err) => DraftOutcome {
+            error: Some(format!("{err:#}").chars().take(300).collect()),
+            ..Default::default()
+        },
+    };
+    state.store.mail_draft_finish(&actor(), &d.id, &outcome)?;
+    Ok(Some(outcome))
+}
+
 /// Write what's waiting. Returns how many were finished (saved or failed).
 pub async fn draft_once(state: &AppState) -> Result<usize> {
     let me = crate::agents::node_id(state);
@@ -694,17 +718,9 @@ pub async fn draft_once(state: &AppState) -> Result<usize> {
         .store
         .mail_drafts_waiting_for(3, &duty.mine, duty.unwatched.as_deref())?
     {
-        if !state.store.mail_draft_take(&actor(), &d.id, &me)? {
+        let Some(outcome) = draft_one(state, &d, &me).await? else {
             continue;
-        }
-        let outcome = match write(state, &d).await {
-            Ok(o) => o,
-            Err(err) => DraftOutcome {
-                error: Some(format!("{err:#}").chars().take(300).collect()),
-                ..Default::default()
-            },
         };
-        state.store.mail_draft_finish(&actor(), &d.id, &outcome)?;
         done += 1;
         match &outcome.error {
             None => tracing::info!(
@@ -1102,6 +1118,80 @@ Subject: Hello\r\nMessage-ID: <h1@fund.example>\r\n\r\nDelivered-To: not@a-heade
             .unwrap();
         let err = compose(&state, &d, &local).await.unwrap_err();
         assert!(format!("{err:#}").contains("private"), "{err:#}");
+    }
+
+    /// While mail is held a request waits, untaken — never finished as
+    /// failed — and is taken once the hold ends.
+    #[tokio::test]
+    async fn test_a_request_waits_while_mail_is_held() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::paths::Home::at(tmp.path());
+        home.init().unwrap();
+        let state = AppState {
+            store: std::sync::Arc::new(
+                hearthloom_core::store::Store::open(&home.db_path()).unwrap(),
+            ),
+            home,
+            embedder: None,
+            llm: None,
+            auth_locked: Default::default(),
+            bus: Default::default(),
+            killswitch: Default::default(),
+            running: Default::default(),
+        };
+        // a private promotion an earlier version kept under a Gmail uid
+        let promoted = hearthloom_core::ingest::EpisodeDraft {
+            source: crate::gmail_search::SOURCE.into(),
+            source_ref: "uid:9".into(),
+            kind: "email".into(),
+            title: "promoted".into(),
+            body: "From: Ann <ann@x.example>\nSubject: plans\n\nSee you then.".into(),
+            event_time: hearthloom_core::time::EventTime::unknown(),
+            trust: "imported".into(),
+            scope: Some("private".into()),
+            entities: vec![],
+            edges: vec![],
+        };
+        state
+            .store
+            .apply_batch(
+                &state.home,
+                &hearthloom_core::IngestBatch {
+                    actor: "human:dashboard".into(),
+                    session_id: None,
+                    episodes: vec![promoted],
+                },
+            )
+            .unwrap();
+        let d = state
+            .store
+            .mail_draft_request(
+                &Actor::new("plugin:helper"),
+                None,
+                Some("m9@fund.example"),
+                None,
+                false,
+                Some("Thanks, see you then."),
+            )
+            .unwrap();
+        let me = crate::agents::node_id(&state);
+        assert!(draft_one(&state, &d, &me).await.unwrap().is_none());
+        let waiting = state.store.mail_drafts_waiting(10).unwrap();
+        assert_eq!(waiting.len(), 1, "still waiting");
+        assert!(waiting[0].error.is_none());
+
+        // the hold ends: the request is taken (here it fails — no mailbox)
+        let id = hearthloom_core::ids::episode_id(crate::gmail_search::SOURCE, "uid:9");
+        rusqlite::Connection::open(state.home.db_path())
+            .unwrap()
+            .execute(
+                "UPDATE episodes SET scope = 'personal' WHERE id = ?1",
+                [&id],
+            )
+            .unwrap();
+        let out = draft_one(&state, &d, &me).await.unwrap().unwrap();
+        assert!(out.error.is_some());
+        assert!(state.store.mail_drafts_waiting(10).unwrap().is_empty());
     }
 
     #[test]

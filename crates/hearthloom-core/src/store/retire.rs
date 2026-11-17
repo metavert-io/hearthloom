@@ -326,12 +326,13 @@ fn covered_episodes(conn: &Connection, kind: &str, target: &str) -> Result<Vec<S
 /// Episodes derived from `seeds`, to a fixpoint: cascades they seeded and
 /// the opportunity episodes they became. Not yet retired ones only.
 /// Retiring an episode removes its opportunity rows, so for seeds the
-/// retirement `saved_by` has taken already, the kept opportunities come
-/// from the rows it saved.
+/// retirement `saved_by` (its id, and the last row saved before) has taken
+/// since, the kept opportunities come from the rows it saved since — never
+/// every row it ever saved (a whole source's, for a late arrival).
 fn derived_from(
     conn: &Connection,
     seeds: &HashSet<String>,
-    saved_by: Option<&str>,
+    saved_by: Option<(&str, i64)>,
 ) -> Result<Vec<String>> {
     if seeds.is_empty() {
         return Ok(Vec::new());
@@ -353,13 +354,13 @@ fn derived_from(
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<std::result::Result<_, _>>()?;
     drop(stmt);
-    if let Some(rid) = saved_by {
+    if let Some((rid, after)) = saved_by {
         let mut stmt = conn.prepare(
             "SELECT prior FROM retirement_rows
-             WHERE retirement_id = ?1 AND tbl = 'opportunities' AND op = 'deleted'",
+             WHERE retirement_id = ?1 AND seq > ?2 AND tbl = 'opportunities' AND op = 'deleted'",
         )?;
         let saved: Vec<String> = stmt
-            .query_map([rid], |r| r.get(0))?
+            .query_map(params![rid, after], |r| r.get(0))?
             .collect::<std::result::Result<_, _>>()?;
         for prior in saved {
             let row: Value = serde_json::from_str(&prior)?;
@@ -410,6 +411,36 @@ fn derived_from(
         frontier = next;
     }
     Ok(out)
+}
+
+/// Every cascade's ref ([`cascade_seeds_among`]).
+const CASCADE_REFS_SQL: &str = "SELECT source_ref FROM episodes /* all-episodes: a cascade that came ahead of its seed, in any state */
+     WHERE source = 'consolidation' AND source_ref >= 'cascade:' AND source_ref < 'cascade;'";
+
+/// Of `ids`, those a cascade stored here names as its seed — retired or
+/// not (the walk, [`derived_from`], passes over retired ones). For episodes
+/// a retirement took as they arrived, with no copy of their records here:
+/// a cascade a peer sent ahead of its seed is the one thing here such an
+/// episode can have seeded (opportunities are this node's own, of episodes
+/// it holds). One pass over the cascades' refs on the (source, source_ref)
+/// index, reading no rows.
+pub(crate) fn cascade_seeds_among(
+    conn: &Connection,
+    ids: &HashSet<String>,
+) -> Result<HashSet<String>> {
+    if ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let mut stmt = conn.prepare_cached(CASCADE_REFS_SQL)?;
+    let mut named = HashSet::new();
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let source_ref: String = row.get(0)?;
+        if let Some(seed) = cascade_seed(&source_ref).filter(|s| ids.contains(*s)) {
+            named.insert(seed.to_string());
+        }
+    }
+    Ok(named)
 }
 
 /// Retire ONE episode inside an open transaction: mark it, switch off what
@@ -816,6 +847,9 @@ pub(crate) struct ArrivalRules {
     live: HashSet<String>,
     undone: HashSet<String>,
     orphans: OnceCell<OrphanContext>,
+    /// The last row any retirement had saved when the batch began: what
+    /// the batch's retirements save comes after it.
+    saved_before: i64,
 }
 
 impl ArrivalRules {
@@ -842,6 +876,13 @@ impl ArrivalRules {
                 rules.memories.insert(summary, id.clone());
             }
             rules.live.insert(id);
+        }
+        if !rules.live.is_empty() {
+            rules.saved_before = conn.query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM retirement_rows",
+                [],
+                |r| r.get(0),
+            )?;
         }
         Ok(rules)
     }
@@ -918,6 +959,24 @@ impl ArrivalRules {
         if source != "consolidation" {
             return Ok(Arrival::Live);
         }
+        // An opportunity kept for a memory a retirement took before the
+        // opportunity's episode landed (keeping one marks its row, then
+        // writes the episode): the retirement saved the row as it took the
+        // memory. Rare (each is a person's keep), so the saved rows are read
+        // here.
+        if let Some(opportunity) = source_ref.strip_prefix("opportunity:") {
+            let mut stmt = conn.prepare_cached(
+                "SELECT retirement_id FROM retirement_rows
+                 WHERE tbl = 'opportunities' AND op = 'deleted'
+                   AND json_extract(prior, '$.id') = ?1",
+            )?;
+            let saved_by: Vec<String> = stmt
+                .query_map([opportunity], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            if let Some(rid) = saved_by.into_iter().find(|rid| self.live.contains(rid)) {
+                return Ok(Arrival::Retire(rid));
+            }
+        }
         if let Some(seed) = cascade_seed(source_ref) {
             let seed_state: Option<Option<String>> = conn
                 .query_row(
@@ -951,9 +1010,11 @@ impl ArrivalRules {
     }
 
     /// Retire a newly arrived episode (inside the ingest transaction).
-    pub(crate) fn retire(&self, conn: &Connection, rid: &str, episode_id: &str) -> Result<()> {
+    /// Returns whether it was retired here now (false: retired already, or
+    /// not stored).
+    pub(crate) fn retire(&self, conn: &Connection, rid: &str, episode_id: &str) -> Result<bool> {
         let mut linked = HashSet::new();
-        retire_episode(conn, rid, episode_id, &now_utc(), &mut linked)?;
+        let counts = retire_episode(conn, rid, episode_id, &now_utc(), &mut linked)?;
         if !linked.is_empty() {
             if self.orphans.get().is_none() {
                 let _ = self.orphans.set(OrphanContext::load(conn)?);
@@ -962,23 +1023,26 @@ impl ArrivalRules {
                 hide_orphans(conn, rid, &linked, ctx)?;
             }
         }
-        Ok(())
+        Ok(counts.episodes > 0)
     }
 
-    /// What `seeds` — episodes the retirement `rid` took as they arrived,
-    /// and the copies of their records it took with them — gave rise to
-    /// here goes with them ([`derived_from`]): a cascade stored before its
-    /// seed arrived, or one seeded by a copy held here already, and the
+    /// What `seeds` — copies of a record held here that the retirement `rid`
+    /// took with an arriving copy, and that copy; or an episode it took
+    /// alone that a cascade here names ([`cascade_seeds_among`]) — gave rise
+    /// to here goes with them ([`derived_from`]): a cascade seeded by a copy
+    /// held here already, or one stored before the arriving episode, and the
     /// opportunity a copy held here became (found through the rows `rid`
-    /// saved as it retired the copy). Once per batch (inside the ingest
-    /// transaction): the walk reads every cascade.
+    /// saved as it retired the copy in this batch; a copy retired before
+    /// took what it seeded then). Once per batch (inside the ingest
+    /// transaction), and only for a batch with such seeds: the walk reads
+    /// every cascade.
     pub(crate) fn retire_derived(
         &self,
         conn: &Connection,
         rid: &str,
         seeds: &HashSet<String>,
     ) -> Result<()> {
-        for id in derived_from(conn, seeds, Some(rid))? {
+        for id in derived_from(conn, seeds, Some((rid, self.saved_before)))? {
             self.retire(conn, rid, &id)?;
         }
         Ok(())
@@ -2325,6 +2389,167 @@ mod tests {
         assert_eq!(store.retirements(10).unwrap()[0]["state"], "undone");
     }
 
+    /// A late arrival of a retired source (one with no other copies here)
+    /// seeded nothing here, so it walks nothing: its reads of saved rows,
+    /// cascades and kept opportunities cost the same however many the
+    /// retirement took with the source.
+    #[test]
+    fn test_a_late_arrival_reads_the_same_however_much_was_retired() {
+        let actor = Actor::new("human:test");
+        let late_arrival = |stored: usize| -> i64 {
+            let (_tmp, home, store) = setup();
+            let posts = (0..stored)
+                .map(|i| draft("facebook", &format!("p{i}"), "post", vec![], vec![]))
+                .collect();
+            ingest(&store, &home, posts);
+            // each post seeded a cascade
+            let cascades = (0..stored)
+                .map(|i| {
+                    let seed = id_of("facebook", &format!("p{i}"));
+                    let mut d = draft(
+                        "consolidation",
+                        &format!("cascade:in_{i}:{seed}"),
+                        "brief",
+                        vec![],
+                        vec![],
+                    );
+                    d.kind = "cascade".into();
+                    d
+                })
+                .collect();
+            ingest(&store, &home, cascades);
+            // each post kept as an opportunity
+            let seeking = store
+                .add_proposition(
+                    &actor,
+                    "work",
+                    "seeking",
+                    "a reason to call",
+                    "declared",
+                    &[],
+                    None,
+                )
+                .unwrap();
+            {
+                let conn = store.lock();
+                for i in 0..stored {
+                    conn.execute(
+                        "INSERT INTO opportunities (id, seeking_id, episode_id, score, status, found_at)
+                         VALUES (?1, ?2, ?3, 0.9, 'kept', '2026-09-10T12:00:00Z')",
+                        params![format!("op_{i}"), seeking, id_of("facebook", &format!("p{i}"))],
+                    )
+                    .unwrap();
+                }
+            }
+            let r = store.retire(&actor, "source", "facebook", &[], "").unwrap();
+            store.retirement_apply(&r.id).unwrap();
+            let saved: usize = store
+                .lock()
+                .query_row(
+                    "SELECT COUNT(*) FROM retirement_rows
+                     WHERE retirement_id = ?1 AND tbl = 'opportunities'",
+                    [&r.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(saved, stored);
+            let late = vec![draft("facebook", "late", "a late post", vec![], vec![])];
+            let work = super::super::trace::work_of(&store, || ingest(&store, &home, late));
+            assert_eq!(
+                store
+                    .lock()
+                    .query_row(
+                        "SELECT superseded_by FROM episodes WHERE id = ?1",
+                        [id_of("facebook", "late")],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap(),
+                format!("retired:{}", r.id)
+            );
+            work.steps_on("retirement_rows")
+                + work.steps_on("kind = 'cascade'")
+                + work.steps_on("status = 'kept'")
+        };
+        let (small, large) = (late_arrival(5), late_arrival(400));
+        assert!(
+            large <= small + small / 10,
+            "{large} steps after 400 posts, cascades and opportunities were retired, {small} after 5"
+        );
+    }
+
+    /// An opportunity kept for a memory that a retirement took before the
+    /// opportunity's episode landed lands retired — and stays retired as a
+    /// fuller copy of the memory arrives; undoing brings it back.
+    #[test]
+    fn test_an_opportunity_landing_after_its_memory_was_retired_lands_retired() {
+        let (_tmp, home, store) = setup();
+        let day = |source_ref: &str, n: usize| {
+            let mut d = draft("imessage", source_ref, "day", vec![], vec![]);
+            d.kind = "messages".into();
+            d.body = format!("messages: {n}\nchat: x\ndate: 2026-09-03\n\n");
+            d
+        };
+        let state = |id: &str| -> Option<String> {
+            store
+                .lock()
+                .query_row(
+                    "SELECT superseded_by FROM episodes WHERE id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let base = "+15550001111#2026-09-03";
+        let held = id_of("imessage", &format!("{base}#r2"));
+        ingest(&store, &home, vec![day(&format!("{base}#r2"), 2)]);
+        let actor = Actor::new("human:test");
+        let seeking = store
+            .add_proposition(
+                &actor,
+                "work",
+                "seeking",
+                "a reason to call",
+                "declared",
+                &[],
+                None,
+            )
+            .unwrap();
+        assert!(store
+            .insert_opportunity(&actor, &seeking, &held, 0.9, "close")
+            .unwrap());
+        let found = store.list_opportunities(10).unwrap()[0].id.clone();
+        // kept: its row is marked, then its episode is written — the
+        // retirement comes in between
+        store
+            .lock()
+            .execute(
+                "UPDATE opportunities SET status = 'kept' WHERE id = ?1",
+                [&found],
+            )
+            .unwrap();
+        let r = store.retire(&actor, "memory", &held, &[], "").unwrap();
+        store.retirement_apply(&r.id).unwrap();
+        let mut kept = draft(
+            "consolidation",
+            &format!("opportunity:{found}"),
+            "Opportunity: day",
+            vec![],
+            vec![],
+        );
+        kept.kind = "opportunity".into();
+        ingest(&store, &home, vec![kept]);
+        let opportunity = id_of("consolidation", &format!("opportunity:{found}"));
+        let mark = Some(format!("retired:{}", r.id));
+        assert_eq!(state(&opportunity), mark);
+
+        ingest(&store, &home, vec![day(&format!("{base}#r5"), 5)]);
+        assert_eq!(state(&id_of("imessage", &format!("{base}#r5"))), mark);
+        assert_eq!(state(&opportunity), mark);
+
+        store.retirement_undo(&actor, &r.id).unwrap();
+        assert_eq!(state(&opportunity), None);
+    }
+
     #[test]
     fn test_a_retired_source_keeps_its_late_arrivals_retired() {
         let (_tmp, home, store) = setup();
@@ -2645,6 +2870,149 @@ mod tests {
         assert_eq!(state(&first), Some(fuller.clone()));
         assert_eq!(state(&of_copy), None);
         assert_eq!(state(&of_target), None);
+    }
+
+    /// A retirement that reaches a node before its target, then a cascade
+    /// of the target, then the target with no other copy of it here: the
+    /// cascade retires as the target arrives, and the undo brings both
+    /// back.
+    #[test]
+    fn test_a_cascade_ahead_of_its_target_retires_when_the_target_arrives_alone() {
+        let (_tmp, home, origin) = setup();
+        let receiver = Store::open_in_memory().unwrap();
+        let seed_draft = draft("mbox", "<s@x>", "seed", vec![], vec![]);
+        ingest(&origin, &home, vec![seed_draft.clone()]);
+        let seed = id_of("mbox", "<s@x>");
+        let actor = Actor::new("human:test");
+        let r = origin.retire(&actor, "memory", &seed, &[], "").unwrap();
+        origin.retirement_apply(&r.id).unwrap();
+
+        receiver
+            .retirements_sync_apply(&origin.retirements_sync_export("").unwrap())
+            .unwrap();
+        receiver.retirement_apply(&r.id).unwrap();
+        let mut cascade = draft(
+            "consolidation",
+            &format!("cascade:in_1:{seed}"),
+            "brief",
+            vec![],
+            vec![],
+        );
+        cascade.kind = "cascade".into();
+        ingest(&receiver, &home, vec![cascade]);
+        let of_seed = id_of("consolidation", &format!("cascade:in_1:{seed}"));
+        let state = |id: &str| -> Option<String> {
+            receiver
+                .lock()
+                .query_row(
+                    "SELECT superseded_by FROM episodes WHERE id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(state(&of_seed), None, "its seed isn't here yet");
+        ingest(&receiver, &home, vec![seed_draft]);
+        let mark = Some(format!("retired:{}", r.id));
+        assert_eq!(state(&seed), mark);
+        assert_eq!(state(&of_seed), mark);
+
+        receiver.retirement_undo(&actor, &r.id).unwrap();
+        assert_eq!(state(&seed), None);
+        assert_eq!(state(&of_seed), None);
+    }
+
+    /// The cascades an episode taken alone may have seeded are found on the
+    /// (source, source_ref) index, reading no rows.
+    #[test]
+    fn test_cascades_of_a_seed_are_found_on_the_index() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.lock();
+        let plan: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {CASCADE_REFS_SQL}"))
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter().any(|p| p.contains("COVERING INDEX")),
+            "{plan:?}"
+        );
+    }
+
+    /// A batch whose episodes several retirements took as they arrived, each
+    /// alone, reads the cascades' refs once — and each cascade that came
+    /// ahead of its seed retires with that seed's retirement.
+    #[test]
+    fn test_a_batch_taken_by_several_retirements_reads_the_cascades_once() {
+        let (_tmp, home, origin) = setup();
+        let receiver = Store::open_in_memory().unwrap();
+        let actor = Actor::new("human:test");
+        let seed_ref = |i: usize| format!("<s{i}@x>");
+        let seeds: Vec<EpisodeDraft> = (0..4)
+            .map(|i| draft("mbox", &seed_ref(i), "seed", vec![], vec![]))
+            .collect();
+        ingest(&origin, &home, seeds.clone());
+        let mut rids = Vec::new();
+        for i in 0..4 {
+            let r = origin
+                .retire(&actor, "memory", &id_of("mbox", &seed_ref(i)), &[], "")
+                .unwrap();
+            origin.retirement_apply(&r.id).unwrap();
+            rids.push(r.id);
+        }
+        receiver
+            .retirements_sync_apply(&origin.retirements_sync_export("").unwrap())
+            .unwrap();
+        for rid in &rids {
+            receiver.retirement_apply(rid).unwrap();
+        }
+        // cascades a peer sent ahead: of other memories, and of two seeds
+        let cascade = |i: usize, seed: &str| {
+            let mut d = draft(
+                "consolidation",
+                &format!("cascade:in_{i}:{seed}"),
+                "brief",
+                vec![],
+                vec![],
+            );
+            d.kind = "cascade".into();
+            d
+        };
+        let mut ahead: Vec<EpisodeDraft> = (0..50)
+            .map(|i| cascade(i, &id_of("mbox", &format!("<other{i}@x>"))))
+            .collect();
+        ahead.push(cascade(100, &id_of("mbox", &seed_ref(0))));
+        ahead.push(cascade(101, &id_of("mbox", &seed_ref(3))));
+        let ids: Vec<String> = ahead
+            .iter()
+            .map(|d| id_of(&d.source, &d.source_ref))
+            .collect();
+        let (other, of_first, of_last) = (ids[0].clone(), ids[50].clone(), ids[51].clone());
+        ingest(&receiver, &home, ahead);
+
+        let work = super::super::trace::work_of(&receiver, || ingest(&receiver, &home, seeds));
+        assert_eq!(work.runs_of(CASCADE_REFS_SQL), 1);
+        let state = |id: &str| -> Option<String> {
+            receiver
+                .lock()
+                .query_row(
+                    "SELECT superseded_by FROM episodes WHERE id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        for (i, rid) in rids.iter().enumerate() {
+            assert_eq!(
+                state(&id_of("mbox", &seed_ref(i))),
+                Some(format!("retired:{rid}"))
+            );
+        }
+        assert_eq!(state(&of_first), Some(format!("retired:{}", rids[0])));
+        assert_eq!(state(&of_last), Some(format!("retired:{}", rids[3])));
+        assert_eq!(state(&other), None);
     }
 
     /// A retirement that reaches a node before its target retires, as the

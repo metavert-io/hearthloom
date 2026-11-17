@@ -56,6 +56,8 @@ mod sharing;
 mod sync;
 mod tasks;
 mod telemetry;
+#[cfg(test)]
+mod trace;
 mod vectors;
 mod verdicts;
 
@@ -85,10 +87,11 @@ pub use graph::{
 };
 pub use groups::{FriendAccess, GroupRow, GROUP_PREFIX};
 pub use growing::{
-    chrome_day_holds, chrome_named_ref, growing_copy, growing_items, GrowingCopy, GROWING_SOURCES,
+    chat_lines, chrome_day_holds, chrome_named_ref, growing_copy, growing_items, GrowingCopy,
+    GROWING_SOURCES,
 };
 pub use health::{HealthSampleRow, StoredHealthSample};
-pub use ingest_apply::{same_record, OWNER_ONLY_SOURCES};
+pub use ingest_apply::{mail_sender, same_record, OWNER_ONLY_SOURCES};
 pub use intents::{IntentMatch, IntentRow};
 pub use lint::ReviewInputs;
 pub use movements::{
@@ -103,16 +106,16 @@ pub use observations::{ObservationIn, StoredObservation};
 pub use opportunities::OpportunityRow;
 pub use owned::{
     git_author, git_commit_concern, git_commit_head, git_repo_key, key_of_ref, not_ownable_reason,
-    ownable, owned_id, owned_key, substack_host_key, substack_served_from, GitCommitHead,
-    Judgement as OwnedJudgement, OwnableSource, OwnedSourceChange, OwnedSourceRow, NOT_OWNABLE,
-    OWNABLE_SOURCES,
+    ownable, owned_id, owned_key, owner_address, substack_host_key, substack_served_from,
+    GitCommitHead, Judgement as OwnedJudgement, OwnableSource, OwnedSourceChange, OwnedSourceRow,
+    GIT_PARENTS_NOT_FETCHED, NOT_OWNABLE, OWNABLE_SOURCES,
 };
 pub use photo::{
     keys_hash as photo_keys_hash, photo_day_lines, photos_missing, HeldPhoto, PhotoDayRecord,
     PhotoPointIn, StoredPhotoPoint,
 };
 pub use plugins::PluginRow;
-pub use privacy::{PrivacyRule, PrivateMemory};
+pub use privacy::{rules_match_text, PrivacyRule, PrivateMemory};
 pub use provenance::{others_words, trust_for, Hop, Origin, OTHERS_WORDS_SOURCES};
 pub use quarantine::{outside_proposal, QuarantineEntry, PROPOSAL_KINDS};
 pub use recall::DayView;
@@ -341,7 +344,7 @@ impl Drop for ReadScopeGuard {
     }
 }
 
-const SCHEMA_VERSION: i64 = 72;
+const SCHEMA_VERSION: i64 = 73;
 
 const SCHEMA_V1: &str = "
     -- L2: append-only ground truth. Raw content lives on disk at
@@ -2421,6 +2424,81 @@ impl Store {
                  );",
             )?;
         }
+        if version < 73 {
+            // v73: git commits and Substack posts are other people's words
+            // too (`OTHERS_WORDS_SOURCES`; `apply_batch` stores every new
+            // one `imported`): the rows an earlier build stored as `self`
+            // become `imported`, as v61 did for the sources it knew. No
+            // table changes, so an older build still opens it.
+            conn.execute_batch(&format!(
+                "UPDATE episodes SET trust = 'imported'
+                     WHERE {}; /* all-episodes: a relabel covers retired rows too */",
+                provenance::v73_relabel_sql()
+            ))?;
+        }
+        if version <= 73 {
+            // v73, agent tasks: indexes on when runs finished, and on the
+            // runs that may have lasted more than a day by how many digits
+            // long they were in whole days (7: unreadable, or a million days
+            // or more) and when they finished — judging an owner's commit
+            // (store/owned.rs `agent_run_between`) looks up only a run going
+            // while it was made, never the whole task history
+            // (`idx_agent_tasks_span`'s expression and condition are
+            // `LONG_RUN_DURING`'s, word for word). It replaces
+            // `idx_agent_tasks_long`, on when they finished alone, which an
+            // earlier build of v73 made. And the harness each run started on
+            // (`agent_tasks.harness`, kept by `start_agent_task_run`; NULL
+            // for a run started before): whether Hearthloom stops a run that
+            // was never closed is the run's, not its agent's setting now. An
+            // added column an older build ignores. A v73 database an earlier
+            // build of v73 made can lack any of these, so each is made when
+            // it's missing.
+            conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_agent_tasks_finished
+                     ON agent_tasks(finished_at);
+                 DROP INDEX IF EXISTS idx_agent_tasks_long;
+                 CREATE INDEX IF NOT EXISTS idx_agent_tasks_span
+                     ON agent_tasks(
+                         IFNULL(min(length(CAST(julianday(finished_at) - julianday(started_at) AS INTEGER)), 7), 7),
+                         finished_at)
+                     WHERE started_at IS NOT NULL
+                       AND IFNULL(julianday(finished_at) - julianday(started_at), 2) > 1;",
+            )?;
+            let has_harness: bool = conn.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_tasks')
+                 WHERE name = 'harness'",
+                [],
+                |r| r.get(0),
+            )?;
+            if !has_harness {
+                conn.execute_batch("ALTER TABLE agent_tasks ADD COLUMN harness TEXT;")?;
+            }
+            // v73, owner repairs: when each run's copy was recorded here
+            // (`repair_copies.recorded_at`, the relay stamp's clock) — the
+            // repairs leg sends with a run only the copies recorded since the
+            // peer's cursor, never its whole set again. Copies recorded
+            // before take their run's stamp: a peer past it had them all.
+            // An added column an older build ignores. Its index finds the
+            // copies recorded within one page's stamps (`repairs_sync_export`
+            // asks on every poll) without reading the whole set.
+            let has_recorded_at: bool = conn.query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('repair_copies')
+                 WHERE name = 'recorded_at'",
+                [],
+                |r| r.get(0),
+            )?;
+            if !has_recorded_at {
+                conn.execute_batch(
+                    "ALTER TABLE repair_copies ADD COLUMN recorded_at TEXT;
+                     UPDATE repair_copies SET recorded_at =
+                         (SELECT synced_at FROM repairs WHERE repairs.id = repair_copies.run);",
+                )?;
+            }
+            conn.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_repair_copies_recorded
+                     ON repair_copies(recorded_at, run);",
+            )?;
+        }
         if version < SCHEMA_VERSION {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -3138,6 +3216,72 @@ mod tests {
         // Re-open: user_version is set, schema not re-created.
         let store = Store::open(&path).unwrap();
         assert_eq!(store.counts().unwrap().episodes, 0);
+    }
+
+    /// A v73 database an earlier build of v73 made, without
+    /// `agent_tasks.harness` or the agent-run indexes, or with the long-run
+    /// index on when runs finished alone, gets them when it is opened: a
+    /// task's run then starts and ends there.
+    #[test]
+    fn test_an_earlier_v73_database_gets_the_agent_task_additions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test.db");
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .lock()
+                .execute_batch(
+                    "DROP INDEX idx_agent_tasks_finished;
+                     DROP INDEX idx_agent_tasks_span;
+                     CREATE INDEX idx_agent_tasks_long ON agent_tasks(finished_at)
+                         WHERE started_at IS NOT NULL
+                           AND IFNULL(julianday(finished_at) - julianday(started_at), 2) > 1;
+                     ALTER TABLE agent_tasks DROP COLUMN harness;",
+                )
+                .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let owner = Actor::new("human:owner");
+        let task = store
+            .create_agent_task(&owner, None, None, "r", "b", &[], None, false)
+            .unwrap();
+        store
+            .start_agent_task_run(&owner, &task.id, "claude_code", None, None)
+            .unwrap();
+        store
+            .set_agent_task_status(&owner, &task.id, "done", Some("ok"), None, None)
+            .unwrap();
+        let (harness, finished): (Option<String>, Option<String>) = store
+            .lock()
+            .query_row(
+                "SELECT harness, finished_at FROM agent_tasks WHERE id = ?1",
+                [&task.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(harness.as_deref(), Some("claude_code"));
+        assert!(finished.is_some());
+        let indexes: Vec<String> = {
+            let conn = store.lock();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT name FROM sqlite_master WHERE type = 'index'
+                     AND name IN ('idx_agent_tasks_finished', 'idx_agent_tasks_long',
+                                  'idx_agent_tasks_span')
+                     ORDER BY name",
+                )
+                .unwrap();
+            let names = stmt
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap();
+            names
+        };
+        assert_eq!(
+            indexes,
+            ["idx_agent_tasks_finished", "idx_agent_tasks_span"]
+        );
     }
 
     #[test]

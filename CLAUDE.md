@@ -92,7 +92,23 @@ workspace with `npm i playwright`) — screenshot + pageerror check.
 ## Layout
 
 - `crates/hearthloom-core` — schema (migrations via `PRAGMA user_version`,
-  **currently v72**: v72 `repair_revived` (the copies an undone owner
+  **currently v73**: v73 data only — git and Substack rows an earlier
+  build stored at trust `self` become `imported`, as v61 did for the
+  sources it knew (`provenance::v73_relabel_sql`; no table changes, so an
+  older build still opens the file), plus `idx_agent_tasks_finished` and
+  `idx_agent_tasks_span` (the owned-sources check looks up only an agent
+  run going while a commit was made — see THIS SOURCE IS MINE; it replaces
+  the `idx_agent_tasks_long` an earlier build of v73 made) and
+  `agent_tasks.harness` (the harness each run started on, synced with the
+  task; an added column an older build ignores) and
+  `repair_copies.recorded_at` (when each run's copy was recorded on this
+  node, the relay stamp's clock: the repairs leg sends with a run only the
+  copies recorded since the peer's cursor; rows from before take their
+  run's stamp; an added column an older build ignores; its index
+  `idx_repair_copies_recorded` finds the copies a page's stamps cover
+  without reading the whole set) — these five are
+  made whenever a v73 database lacks them, as one an earlier build of v73
+  made can, v72 `repair_revived` (the copies an undone owner
   repair run made that a later read of the owner's files put back in view
   — a set every node unions, carried with each run on /v1/sync/repairs, so
   every node puts the copy back; see OWNER REPAIRS), v71 `repair_copies`
@@ -353,7 +369,32 @@ workspace with `npm i playwright`) — screenshot + pageerror check.
   purpose: read the decision note at the top of `ics/rrule.rs` before
   proposing a library), mbox (streaming; `LabelFilter`
   over `X-Gmail-Labels` — Spam/Trash always dropped, kept episodes record a
-  `labels:` preamble line), chatlog
+  `labels:` preamble line; the first From/To/Cc name the people, as the
+  archive index reads them; mail with only an HTML part keeps its links'
+  and images' targets after the text, a `links:` block — capped like the
+  text, a target the room leaves out keeping its host, so a domain rule
+  made later still finds the memory (hosts have a room as large; a message
+  with more than it holds is drafted private, and the mail repair's
+  corrected copy of one ends private); every mail import (Gmail
+  pull and re-read, inbox, the detached mbox run — `ingest_batched_checked`
+  —, mail repair) also checks the privacy rules over the whole decoded
+  message, `mbox_text::rules_match_message`, and drafts it private on a
+  match: a rule matches the memory as it matches the archived message.
+  That label, like the hosts-left-out one, lands on the NEW memory only,
+  never on a copy stored before under the Message-ID (the Gmail pull and
+  re-read, the inbox and the detached run pass no such draft to
+  `label_private_on_reimport`): the stored text is cut and leaves parts
+  and headers out, so what made the message private can lie where no
+  comparison with it reaches, and other mail written under a known
+  Message-ID compares the same there. Only an import asked to be private
+  (`--scope private`) moves a stored copy into the vault, and only one
+  with the same date, sender and text (`same_mail_stored`,
+  `same_mail_text`: the header lines and text equal but for the `labels:`
+  line, the stored copy allowed to lack the `links:` block; a copy an
+  earlier version left encoded counts through its repair's corrected copy.
+  A Message-ID, date and sender are the sender's choice, and other mail
+  under a known one must not vault it). A rule made after the import sees only the stored
+  text — what the cut left out past a host it doesn't), chatlog
   (Claude/ChatGPT, owner-aware via users.json), claude-code, iMessage, Apple
   Photos (location trace), Chrome history, **Substack** (archive API, works
   on custom domains), **apple-health** (export.xml streaming scan — raw
@@ -405,8 +446,10 @@ workspace with `npm i playwright`) — screenshot + pageerror check.
   event HINTS, never data: GET /v1/bus/stream (SSE, Last-Event-ID replay
   ring 256/24h, `resync` past the gap) + POST /v1/bus/publish, both peer
   scope; `touch()` hooks on Desk/goal/note/relationship/selfmodel/project
-  writes → operational.changed, rename → entity.renamed, scope/privacy →
-  privacy.changed, a node's own row → nodes.changed (0.5.99,
+  writes → operational.changed, rename → entity.renamed, scope/privacy
+  (an import that moves a stored copy into the vault too,
+  `local_import::vault_stored_copies`) → privacy.changed, a node's own
+  row → nodes.changed (0.5.99,
   `agents::publish_self`: only when `announce_fingerprint` changes, ≤1 a
   minute — keep readings that change by themselves (free space, archive
   sizes/dates/progress, `last_seen`) OUT of the fingerprint, or every
@@ -427,9 +470,22 @@ workspace with `npm i playwright`) — screenshot + pageerror check.
   record as private (ChatGPT "do not remember", or `--scope private`)
   relabels the copy stored before (`Store::label_private_on_reimport`:
   label only, into the vault only; never for a peer's or another key's
-  batch; a flagged conversation counts even when no draft is made of it —
+  batch, nor for mail a privacy rule or the hosts' room made private — see
+  the mbox adapter above; a flagged conversation counts even when no draft is made of it —
   `openai::read_export`/`chatlog::read` report every flagged one, so a
-  kept branch with no turns still vaults what an earlier reader stored);
+  kept branch with no turns still vaults what an earlier reader stored;
+  every copy of a day — a growing source's or a photo day's — goes in
+  under the import's stamp, however recently one was taken out, and the
+  copies the record's label reaches count as moved;
+  a few hundred records per hold of the store; every owner's import path
+  — `/v1/ingest`, `/v1/ingest/local` incl. the detached mbox and openai
+  runs, the inbox (its mbox drops too), the Gmail pull and its label
+  re-read — goes through `local_import::vault_stored_copies` (or
+  reports the count up, the inbox), which sends `privacy.changed` — also
+  when the apply itself moved the stored copies, a fuller copy landing
+  private taking its day's with it (`IngestReport::private_copies`); a
+  private commit is named under its repository's former addresses too,
+  `local_import::private_refs`);
   `/v1/ingest/local` runs TCC-gated adapters daemon-side;
   **RLM deep-query engine** (`rlm.rs` — `hearthloom query`, POST /v1/query,
   SSE stream at /v1/query/stream; ≤8 rounds over search/recall/traverse/
@@ -696,8 +752,11 @@ never `imap::ClientBuilder`, which sets none. A refused sign-in STOPS that mailb
 search session and drafts all check `mailboxes::refused` — until it's
 saved again (`recheck_mailbox(id, true)`): retrying a bad Gmail password
 risks Google locking the account. "Refused" is a TYPE
-(`gmail_imap::SignInRefused`, made only from a `NO` reply to LOGIN that
-refuses the credentials), never words in an error message: a dropped
+(`gmail_imap::SignInRefused`, made only from a `NO` reply to LOGIN — every
+one but one that says it passes with time: an RFC 5530 `[UNAVAILABLE]`,
+`[INUSE]`, `[LIMIT]` or `[SERVERBUG]`, or Gmail's connection or bandwidth
+limits, `refuses_credentials`; never a list of refusal phrases, which
+Gmail words many ways), never words in an error message: a dropped
 connection or `[UNAVAILABLE]` at sign-in is an ordinary retry. A pull
 also re-reads the labels of mail it already holds (`gmail_pull::relabel`,
 ≤ every 10 min: the newest ≤500 of the last 30 days, plus the archive's
@@ -705,7 +764,14 @@ next 500 records by index row, `gmail_relabel_row`, wrapping — so every
 pulled message is read again in time). A record's UID counts only while
 Gmail still has that Message-ID under it (`gmail_imap::current_labels`):
 after a UIDVALIDITY change the old numbers name other messages, so a
-message its UID doesn't find is looked up by Message-ID. Mail that now
+message its UID doesn't find is looked up by Message-ID — searched by the
+id its angle brackets hold (`searchable_id`: a key with a comment beside
+the id, or folded, is no search term) and matched back by the import's
+key. The `Category Personal` search asks for exactly the UIDs read (a
+stretch's first and last UID can be a mailbox apart). A batch Gmail
+refuses or answers unreadably is read again one message at a time and
+only that message is left out (`per_item`); a connection failure still
+fails the re-read. Mail that now
 passes the Core strata becomes a memory (drafted from its archived copy);
 the labels then land in the index (`mbox_index::set_labels`, kept in its
 `label_updates` table, which a rebuild carries and indexes under — the
@@ -714,12 +780,23 @@ of messages still to observe (`gmail_observe_pending` meta); then mail
 that GAINED a label goes through `mail_triage::seen`/`observe` like new
 mail, so a thread forms and the embers' watches see it, and leaves the
 list only once recorded — a pull stopped in between, or an observation
-that failed (arrival's too), is finished by the next re-read. Never
+that failed (arrival's too, the first sort's), is finished by the next
+pull, which observes the list from the index before it connects (it
+waits neither on Gmail answering nor on the new mail). Never
 record labels without that list: a recorded label is never looked at
 again. `mbox_index::meta_get` and `labels_of` return None only for a
 missing key or message — an index they can't read (busy, locked) is an
 error, and an error keeps the list and the message on it; never read it
-as an empty list or a message gone. Index ids are the import's key (`mbox::message_id_ref`, folded
+as an empty list or a message gone. So is every other read of the index's
+meta: the pull's cursor (`read_cursor` — read as none, the pull would
+append its whole backfill window again), the stretch's position
+(`sweep_position`), when labels were last re-read (`relabel_due`: an
+error means not now) and `ids_current` (an error, never a rebuild). The
+first sort of a mailbox's mail (`mail_triage::backfill`) reads archived
+messages as bytes (`fetch_bytes`, never the lossy `fetch`: a rule's word
+in a legacy charset must match), and what it couldn't read or record
+goes on that list (`gmail_pull::keep_pending`, which takes the
+mailbox's pull lock — the pull rewrites the list). Index ids are the import's key (`mbox::message_id_ref`, folded
 headers included — `mbox_index::scan_headers`); a live archive indexed
 before that (no `ids` meta, `ids_current`) is rebuilt once by its pull.
 A rebuild holds the index's writer lock (`mbox_index::writer`) for its
@@ -737,7 +814,12 @@ A message's privacy is read again in `observe` (`private_now`): the pull
 makes its memory after reading it, and the memory can arrive private
 (the sender's identity is). A message observed again keeps the thread it
 joined — that thread's privacy and class decide what the watches see
-(`observe`, `Store::mail_thread_of_message`); found private now, it
+(`observe`, `Store::mail_thread_of_message`). One that joins a thread
+only later (it gained a label) and was written before the thread's
+latest counts, but leaves that latest message — what triage reads — its
+text and the thread's state as they are (`mail.rs::written_before`; a
+latest dated after now isn't believed — the Date header is the sender's,
+and a future one would keep every later message from the thread). Found private now, it
 makes that thread private (`Store::mail_observe`, journaled; nothing
 there makes a thread un-private), so triage never takes it. The label
 re-read makes the threads of the memories it just made private at once,
@@ -758,9 +840,14 @@ it otherwise — a second Message-ID header — this node hasn't pulled it,
 or the archive is gone) can't be checked, so its thread WAITS — never
 sent on its id alone, its label left as it is (a node that took over
 another's mailbox holds none of its archive, and a private label is for
-good and syncs back), checked again each round; triage pages past
-waiting threads (`Store::mail_threads_to_triage_from`) so they never
-hold up the rest. And whatever reads a
+good and syncs back); triage pages past waiting threads
+(`Store::mail_threads_to_triage_from`, a page at a time on the blocking
+pool with a pause between pages) so they never hold up the rest,
+and passes over one it found waiting without reading the archives again
+(`mail_triage::waits_still`, in memory) until the thread changes, the set
+of live archives here changes, or `WAIT_RECHECK` (10 min) passes — a
+backlog of waiting threads is looked up once, not by every round. And
+whatever reads a
 thread's message later (class-waiting watches, drafts) takes its labels
 from the index (`mailboxes::labels_now`), never the archived header. A
 memory keeps the labels it was made under (episodes are append-only; mail
@@ -776,7 +863,7 @@ into each mailbox's rolling live archive (`archives/gmail-live.mbox`
 for the first, `gmail-live-<id>.mbox` for an added one) + incrementally-appended
 sidecar (`mbox_index::append_index` — NEVER append to the Takeout mbox:
 its fingerprint invalidates and a full rebuild follows), annotates
-categories via one ranged X-GM-RAW search (X-GM-LABELS does NOT carry
+categories via an X-GM-RAW search over the UIDs pulled (X-GM-LABELS does NOT carry
 them), materializes Core strata as `source="mbox"` + Message-ID so the
 archive overlap dedupes via UNIQUE(source,source_ref), and advances its
 `uidvalidity:last_uid` cursor (sidecar meta, rebuild-surviving) only
@@ -852,12 +939,25 @@ the design log 2026-07-14.
   `committed:` and `parents:` head lines (`git_commit_head`) — a commit
   an earlier version imported has neither, can't show whether it is a
   merge or when it was made, and stays outside text (re-importing
-  doesn't replace it); not a merge — more than one parent, or a default
+  doesn't replace it), and so does one at a shallow clone's cut-off,
+  where git shows no parents whatever it had (the adapter reads the
+  clone's `shallow` file and writes `parents: not fetched`,
+  `GIT_PARENTS_NOT_FETCHED` — never an empty list, which reads as a first
+  commit); not a merge — more than one parent, or a default
   merge subject — no `Co-authored-by:` trailer naming another address
   (Claude Code adds one), text read whole up to `COMMIT_TEXT_CHARS`) and
   with no run of one of the owner's agent tasks anywhere from its author
-  date to its commit time (`agent_tasks` started_at → finished_at, open
-  while unfinished; an amend, rebase or cherry-pick keeps the author date
+  date to its commit time (`agent_tasks` started_at → finished_at; an
+  unfinished one — its agent deleted mid-run, its node gone — runs until
+  `LONGEST_AGENT_RUN_SECS` past its latest stamp, the longest agent
+  timeout plus the runner's grace, only when the run started on Claude
+  Code (`agent_tasks.harness`, kept as the run starts —
+  `start_agent_task_run`, the one way the runner starts a run — never
+  the agent's setting now, which the owner can change while a job is
+  still out), which the daemon kills at its time limit; a Hermes or
+  OpenClaw run, a task started again on another harness, or one started
+  before harnesses were kept (none recorded), runs on until it is
+  closed — Hearthloom doesn't stop those; an amend, rebase or cherry-pick keeps the author date
   and sets the commit time, and the next one sets it again, so an agent's
   rewrite in between leaves no time of its own — never go back to
   checking the two times alone). Git doesn't check an author address, or either date —
@@ -874,6 +974,30 @@ the design log 2026-07-14.
   `first_untrusted_episode` and `entity_names_unverified` (so
   Ask's outbound gate, traverse names, and the agents' taint rule) judge
   each candidate through `OwnedWords::covers`; stored trust never moves.
+  Both look at everything outside the listed sources in one cheap
+  `LIMIT 1` query first and read only the listed sources' candidates
+  whole; `OwnedWords` reads the owner's addresses only when a candidate
+  gets that far, once per check, and the agents' runs only for such a
+  commit: the ones never closed once per check, and two looks for a
+  finished run that ended after its author date and started before its
+  commit time — one of a day or less among the runs that finished from
+  its author date to a day and five minutes past its commit time
+  (`RUN_FINISHED_DURING`, by `idx_agent_tasks_finished`), and a longer
+  one among the runs that may have lasted more than a day, a length at a
+  time (`long_run_between`: `LONG_RUN_DURING` once for each count of
+  digits in a run's whole days, 1 to 6 — a run under 10^d days going at
+  the commit time finished within 10^d days of it, so only the runs of
+  that length that finished then are read — and `ODD_RUN_DURING` for runs
+  whose times can't be read or lie a million days apart, none a clock
+  wrote; all by the partial expression index
+  `idx_agent_tasks_span`, whose expression and condition the queries
+  repeat word for word) — never the task history before or after it,
+  however long it grows (a bound on one end only let an old commit read
+  every run since, long ones too). They run on every Ask tool result
+  and agent record read — keep them off the common path.
+  The idle refresh leaves out a known checkout that overlaps one of this
+  node's agents' working folders (`consolidate.rs::refresh_git_repos`),
+  as it does those agents' Claude Code sessions.
   It fails closed: a writer other than the source's own importer
   (`adapter:<source>` — only the owner may name an adapter, on
   `/v1/ingest` AND the virtual-source register/promote routes an
@@ -891,18 +1015,33 @@ the design log 2026-07-14.
   connecting a mailbox — its address and the aliases kept for it, which
   a reconnect brings back; checked before the sign-in is tried and again
   after it) needs the owner and an open vault too
-  (`http.rs::may_add_owner_addresses`), and every address change — a
+  (`http.rs::may_add_owner_addresses`; only what reads as an address,
+  `owned::owner_address`, as the addresses are read — a card line that
+  doesn't can never be the owner's, so it is never "new"), and every address change — a
   disconnect too — is journaled into the list's history
   (`owned_addresses_changed`, op `addresses`). These changes take turns
-  (`http.rs::owner_addresses_turn`, held from the last check until the
-  change is saved, published and journaled, never across an await): a
+  (`http.rs::owner_addresses_turn`, an async lock — a waiting change
+  yields its runtime thread — held from the last check until the
+  change is saved, published and journaled, that work running on the
+  blocking pool, `in_turn`, so a slow Keychain save holds no runtime
+  thread — the turn goes into that work and ends with it, so a request
+  that ends early (its client gone) never lets another change in
+  before its save is done; never held while waiting on
+  something outside the node, such as Gmail's answer to a sign-in): a
   new route that changes the owner's addresses takes the turn too, or an
   address taken off between a check and its save comes back. Stamps
   have whole seconds and a tombstone at or after a row's stamp removes
   it on every node, so a re-add is stamped after the entry's last
   tombstone and a removal's tombstone never before the row's stamp
   (`journal_op_at`). The list shows how many
-  stored memories each entry names (`owned_source_stored`), so an entry
+  stored memories each entry names (`owned_source_stored`, as the viewer
+  sees the record — private ones only with their vault open; the count
+  steps through the source a repository or publication at a time on the
+  `(source, source_ref)` index and reads only the parts an entry's key
+  may be in, `owned::ref_part` — a key holding a `#` only the parts whose
+  key begins it and the few with no key that can hold one, never a local
+  checkout's —, one look per other part — never every
+  memory of the source; `owned_entry_stored`, and adding one counts only it), so an entry
   that names none is visible. No MCP tool, ember route (it's on the ember
   deny list) or scoped key reaches it (`test_no_key_but_the_owners_
   reaches_the_list` runs requests through the router). A new taint check
@@ -1132,8 +1271,12 @@ the design log 2026-07-14.
   never registered on this node (it synced) — silently, and a held-back
   fetch reads as not there. Triage and ember delivery make the same
   lookups — all three through `virtual_source::MailPrivacy` (made once per
-  batch: the private set's not-bare keys and the legacy promotions are
-  read once, not per message) — and all three match
+  batch: the private set's not-bare keys, the bases of private corrected
+  copies (`Store::private_replacement_bases` — an owner repair's
+  `<id>#repair:<hash>` keeps its message private also on a node its
+  original never reached), the legacy promotions, whether
+  a memory keyed by its text is private and the privacy rules are read
+  once, not per message or search hit) — and all three match
   a message by IDENTITY, never by header spelling: a reader's key carries
   the import's key AND a MIME parser's reading of the Message-ID
   (`mail_key`), matched by `MailPrivacy::found`
@@ -1141,7 +1284,9 @@ the design log 2026-07-14.
   ember deny list. `test_archive_readers_go_through_the_vault_check` scans
   rlm/http/mcp/network_out for raw calls. The rules read a message WHOLE
   and DECODED (`virtual_source::Privacy`, `mbox_text::privacy_text`: every
-  address header incl. Cc/Bcc, labels, every text/HTML part, uncut, each
+  occurrence of every address header incl. Cc/Bcc — the import names the
+  first From/To/Cc, a parser's own accessors the last — labels, every
+  text/HTML part, uncut, each
   part also with its whitespace runs read as one space so a term matches
   across a line break) —
   never the text a reader shows, which is cut and, for an archive, still
@@ -1164,8 +1309,10 @@ the design log 2026-07-14.
   (`human:…`, `promoted_by_a_person`; a peer's from the origin it sent)
   or not known (a peer sent no origin; a row synced before v61, whose
   actor names only the peer, `peer:…`) — never an importer's
-  (`adapter:…`: a calendar UID can read `uid:7`) or one the server names
-  for a key that isn't the owner's (`agent:key:…`, `plugin:…`), or else
+  (`adapter:…`: a calendar UID can read `uid:7`), one the server names
+  for a key that isn't the owner's (`agent:key:…`, `plugin:…`), or one of
+  the owner's own devices (`human:device:…` — a scoped key no promotion
+  route admits, whose feeds carry refs others choose), or else
   any ingest key could stop all mail. It holds under ANY source name —
   `gmail`, an alias, one unregistered since or only registered on another
   node, one registered here as a mount of files — whatever is registered
@@ -1185,7 +1332,9 @@ the design log 2026-07-14.
   thread made private stays private for good — `observe` leaves the
   message to be observed later (`MailSeen::held`; `mail_observe` refuses
   it), triage skips its round without writing, an ember's queue waits
-  with its cursor where it was, the backfill waits. The hold is logged
+  with its cursor where it was, the backfill waits, and a draft request
+  waits untaken (`mail_drafts::draft_one` — never finished as "private"
+  for a hold). The hold is logged
   when it begins and ends, naming the memory (never its text), and the
   triage status (`held`) names it to an owner whose vault is open — only
   then (a locked view says nothing of what the vault holds).
@@ -1218,7 +1367,11 @@ the design log 2026-07-14.
   every mailbox here (0.5.98: a warm session per mailbox, hits merged
   newest first and once per Message-ID, each naming its mailbox; a path
   without a Message-ID is `uid:<n>` in the first, `uid:<id>:<n>` in an
-  added one); `recheck_mailbox(id, true)` resets that mailbox's session. Its hits carry the decoded text in `VirtualHit::text` (skipped
+  added one); `recheck_mailbox(id, true)` resets that mailbox's session.
+  A warm session whose call failed is dropped, never logged out
+  (`gmail_search::warm_call`): it may be the one that stalled, and a
+  LOGOUT on it would wait out its deadline again under the lock every
+  mailbox's lookups take. Its hits carry the decoded text in `VirtualHit::text` (skipped
   on the wire) so the privacy check needs no second fetch; its messages
   are the pull's `mbox` memories (same Message-ID). Ask is told to search
   it first.
@@ -1614,7 +1767,13 @@ the design log 2026-07-14.
   unversioned `<base>` is an earlier version's — `n` = items
   held (`growing_items`: the TRUE count the adapter writes ahead of any
   third-party text — `<n> visits` / `messages: <n>` / `turns: <n>` — so a
-  capped text still counts; a text from before is counted by its lines),
+  capped text still counts; a text from before is counted by its lines;
+  a chat-day counts at least its `[HH:MM] ` lines too, so lines a message's
+  own text holds weigh alike in every copy and an earlier version's day
+  holding a pasted log never holds back the messages after it — a day
+  whose messages hold such lines writes how many the whole day holds,
+  `lines: <m>` on its second line, so a long day's text that leaves the
+  log out still counts it),
   decided ONLY by daemon `local_import::prepare` on the paths that read
   this machine's files (refresh, `/v1/ingest/local`, inbox, non-peer
   `/v1/ingest`; always on a blocking thread) — never on a peer's batch. A
@@ -1627,11 +1786,23 @@ the design log 2026-07-14.
   an undo leaves one copy in view. A RECORD is all copies of a base plus
   the copies `settle` put behind one another (a Chrome profile day and
   the named day it replaced) — `growing::other_copies`, which also reads
-  a retired copy's saved mark. A new copy takes the record's label (the
+  a retired copy's saved mark, both ways (from a profile day, the named
+  day's saved mark naming it). A new copy takes the record's label (the
   latest stamped label on any copy, else the fullest copy's) and its
   retirement (any retired copy). A PRIVATE LABEL HOLDS FOR THE RECORD:
-  a copy landing private is stamped (the record's stamp, else now), and
-  every path that labels an episode private — arrival, `set_episode_scopes`,
+  a copy landing private is stamped (the record's stamp, else now) —
+  except a peer's copy private by its sender's label, or by a label here
+  with no stamp: the episode leg carries no stamp, and the label can be
+  older than the copy (one it inherited where it was made), so any stamp
+  chosen here (now, when it was first written) could outrank a decision
+  made in between. It lands stamped `growing::UNKNOWN_TIME`, which sorts
+  below every real stamp: it reaches only the copies here that carry no
+  stamp, any real stamp outranks it, and — being a stamp — it travels on
+  the scope leg to the nodes holding those copies with none (never leave
+  such a label NULL: the scope leg skips unstamped rows, and the node that
+  sent the copy would keep its own copies out of the vault). The sender's
+  own stamp comes on the scope leg and spreads as below.
+  Every path that labels an episode private — arrival, `set_episode_scopes`,
   the scope leg (`apply_scope_changes`), privacy rules, a Project cascade,
   `label_private_on_reimport` — calls `growing::spread_private`, which
   gives the other copies the same stamp unless labelled since (LWW, a tie
@@ -1644,14 +1815,29 @@ the design log 2026-07-14.
   record (`covered_episodes`, also when the target arrived retired
   first), and a copy arriving retired retires the record's other copies
   (gathered BEFORE it is marked — the mark replaces its link) and, at the
-  end of the batch, what any episode retired on arrival or its copies
-  seeded (`ArrivalRules::retire_derived` — a cascade that came first).
+  end of the batch, what the copies it took seeded, and a cascade of the
+  arriving copy that came first (`ArrivalRules::retire_derived` — only
+  for a batch that took copies held here, or took an episode alone that a
+  cascade here names: a peer's cascade is the one thing such an episode
+  can have seeded here, found by one pass over the cascades' refs on the
+  index, `retire::cascade_seeds_among`). An
+  opportunity whose memory a retirement took before the
+  opportunity's episode landed lands retired (`ArrivalRules::covering`
+  reads the row the retirement saved).
   A Chrome day keyed by profile
   puts a day stored under the profile's shown name (`chrome_named_ref`)
   behind it only when it holds it (`chrome_day_holds`: at least its visit
-  COUNT and every visit line it shows — lines collapse repeated titles and
-  stop at `[truncated]`), in either arrival order — a same-named profile's
-  day stays. Their adapters keep every base
+  COUNT, the visit it opens with, and every other visit line it shows
+  unless the holder leaves lines out there and the held day leaves lines
+  out too — a day shown whole is held only where each of its lines shows,
+  so another profile's short day under the same name stays — lines collapse repeated
+  titles, an earlier version's long day stops at `[truncated]`, a long day
+  now keeps its first and latest lines around `[<n> lines not shown]`;
+  titles are written on one line, and an earlier version's title across
+  lines reads as one), in either arrival order — a same-named profile's
+  day stays. A private import names that day too
+  (`local_import::private_refs`), since `prepare` drops a profile day it
+  holds. Their adapters keep every base
   ending in a part they write (`#<date>`, a session id with `#` escaped)
   so no outside string reads as a revision.
 - **OWNER REPAIRS: A CORRECTED COPY REPLACES ONLY WHAT ITS RECORDED WRITER
@@ -1676,7 +1862,10 @@ the design log 2026-07-14.
   itself a replacement. A REPAIRED RECORD is the base plus its
   replacements; every node settles it from what it holds (`settle`, on
   every arrival of a copy or of the base, and per run): the newest
-  replacement (origin `at`, then ref) whose run isn't undone stands, the
+  replacement (by when the newest run that made it began —
+  `repairs.created_at` over `repair_copies`, rows every node converges on;
+  the origin's `at` only while no run of it is known here, as it differs
+  per node — then ref) whose run isn't undone stands, the
   others behind it; with none, the base stands and the replacements stand
   behind it — behind the base's id even when the base hasn't reached the
   node (an undone correction never stands in its place). Arrival order, a
@@ -1690,7 +1879,11 @@ the design log 2026-07-14.
   a label the owner takes OUT of the vault (vault open,
   `set_episode_scopes`) comes out for the whole record with its stamp
   (`repair::spread_unvault`: the copies are one item, and a hidden private
-  copy would keep the message held). Retiring one retires all, a copy
+  copy would keep the message held) — only when that relabel took the copy
+  out (a copy outside already, or left as it was, takes nothing out). An
+  import that reads a record as private (`label_private_on_reimport`)
+  reaches its corrected copies by the record's ref also where the base
+  isn't stored (`repair::replacement_ids`). Retiring one retires all, a copy
   of a retired record lands retired, a run settled on a node that held a
   copy from before it knew the rule retires that copy too
   (`retire_with_record`, in `repair_settle_run`), and a settle on a
@@ -1704,8 +1897,18 @@ the design log 2026-07-14.
   copies are the set `repair_copies` (v71): every copy the owner repair
   lands is recorded under the run its origin names (`apply_batch_as`),
   each run row carries its set on the repairs leg, and every node unions
-  it (`repairs_sync_apply`; an undone run that brings copies a node didn't
-  know of is settled there again). Never go back to the origin's
+  it (`repairs_sync_apply`, a run per transaction with pauses, on the
+  blocking pool like every repairs route and the sync step; a run, undone
+  or not, that brings copies a node didn't know of is settled there again
+  — the corrections it made rank by when it began). A row
+  sent again carries only the copies recorded since the peer's cursor
+  (`repair_copies.recorded_at`): whoever records a copy of a run stored
+  here stamps the run in the same transaction (`restamp_runs`), and a
+  run's row arriving stamps the copies recorded before it — break either
+  and a peer misses copies. A copy goes out on the page its own stamp
+  falls in: a run stamped again past a page's end rides that page too when
+  a copy of it was recorded within it (`repairs_sync_export`), or a peer's
+  cursor would pass the copy before the run reached it. Never go back to the origin's
   `session` alone: two nodes that make the same correction before they
   sync hold one copy (its id is its content's) whose first-arrival origin
   names a different run on each, and an undo of either must reach it
@@ -1713,7 +1916,9 @@ the design log 2026-07-14.
   (`undone_arrival`, `undone_copy`). Undo stamps the run
   (`stamp_after` — whole-second stamps), each node settles the
   run again (`repairs_pending_here` / `repair_settle_run`, daemon
-  `repair::catch_up` every cycle and after the leg), and what a run ADDED
+  `repair::catch_up` every cycle and after the leg — each run on its own:
+  one whose settling fails is tried again next cycle and holds up no
+  other), and what a run ADDED
   (a missing calendar occurrence, an ordinary `adapter:ics` import) stays.
   An undone correction is never made again by asking for it again (same
   ref), so the CLI's `repair undo` only explains that unless `--yes`.
@@ -1724,7 +1929,8 @@ the design log 2026-07-14.
   409), and `catch_up` waits while one runs (it would settle a run still
   landing); a run lands through `Store::repair_apply_work` (`repair_apply`
   wraps it; a record whose base never reached this node is repaired over
-  its stored copies). The repairs pull leg moves its cursor only past a
+  its stored copies; its row records the counts of what landed also when a
+  batch stops it part way). The repairs pull leg moves its cursor only past a
   page that applied (`sync.rs::take_repairs_page`: the row is the only
   carrier of an undo). Reports list episode ids, statuses and short
   reasons — never subjects, names or text. The mail scan reads EVERY
@@ -1786,7 +1992,13 @@ the design log 2026-07-14.
   (`growing::restore_revived`; a copy waiting behind the id of a base the
   node doesn't hold yet too, so the base arriving later lands behind it)
   — the other nodes can't read those files, and the read lands no episode
-  of its own. `photo-days` re-mints
+  of its own. Placing a copy so, and ranking a record's copies when a run
+  settles, read no raw file with the store held: the copy's text and
+  those it is measured against (an unversioned copy's, the Chrome days
+  it's compared with) are read first (`growing::named_copy_texts`,
+  `settle_texts`, `growing::Texts::Read`); one that wasn't read (it
+  arrived since) leaves the copy where it is on a local read, and fails a
+  run's settle (placing or ranking) for the next catch-up. `photo-days` re-mints
   ONLY an inflated count — the day shows a photo more than once, or the
   count it was minted with here is above the photos stored and keeps the
   finalize pass from adding the ones it lacks (a day that reads otherwise

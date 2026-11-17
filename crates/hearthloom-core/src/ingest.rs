@@ -85,6 +85,12 @@ pub struct IngestReport {
     pub entities_resolved: usize,
     pub edges_created: usize,
     pub review_queued: usize,
+    /// Copies stored before the batch that it moved into the vault (or
+    /// gave a newer private stamp): a copy that lands private takes the
+    /// rest of its record with it — a day's or session's other copies, a
+    /// repaired record's, a photo day's (`growing::spread_private`).
+    #[serde(default)]
+    pub private_copies: usize,
 }
 
 /// A single-line field from someone else (a calendar title or venue, a

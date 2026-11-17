@@ -171,7 +171,8 @@ pub fn message_text(raw: &[u8]) -> (String, String) {
 /// decoded text of every text and HTML part — none of it cut. This covers
 /// everything the mail import checks (subject, sender, recipients, labels
 /// and the start of the first text part), so a message a rule makes
-/// private at import is private when read in place too. Unlike
+/// private at import is private when read in place too; the import checks
+/// this text as well (`rules_match_message`), so the converse holds. Unlike
 /// `message_text` (what search shows), nothing here is capped: the caller
 /// bounds how much of the message it read. Each part is read as decoded
 /// and, where its spacing differs, with every run of whitespace read as
@@ -206,16 +207,19 @@ pub fn privacy_text(raw: &[u8]) -> String {
     if let Some(subject) = message.subject() {
         add(&hearthloom_core::one_line(subject));
     }
+    // every occurrence of each: the import names the first, a reader may
+    // name the last
+    let fields = message.headers();
     for list in [
-        message.from(),
-        message.sender(),
-        message.reply_to(),
-        message.to(),
-        message.cc(),
-        message.bcc(),
+        mail_parser::HeaderName::From,
+        mail_parser::HeaderName::Sender,
+        mail_parser::HeaderName::ReplyTo,
+        mail_parser::HeaderName::To,
+        mail_parser::HeaderName::Cc,
+        mail_parser::HeaderName::Bcc,
     ]
     .into_iter()
-    .flatten()
+    .flat_map(|name| fields.all(name).filter_map(|h| h.value().as_address()))
     {
         for mailbox in list.mailboxes() {
             if let Some(name) = mailbox.name() {
@@ -237,6 +241,15 @@ pub fn privacy_text(raw: &[u8]) -> String {
         i += 1;
     }
     out
+}
+
+/// Whether a privacy rule matches a message read whole (`privacy_text`),
+/// as the archive's readers check it. A mail import checks this besides
+/// the draft it stores: the draft is cut (its text at the body cap, its
+/// link targets at their room), and a rule matching only what was cut
+/// still makes the memory private.
+pub fn rules_match_message(rules: &[hearthloom_core::store::PrivacyRule], raw: &[u8]) -> bool {
+    !rules.is_empty() && hearthloom_core::store::rules_match_text(rules, &privacy_text(raw))
 }
 
 /// `https://portal.example.com/client/login?x=1` → `portal.example.com/client/login`.
@@ -424,6 +437,26 @@ VGhlIGZvcm0gaXMgYXQgaHR0cHM6Ly9mb3Jtcy5leGFtcGxlLm9yZy9hcHBseS4=\r\n";
         let (text, links) = message_text(plain);
         assert_eq!(text, "The form is at https://forms.example.org/apply.");
         assert_eq!(links, "forms.example.org/apply");
+    }
+
+    /// The rules read every occurrence of an address header: the import
+    /// names the first From, To and Cc, a parser's own reading the last.
+    #[test]
+    fn test_privacy_text_reads_every_address_header() {
+        let message = b"From: Ann <ann@first.example>\r\nTo: bob@first.example\r\n\
+Cc: cy@first.example\r\nFrom: Dee <dee@last.example>\r\nTo: eve@last.example\r\n\
+Cc: fay@last.example\r\nSubject: s\r\n\r\nbody\r\n";
+        let text = privacy_text(message);
+        for address in [
+            "ann@first.example",
+            "bob@first.example",
+            "cy@first.example",
+            "dee@last.example",
+            "eve@last.example",
+            "fay@last.example",
+        ] {
+            assert!(text.contains(address), "{address}: {text}");
+        }
     }
 
     /// The whole path: headers searchable at once; the text joins in

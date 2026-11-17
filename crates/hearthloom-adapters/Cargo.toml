@@ -11,6 +11,7 @@ anyhow = { workspace = true }
 base64 = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
+icu_normalizer = { workspace = true }
 imap = { workspace = true }
 imap-proto = { workspace = true }
 mail-parser = { workspace = true }

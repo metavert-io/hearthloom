@@ -162,9 +162,10 @@ const IDS_KEY: &str = "ids";
 const IDS_RULE: &str = "import-key";
 
 /// Whether this index keys its messages by the mail import's rule. One
-/// built before doesn't (`IDS_KEY`); rebuilding it does.
-pub fn ids_current(mbox: &Path) -> bool {
-    meta_get(mbox, IDS_KEY).ok().flatten().as_deref() == Some(IDS_RULE)
+/// built before doesn't (`IDS_KEY`); rebuilding it does. An index that
+/// can't be read is an error, never one to rebuild.
+pub fn ids_current(mbox: &Path) -> Result<bool> {
+    Ok(meta_get(mbox, IDS_KEY)?.as_deref() == Some(IDS_RULE))
 }
 
 /// One writer of an archive's index at a time. A rebuild copies the meta
@@ -1575,7 +1576,16 @@ Numbers attached.\n";
         )
         .unwrap();
         build(&mbox).unwrap();
-        assert!(ids_current(&mbox));
+        assert!(ids_current(&mbox).unwrap());
+        // an index that can't be read says so, rather than "rebuild me"
+        let index = Connection::open(index_path(&mbox)).unwrap();
+        index
+            .execute_batch("ALTER TABLE meta RENAME TO meta_aside")
+            .unwrap();
+        assert!(ids_current(&mbox).is_err());
+        index
+            .execute_batch("ALTER TABLE meta_aside RENAME TO meta")
+            .unwrap();
         let hits = search(&mbox, "folded", 10).unwrap();
         assert_eq!(hits.len(), 1);
         // the import's key: the header unfolded, the brackets at its ends

@@ -111,17 +111,17 @@ fn hours_between(start: &str, end: &str) -> Option<f64> {
 /// Pub: the daemon's live-HealthKit finalize pass normalizes device
 /// names the same way so live and export rows aggregate together.
 ///
-/// Only a name that says "Apple Watch" (in any language's device name:
-/// "Apple Watch de Ada") is the watch: an app whose name merely contains
-/// "Watch" (SleepWatch) is a tracker of its own, and two trackers must
-/// never share a source — their sleep would add up.
+/// A name that says "Apple Watch" (in any language's device name: "Apple
+/// Watch de Ada"), or whose last word is "Watch" (a watch its owner
+/// renamed: "Ada’s Watch", "My Watch"), is the watch. An app whose name
+/// merely contains "Watch" (SleepWatch, "Watch Sleep Tracker") is a tracker
+/// of its own, and two trackers must never share a source — their sleep
+/// would add up.
 pub fn normalize_source(raw: &str) -> String {
     let s = raw.trim();
-    let spaced: String = s
-        .chars()
-        .map(|c| if c.is_whitespace() { ' ' } else { c })
-        .collect();
-    if spaced.to_lowercase().contains("apple watch") {
+    let lower = s.to_lowercase();
+    let words: Vec<&str> = lower.split_whitespace().collect();
+    if words.join(" ").contains("apple watch") || words.last() == Some(&"watch") {
         return "Apple Watch".into();
     }
     if s.contains("iPhone") {
@@ -129,6 +129,9 @@ pub fn normalize_source(raw: &str) -> String {
     }
     s.to_string()
 }
+
+/// Glucose's molar mass in g/mol, as HealthKit writes it.
+const GLUCOSE_MOLAR_MASS: f64 = 180.155_88;
 
 /// A HealthKit unit string as a dimension and the affine map onto that
 /// dimension's base unit (base = value × scale + offset).
@@ -172,6 +175,9 @@ fn unit_def(unit: &str) -> Option<(&'static str, f64, f64)> {
         "degF" => Some(("temperature", 5.0 / 9.0, -160.0 / 9.0)),
         "K" => Some(("temperature", 1.0, -273.15)),
         "mg/dL" => linear("mass/volume", 1.0),
+        // Blood glucose is the one HealthKit quantity read in molar units:
+        // an app that writes a bare mmol/L means glucose's molar mass.
+        "mmol/L" => linear("mass/volume", GLUCOSE_MOLAR_MASS / 10.0),
         // Blood glucose in molar units names its molar mass:
         // `mmol<180.15588000005408>/L`; mmol/L × g/mol ÷ 10 = mg/dL.
         other => {
@@ -211,6 +217,35 @@ fn canonical_unit(metric: &str) -> Option<&'static str> {
         "HeartRateVariabilitySDNN" => Some("ms"),
         _ => None,
     }
+}
+
+/// What a metric measures, for the metrics written in a unit `unit_def`
+/// converts: a unit it knows takes the place of a first unit it doesn't
+/// only when it measures this (`DayTable::add`). Any other metric (steps
+/// in `count`, heart rate in `count/min`) keeps the first unit it is seen
+/// in, whatever arrives later.
+fn metric_dimension(metric: &str) -> Option<&'static str> {
+    if let Some(unit) = canonical_unit(metric) {
+        return unit_def(unit).map(|(dimension, _, _)| dimension);
+    }
+    Some(match metric {
+        "BodyMass" | "LeanBodyMass" => "mass",
+        "DietaryEnergyConsumed" | "BasalEnergyBurned" => "energy",
+        "DietaryWater" => "volume",
+        "BloodGlucose" => "mass/volume",
+        "BodyTemperature" | "BasalBodyTemperature" | "AppleSleepingWristTemperature" => {
+            "temperature"
+        }
+        "Height" | "WaistCircumference" | "WalkingStepLength" | "SixMinuteWalkTestDistance" => {
+            "length"
+        }
+        "WalkingSpeed" | "RunningSpeed" => "speed",
+        "AppleStandTime" => "time",
+        // Every other dietary quantity is a nutrient's mass.
+        m if m.starts_with("Dietary") => "mass",
+        m if m.starts_with("Distance") => "length",
+        _ => return None,
+    })
 }
 
 /// A total read in `to`: as written when no unit is given, dropped when
@@ -408,14 +443,23 @@ impl Agg {
 /// Every value of a metric is aggregated in ONE unit: the one the table
 /// was made with (`with_units`), else its canonical unit when its
 /// readers name one (`canonical_unit`), else the first unit the table
-/// sees for it. A sample in another unit of the same kind (154 lb after
-/// 70 kg, kJ for kcal) is converted; one whose unit measures something
-/// else, or that this table can't convert, is left out of the day.
+/// sees for it — and when that is a unit this table can't convert, the
+/// first one it can that measures what the metric does
+/// (`metric_dimension`) and arrives later takes its place (the values in
+/// the first can join no other unit, so they are left out instead,
+/// whichever order the samples come in). A sample in another unit of the same kind
+/// (154 lb after 70 kg, kJ for kcal) is converted; one whose unit measures
+/// something else, or that this table can't convert, is left out of the
+/// day, with a warning once per metric and unit.
 #[derive(Default)]
 pub struct DayTable {
     pub map: BTreeMap<(String, String, String), Agg>,
     /// metric → the unit its aggregates are in.
     units: BTreeMap<String, String>,
+    /// The metrics whose unit the table was made with: it never changes.
+    given: std::collections::BTreeSet<String>,
+    /// (metric, unit) of the values left out, each warned about once.
+    left_out: std::collections::BTreeSet<(String, String)>,
     /// First raw timestamp seen per day (anchors the episode's event time).
     first_ts: BTreeMap<String, String>,
 }
@@ -424,9 +468,22 @@ impl DayTable {
     /// A table whose metrics aggregate in the given units (metric →
     /// unit) — a reader's, so new values join the ones it already holds.
     pub fn with_units(units: impl IntoIterator<Item = (String, String)>) -> DayTable {
+        let units: BTreeMap<String, String> = units.into_iter().collect();
         DayTable {
-            units: units.into_iter().collect(),
+            given: units.keys().cloned().collect(),
+            units,
             ..DayTable::default()
+        }
+    }
+
+    /// Values of `metric` in `unit` are left out, as they can't be read in
+    /// `kept`, the unit the metric's days are in: say so, once.
+    fn leave_out(&mut self, metric: &str, unit: &str, kept: &str) {
+        if self.left_out.insert((metric.to_string(), unit.to_string())) {
+            tracing::warn!(
+                "health: {metric} values in {unit:?} left out: they can't be read in {kept:?}, \
+                 the unit the metric's days are in"
+            );
         }
     }
 
@@ -438,14 +495,36 @@ impl DayTable {
         };
         let v = match &s.unit {
             Some(unit) => {
-                let table_unit = self.units.entry(metric.clone()).or_insert_with(|| {
-                    canonical_unit(&metric)
-                        .map(String::from)
-                        .unwrap_or_else(|| unit.clone())
-                });
-                match convert_unit(v, unit, table_unit) {
+                let table_unit = self
+                    .units
+                    .entry(metric.clone())
+                    .or_insert_with(|| {
+                        canonical_unit(&metric)
+                            .map(String::from)
+                            .unwrap_or_else(|| unit.clone())
+                    })
+                    .clone();
+                match convert_unit(v, unit, &table_unit) {
                     Some(v) if v.is_finite() => v,
-                    _ => return,
+                    Some(_) => return,
+                    // A unit this table can read takes the place of a
+                    // first one it can't, when it measures what the metric
+                    // does: the values in that one are left out instead.
+                    None if unit_def(&table_unit).is_none()
+                        && unit_def(unit).is_some_and(|(dimension, _, _)| {
+                            metric_dimension(&metric) == Some(dimension)
+                        })
+                        && !self.given.contains(&metric) =>
+                    {
+                        self.leave_out(&metric, &table_unit, unit);
+                        self.map.retain(|(_, m, _), _| *m != metric);
+                        self.units.insert(metric.clone(), unit.clone());
+                        v
+                    }
+                    None => {
+                        self.leave_out(&metric, unit, &table_unit);
+                        return;
+                    }
                 }
             }
             None => v,
@@ -548,7 +627,9 @@ impl DayTable {
             // sleep: the night as ONE device recorded it (the sum of its
             // asleep stages). Two trackers on the same night record the
             // same hours, so stages from different devices never add up —
-            // not even two that share a source name. InBed is separate.
+            // not even two that share a source name. Of the preferred
+            // source's devices (two watches), the longest night counts, as
+            // in Pulse. InBed is separate.
             let mut nights: BTreeMap<&str, f64> = BTreeMap::new();
             for stage in ASLEEP_STAGES {
                 for (device, a) in metrics.get(stage).into_iter().flatten() {
@@ -558,7 +639,11 @@ impl DayTable {
             let night = nights
                 .into_iter()
                 .filter(|(_, hours)| *hours > 0.05)
-                .min_by_key(|(device, _)| source_priority(&normalize_source(device)));
+                .min_by(|(a, a_hours), (b, b_hours)| {
+                    source_priority(&normalize_source(a))
+                        .cmp(&source_priority(&normalize_source(b)))
+                        .then(b_hours.total_cmp(a_hours))
+                });
             if let Some((sleep_device, asleep)) = night {
                 let stage = |name: &str| -> Option<f64> {
                     metrics
@@ -1149,13 +1234,14 @@ mod tests {
             episodes[0].title
         );
 
-        // Without the Watch, the preferred remaining source alone counts.
+        // Without the Watch, one remaining source alone counts: of two
+        // ranked alike, the longer night.
         let mut table = DayTable::default();
         table.add(&sleep("AsleepUnspecified", 7.5, "Sleep Tracker"));
         table.add(&sleep("Asleep", 7.0, "Another Tracker"));
         let body = &table.into_episodes(None)[0].body;
         assert!(
-            body.contains("sleep: 7h00m asleep [another tracker]"),
+            body.contains("sleep: 7h30m asleep [sleep tracker]"),
             "{body}"
         );
     }
@@ -1256,6 +1342,128 @@ mod tests {
             .map(|e| e.name.as_str())
             .collect();
         assert_eq!(devices, ["Apple Watch"]);
+    }
+
+    /// Two devices of the preferred source (two watches) on one night: the
+    /// longer night counts, as Pulse's sleep series reads it, whichever
+    /// device's name sorts first.
+    #[test]
+    fn test_two_watches_take_the_longer_night() {
+        let mut table = DayTable::default();
+        table.add(&sleep("AsleepCore", 1.5, "Ada’s Apple Watch"));
+        table.add(&sleep("AsleepCore", 6.0, "Ada’s Apple Watch Ultra"));
+        table.add(&sleep("AsleepDeep", 2.0, "Ada’s Apple Watch Ultra"));
+        let episodes = table.into_episodes(None);
+        let body = &episodes[0].body;
+        assert!(
+            body.contains("sleep: 8h00m asleep [apple watch], 2h00m deep"),
+            "{body}"
+        );
+        assert!(
+            episodes[0].title.contains("8h00m sleep"),
+            "{}",
+            episodes[0].title
+        );
+    }
+
+    /// A watch its owner renamed ("Ada’s Watch", "My Watch") is still the
+    /// Apple Watch: it outranks the other trackers and is named as the
+    /// watch; an app whose name only contains "Watch" stays its own.
+    #[test]
+    fn test_a_renamed_watch_is_the_apple_watch() {
+        for name in ["Ada’s Watch", "My Watch", "Watch", "ada’s\u{a0}watch"] {
+            assert_eq!(normalize_source(name), "Apple Watch", "{name}");
+        }
+        for name in ["SleepWatch", "Watch Sleep Tracker", "HeartWatch"] {
+            assert_eq!(normalize_source(name), name);
+        }
+        let mut table = DayTable::default();
+        table.add(&sleep("AsleepCore", 7.0, "Ada’s Watch"));
+        table.add(&sleep("AsleepUnspecified", 8.0, "WHOOP"));
+        table.add(&sample("StepCount", 5000.0, Some("count"), "Ada’s Watch"));
+        table.add(&sample("StepCount", 4000.0, Some("count"), "Withings"));
+        let episodes = table.into_episodes(None);
+        let body = &episodes[0].body;
+        assert!(body.contains("5000 steps [apple watch]"), "{body}");
+        assert!(body.contains("sleep: 7h00m asleep [apple watch]"), "{body}");
+        assert!(
+            body.ends_with("\nsources: apple watch, whoop, withings"),
+            "{body}"
+        );
+    }
+
+    /// A metric whose first sample is in a unit the table can't convert
+    /// takes the first unit it can, so the day doesn't depend on the order
+    /// the samples came in; a bare mmol/L is glucose's.
+    #[test]
+    fn test_a_unit_the_table_can_read_wins_in_either_order() {
+        let count = |samples: &[(&str, f64, &str)]| -> (u64, Option<String>) {
+            let mut table = DayTable::default();
+            for (metric, value, unit) in samples {
+                table.add(&sample(metric, *value, Some(unit), "Signos"));
+            }
+            let metric = samples[0].0;
+            let n = table
+                .map
+                .iter()
+                .filter(|((_, m, _), _)| m == metric)
+                .map(|(_, agg)| agg.n)
+                .sum();
+            (n, table.unit(metric).map(String::from))
+        };
+        let glucose = [
+            ("BloodGlucose", 5.55, "mmol/L"),
+            ("BloodGlucose", 100.0, "mg/dL"),
+        ];
+        let mut reversed = glucose;
+        reversed.reverse();
+        for samples in [glucose, reversed] {
+            assert_eq!(count(&samples).0, 2, "{samples:?}");
+        }
+        assert!(
+            (convert_unit(5.55, "mmol/L", "mg/dL").unwrap() - 100.0).abs() < 0.1,
+            "a bare mmol/L reads as glucose"
+        );
+
+        let mass = [
+            ("BodyMass", 11.0, "stone"),
+            ("BodyMass", 70.0, "kg"),
+            ("BodyMass", 154.0, "lb"),
+        ];
+        let mut reversed = mass;
+        reversed.reverse();
+        assert_eq!(count(&mass), (2, Some("kg".to_string())));
+        assert_eq!(count(&reversed), (2, Some("lb".to_string())));
+
+        // A unit the table was made with stays, whatever arrives.
+        let mut given = DayTable::with_units([("BodyMass".to_string(), "stone".to_string())]);
+        given.add(&sample("BodyMass", 70.0, Some("kg"), "Withings"));
+        assert!(given.map.is_empty());
+        assert_eq!(given.unit("BodyMass"), Some("stone"));
+    }
+
+    /// A unit the table can read but that measures something else than
+    /// the metric does takes no unit's place: steps in `count` stay, and a
+    /// step sample in kg (or a weight in km) is left out.
+    #[test]
+    fn test_a_unit_that_measures_something_else_takes_no_place() {
+        let mut table = DayTable::default();
+        table.add(&sample("StepCount", 5000.0, Some("count"), "iPhone"));
+        table.add(&sample("StepCount", 70.0, Some("kg"), "Scale"));
+        table.add(&sample("StepCount", 4000.0, Some("count"), "iPhone"));
+        table.add(&sample("BodyMass", 11.0, Some("stone"), "Scale"));
+        table.add(&sample("BodyMass", 3.0, Some("km"), "Scale"));
+        assert_eq!(table.unit("StepCount"), Some("count"));
+        assert_eq!(table.unit("BodyMass"), Some("stone"));
+        let total = |metric: &str| -> (u64, f64) {
+            table
+                .map
+                .iter()
+                .filter(|((_, m, _), _)| m == metric)
+                .fold((0, 0.0), |(n, sum), (_, agg)| (n + agg.n, sum + agg.sum))
+        };
+        assert_eq!(total("StepCount"), (2, 9000.0));
+        assert_eq!(total("BodyMass"), (1, 11.0));
     }
 
     #[test]

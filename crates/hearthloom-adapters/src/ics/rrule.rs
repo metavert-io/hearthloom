@@ -280,18 +280,20 @@ impl Rule {
         Ok(rule)
     }
 
-    /// Wall-clock starts the rule makes after `dtstart`, in order, at
-    /// most `limit` of them (the last `limit` when there are more; the
-    /// second value counts those left out). DTSTART itself counts as the
-    /// first occurrence against COUNT. Nothing later than `end`, or past
-    /// UNTIL, is made; `instant` turns a wall-clock start into its UTC
-    /// instant (for a UTC UNTIL), or says the zone skips it — then it is
-    /// left out and not counted. The third value holds which of the UTC
-    /// instants in `wanted` the rule makes on the way, kept or left out,
-    /// each with the wall-clock start it makes there.
+    /// Wall-clock starts the rule makes after `dtstart`, in order: of
+    /// those up to `capped_to`, at most `limit` (the last `limit` when
+    /// there are more; the second value counts those left out), and every
+    /// one after it. DTSTART itself counts as the first occurrence against
+    /// COUNT. Nothing later than `end`, or past UNTIL, is made; `instant`
+    /// turns a wall-clock start into its UTC instant (for a UTC UNTIL), or
+    /// says the zone skips it — then it is left out and not counted. The
+    /// third value holds which of the UTC instants in `wanted` the rule
+    /// makes on the way, kept or left out, each with the wall-clock start
+    /// it makes there.
     pub(super) fn after_start(
         &self,
         dtstart: NaiveDateTime,
+        capped_to: NaiveDateTime,
         end: NaiveDateTime,
         limit: usize,
         instant: Instant,
@@ -309,7 +311,9 @@ impl Rule {
                 found.insert(utc, at);
             }
             kept.push_back(at);
-            if kept.len() > limit {
+            // Starts come in order: while they are at most `capped_to`,
+            // every kept one is.
+            if at <= capped_to && kept.len() > limit {
                 kept.pop_front();
                 left_out += 1;
             }
@@ -319,21 +323,42 @@ impl Rule {
 
     /// The latest start the rule makes at or before `at` (DTSTART not
     /// included). Used for a time-zone definition's yearly changes, so
-    /// it skips straight to the periods near `at` when no COUNT has to be
-    /// counted from the beginning.
+    /// it skips straight to the periods near `at` — or near UNTIL, when
+    /// the rule ended before `at` — when no COUNT has to be counted from
+    /// the beginning. A rule can go years without a start (February 29),
+    /// so when those periods hold none it looks twice as far back, and so
+    /// on down to DTSTART.
     pub(super) fn last_at_or_before(
         &self,
         dtstart: NaiveDateTime,
         at: NaiveDateTime,
         instant: Instant,
     ) -> Option<NaiveDateTime> {
-        let skip_to = match self.count {
-            None => at.date().checked_sub_signed(Duration::days(400)),
-            Some(_) => None,
-        };
-        let mut last = None;
-        self.walk(dtstart, at, skip_to, instant, |t, _| last = Some(t));
-        last
+        // With COUNT the starts are counted from DTSTART: walk them all.
+        let near = self.count.is_none().then(|| {
+            // A rule that ended makes its last start at or before UNTIL
+            // (a UTC UNTIL's date is within a day of the wall clock's; the
+            // margin covers it).
+            let until = self.until.map(|until| match until {
+                Until::Date(day) => day,
+                Until::Local(t) | Until::Utc(t) => t.date(),
+            });
+            until.map_or(at.date(), |until| until.min(at.date()))
+        });
+        let mut back = 400i64;
+        loop {
+            let skip_to = near
+                .and_then(|near| near.checked_sub_signed(Duration::try_days(back)?))
+                .filter(|day| *day > dtstart.date());
+            let mut last = None;
+            self.walk(dtstart, at, skip_to, instant, |t, _| last = Some(t));
+            // A start in the periods walked is the latest; with none, the
+            // latest is before them, if there is one.
+            if last.is_some() || skip_to.is_none() {
+                return last;
+            }
+            back = back.saturating_mul(2);
+        }
     }
 
     /// `at` (wall clock) at UTC instant `utc` is past UNTIL.
@@ -673,7 +698,14 @@ mod tests {
     fn expand_where(rule: &str, start: &str, end: &str, instant: Instant) -> Vec<String> {
         Rule::parse(rule)
             .unwrap()
-            .after_start(at(start), at(end), 10_000, instant, &HashSet::new())
+            .after_start(
+                at(start),
+                at(end),
+                at(end),
+                10_000,
+                instant,
+                &HashSet::new(),
+            )
             .0
             .iter()
             .map(|t| t.format("%Y%m%dT%H%M%S").to_string())
@@ -786,6 +818,7 @@ mod tests {
         let (made, _, _) = rule.after_start(
             at("20260301T090000"),
             at("20300101T000000"),
+            at("20300101T000000"),
             10,
             &|t| Some(t),
             &none,
@@ -812,6 +845,7 @@ mod tests {
         .unwrap();
         let (kept, left_out, _) = rule.after_start(
             at("19000101T000000"),
+            at("20300101T000000"),
             at("20300101T000000"),
             10,
             &|t| Some(t),
@@ -843,6 +877,7 @@ mod tests {
         assert_eq!(rule.by_day.len(), 742);
         let (kept, left_out, _) = rule.after_start(
             at("19000101T090000"),
+            at("20300101T000000"),
             at("20300101T000000"),
             10,
             &|t| Some(t),
@@ -962,6 +997,7 @@ mod tests {
         let (kept, left_out, found) = Rule::parse("FREQ=DAILY").unwrap().after_start(
             at("20260101T080000"),
             at("20260111T080000"),
+            at("20260111T080000"),
             3,
             &|t| Some(t),
             &wanted,
@@ -995,5 +1031,49 @@ mod tests {
         assert_eq!(last, Some(at("20260308T020000")));
         let last = rule.last_at_or_before(at("16010311T020000"), at("20260301T000000"), &instant);
         assert_eq!(last, Some(at("20250309T020000")));
+    }
+
+    /// A rule that makes a start only every few years still has its
+    /// latest one found, also when it ended (UNTIL) years before.
+    #[test]
+    fn test_last_at_or_before_finds_a_sparse_rules_start() {
+        let instant = |t| Some(t);
+        let leap_day = Rule::parse("FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=29").unwrap();
+        let last =
+            leap_day.last_at_or_before(at("20000229T000000"), at("20260615T000000"), &instant);
+        assert_eq!(last, Some(at("20240229T000000")));
+        let ended =
+            Rule::parse("FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=29;UNTIL=20220228T230000Z").unwrap();
+        let last = ended.last_at_or_before(at("20000229T000000"), at("20260615T000000"), &instant);
+        assert_eq!(last, Some(at("20200229T000000")));
+        // None at all after DTSTART.
+        let never = Rule::parse("FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=30").unwrap();
+        let last = never.last_at_or_before(at("20000101T000000"), at("20260615T000000"), &instant);
+        assert_eq!(last, None);
+    }
+
+    /// The limit applies to the starts up to `capped_to`; every later one
+    /// up to the end is kept.
+    #[test]
+    fn test_limit_applies_up_to_capped_to() {
+        let (kept, left_out, _) = Rule::parse("FREQ=DAILY").unwrap().after_start(
+            at("20260101T080000"),
+            at("20260105T080000"),
+            at("20260108T080000"),
+            2,
+            &|t| Some(t),
+            &HashSet::new(),
+        );
+        assert_eq!(left_out, 2);
+        assert_eq!(
+            kept,
+            [
+                at("20260104T080000"),
+                at("20260105T080000"),
+                at("20260106T080000"),
+                at("20260107T080000"),
+                at("20260108T080000"),
+            ]
+        );
     }
 }

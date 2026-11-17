@@ -13,11 +13,12 @@
 //!   made or rewritten while one of the owner's agents may have been at it:
 //!   a run of one of their agents anywhere from the commit's author date
 //!   to its commit time keeps it out (`git_commit_concern`,
-//!   `agent_runs_on` — a rewrite keeps the author date and a later one
+//!   `agent_run_between` — a rewrite keeps the author date and a later one
 //!   replaces the commit time, so an agent's rewrite in between leaves no
 //!   time of its own). Only a record that says its
 //!   parents and commit time (`git_commit_head`) can be judged: a commit
-//!   an earlier version imported stays outside text. Git doesn't check an
+//!   an earlier version imported, or one at a shallow clone's cut-off
+//!   (`GIT_PARENTS_NOT_FETCHED`), stays outside text. Git doesn't check an
 //!   author address: anyone whose commit reaches the repository can write
 //!   the owner's on it, so the owner marks only repositories whose history
 //!   they control.
@@ -73,9 +74,9 @@ pub const OWNABLE_SOURCES: &[OwnableSource] = &[
                  co-written with anyone else (a Co-authored-by line, which Claude Code adds), \
                  commits with one of your agents at work anywhere between when they were \
                  first written and their last rewrite, and \
-                 commits an earlier version of Hearthloom imported (their records can't show \
-                 those things). Git doesn't check author addresses: anyone whose commit gets \
-                 into the repository can put yours on it",
+                 commits an earlier version of Hearthloom imported or a shallow clone's oldest \
+                 (their records can't show those things). Git doesn't check author \
+                 addresses: anyone whose commit gets into the repository can put yours on it",
     },
     OwnableSource {
         source: "substack",
@@ -286,6 +287,42 @@ pub fn key_of_ref(source: &str, source_ref: &str) -> Option<String> {
     }
 }
 
+/// The part of its source a ref belongs to, as the start every ref of that
+/// part shares (a range of the episodes' `(source, source_ref)` index), and
+/// that part's key: a commit's ref up to its first `#` (its remote address,
+/// when the address holds none), a post's up to the end of its host. Every
+/// ref with that start has the part's key or none — except, for git, a ref
+/// whose address itself holds a `#`: `git_repo_key` ends a URL's host and
+/// path at a `#`, so its key is then the part's, none, or one that holds a
+/// `#` and starts with the part's key; and when the part has no key, any
+/// key (`stored_by_key` says which such parts can hold one). None: a ref
+/// without such a start (it is looked at alone).
+fn ref_part<'r>(source: &str, source_ref: &'r str) -> Option<(&'r str, Option<String>)> {
+    match source {
+        "git" => {
+            let end = source_ref.find('#')?;
+            Some((&source_ref[..=end], git_repo_key(&source_ref[..end])))
+        }
+        "substack" => {
+            let host = source_ref.find("://")? + 3;
+            let end = host + source_ref[host..].find(['/', '?', '#'])?;
+            let start = &source_ref[..=end];
+            Some((start, key_of_ref(source, start)))
+        }
+        _ => None,
+    }
+}
+
+/// The first text past every one that starts with `start`, whose last
+/// character is ASCII (`ref_part`'s): where its range ends.
+fn part_end(start: &str) -> String {
+    let mut end = start.as_bytes().to_vec();
+    if let Some(last) = end.last_mut() {
+        *last += 1;
+    }
+    String::from_utf8(end).expect("an ASCII character, raised by one, is ASCII")
+}
+
 fn is_commit_id(s: &str) -> bool {
     matches!(s.len(), 40 | 64) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
@@ -336,11 +373,18 @@ pub struct GitCommitHead {
     pub parents: usize,
 }
 
+/// What the git adapter writes after `parents:` for a commit at a shallow
+/// clone's cut-off, where git shows none of its parents (a merge there
+/// would read as a first commit). Not an id, so `git_commit_head` reads no
+/// such record, and the commit never counts.
+pub const GIT_PARENTS_NOT_FETCHED: &str = "not fetched";
+
 /// The `committed:` and `parents:` lines of a commit's stored text (its
 /// head ends at the first blank line). None unless each is there exactly
 /// once and reads — so for every commit an earlier version stored, which
-/// wrote neither: such a record can't say whether the commit is a merge,
-/// or when it was made.
+/// wrote neither, and for one at a shallow clone's cut-off, whose parents
+/// weren't fetched (`GIT_PARENTS_NOT_FETCHED`): such a record can't say
+/// whether the commit is a merge, or when it was made.
 pub fn git_commit_head(head: &str) -> Option<GitCommitHead> {
     let mut committed = None;
     let mut parents = None;
@@ -386,9 +430,10 @@ const MERGE_SUBJECTS: &[&str] = &[
 /// Why a commit whose author address is the owner's still isn't the
 /// owner's words alone, read from its stored text (None: nothing found):
 ///
-/// - a record without `committed:` and `parents:` lines (`git_commit_head`
-///   — every commit an earlier version stored): whether it is a merge, and
-///   when it was made, can't be read;
+/// - a record without readable `committed:` and `parents:` lines
+///   (`git_commit_head` — every commit an earlier version stored, and one
+///   at a shallow clone's cut-off): whether it is a merge, and when it was
+///   made, can't be read;
 /// - a merge (more than one parent, or a default merge subject): its
 ///   message comes from the merged branch;
 /// - a `Co-authored-by:` trailer naming an address that isn't one of the
@@ -403,6 +448,18 @@ pub fn git_commit_concern(head: &str, identities: &BTreeSet<String>) -> Option<S
         return Some("its text is too long to check whole".into());
     }
     let Some(record) = git_commit_head(head) else {
+        let not_fetched = format!("parents: {GIT_PARENTS_NOT_FETCHED}");
+        if head
+            .lines()
+            .take_while(|l| !l.is_empty())
+            .any(|l| l == not_fetched)
+        {
+            return Some(
+                "it was read from a shallow clone's oldest commits, so whether it is a merge \
+                 can't be read"
+                    .into(),
+            );
+        }
         return Some(
             "an earlier version imported it, and its record doesn't say whether it is a merge \
              or when it was made"
@@ -426,7 +483,7 @@ pub fn git_commit_concern(head: &str, identities: &BTreeSet<String>) -> Option<S
         let address = rest
             .find('<')
             .and_then(|open| rest[open + 1..].strip_suffix('>'))
-            .and_then(clean_address);
+            .and_then(owner_address);
         match address {
             Some(a) if identities.contains(&a) => {}
             Some(a) => return Some(format!("co-written by {a}")),
@@ -489,9 +546,9 @@ pub(crate) fn owner_mailbox_addresses_on(conn: &Connection) -> Result<BTreeSet<S
     for roles in rows {
         let roles: serde_json::Value = serde_json::from_str(&roles?).unwrap_or_default();
         for m in roles["mailboxes"].as_array().into_iter().flatten() {
-            out.extend(m["address"].as_str().and_then(clean_address));
+            out.extend(m["address"].as_str().and_then(owner_address));
             for a in m["aliases"].as_array().into_iter().flatten() {
-                out.extend(a.as_str().and_then(clean_address));
+                out.extend(a.as_str().and_then(owner_address));
             }
         }
     }
@@ -515,13 +572,17 @@ pub(crate) fn owner_emails_on(conn: &Connection) -> Result<BTreeSet<String>> {
     if let Some(card) = card {
         let card: serde_json::Value = serde_json::from_str(&card).unwrap_or_default();
         for e in card["emails"].as_array().into_iter().flatten() {
-            out.extend(e.as_str().and_then(clean_address));
+            out.extend(e.as_str().and_then(owner_address));
         }
     }
     Ok(out)
 }
 
-fn clean_address(a: &str) -> Option<String> {
+/// An address as the owner's addresses are read (`owner_emails_on`):
+/// trimmed and lowercased, or None for one that isn't an address (no `@`,
+/// more than one, spaces or angle brackets) — such a one is never the
+/// owner's, wherever it is written.
+pub fn owner_address(a: &str) -> Option<String> {
     let a = a.trim().to_lowercase();
     let ok = a.matches('@').count() == 1
         && !a.starts_with('@')
@@ -590,29 +651,117 @@ impl Candidate {
     }
 }
 
-/// One run of one of the owner's agents: from its start to its end (None:
-/// still going, or never closed).
+/// The longest one Claude Code run can last: the longest timeout an agent
+/// can have (a day — the daemon's agents/ clamps `timeout_secs` to it, and
+/// the run is stopped there) plus the five minutes the runner waits past it
+/// before it calls the task failed.
+pub(crate) const LONGEST_AGENT_RUN_SECS: i64 = 86_400 + 300;
+
+/// The harness whose runs Hearthloom stops itself at their time limit:
+/// Claude Code runs as the daemon's child and is killed there. Hermes and
+/// OpenClaw run on their own — Hearthloom only waits on a request, or sends
+/// the task — so nothing says a run there has stopped until it is closed.
+const STOPPED_HARNESS: &str = "claude_code";
+
+/// One run of one of the owner's agents never closed: from its start to the
+/// latest it can end (None: it may still be going).
 struct AgentRun {
     task: String,
     from: String,
     to: Option<String>,
 }
 
-/// Every agent task that started running, on any of the owner's nodes
-/// (`agent_tasks` syncs).
-fn agent_runs_on(conn: &Connection) -> Result<Vec<AgentRun>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, started_at, finished_at FROM agent_tasks WHERE started_at IS NOT NULL",
-    )?;
-    let rows = stmt.query_map([], |r| {
+/// A run that finished from ?1 to ?3 and started at or before ?2 — one
+/// going at some time between ?1 and ?2 — if any (by
+/// `idx_agent_tasks_finished`). With ?3 a day and five minutes past ?2
+/// (`LONGEST_AGENT_RUN_SECS`), every run of a day or less going then
+/// finished in that window: the first run that started and finished by ?2
+/// answers, else only the runs that finished within the day after it are
+/// read —
+/// never the history before ?1 or after ?3, however long it grows.
+const RUN_FINISHED_DURING: &str = "SELECT id FROM agent_tasks
+     WHERE finished_at >= ?1 AND finished_at <= ?3 AND started_at <= ?2 LIMIT 1";
+
+/// A run that lasted more than a day, as many digits long in whole days as
+/// ?3 (1 to 6), that finished from ?1 to ?4 and started at or before ?2, if
+/// any: by `idx_agent_tasks_span`, which holds only the runs that may have
+/// lasted more than a day (a Claude Code run is stopped within the day; a
+/// run on a harness Hearthloom doesn't stop can go on longer), by that
+/// length and when they finished. A run of ?3 digits going by ?2 finished
+/// less than 10^?3 days past it, so with ?4 that time only the runs of its
+/// length that finished then are read — never the later history. Its first
+/// three conditions are the index's, word for word (store/mod.rs, v73), or
+/// the index isn't used.
+const LONG_RUN_DURING: &str = "SELECT id FROM agent_tasks
+     WHERE started_at IS NOT NULL
+       AND IFNULL(julianday(finished_at) - julianday(started_at), 2) > 1
+       AND IFNULL(min(length(CAST(julianday(finished_at) - julianday(started_at) AS INTEGER)), 7), 7) = ?3
+       AND finished_at >= ?1 AND finished_at <= ?4 AND started_at <= ?2 LIMIT 1";
+
+/// The same among the runs whose length the index gives as 7: times that
+/// can't be read, or a million days or more apart — none a clock wrote, so
+/// they are read with no bound on when they finished.
+const ODD_RUN_DURING: &str = "SELECT id FROM agent_tasks
+     WHERE started_at IS NOT NULL
+       AND IFNULL(julianday(finished_at) - julianday(started_at), 2) > 1
+       AND IFNULL(min(length(CAST(julianday(finished_at) - julianday(started_at) AS INTEGER)), 7), 7) = 7
+       AND finished_at >= ?1 AND started_at <= ?2 LIMIT 1";
+
+/// Runs never closed, with the harness each started on
+/// (`agent_tasks.harness`, kept as the run starts — never the agent's
+/// setting now, which the owner can change while a run goes on).
+const RUNS_NOT_CLOSED: &str = "SELECT id, started_at, updated_at, harness FROM agent_tasks
+     WHERE finished_at IS NULL AND started_at IS NOT NULL";
+
+/// The runs of the owner's agents, on any of their nodes (`agent_tasks`
+/// syncs), that were never closed — its agent deleted mid-run, its node
+/// gone. Such a run ended no later than the longest run can last past its
+/// latest stamp (a run writes one as it starts, acts or reads) when it
+/// started on a harness Hearthloom stops itself (`STOPPED_HARNESS`). Any
+/// other — Hermes, OpenClaw, a run started again on another harness, or
+/// one that started before the harness was kept — may still be going.
+fn open_runs_on(conn: &Connection) -> Result<Vec<AgentRun>> {
+    let mut stmt = conn.prepare(RUNS_NOT_CLOSED)?;
+    let open = stmt.query_map([], |r| {
+        let from: String = r.get(1)?;
+        let updated: String = r.get(2)?;
+        let harness: Option<String> = r.get(3)?;
+        let to = if harness.as_deref() == Some(STOPPED_HARNESS) {
+            latest_possible_end(std::cmp::max(&from, &updated))
+        } else {
+            None
+        };
         Ok(AgentRun {
             task: r.get(0)?,
-            from: r.get(1)?,
-            to: r.get(2)?,
+            from,
+            to,
         })
     })?;
-    rows.collect::<std::result::Result<_, _>>()
+    open.collect::<std::result::Result<_, _>>()
         .map_err(Into::into)
+}
+
+/// The latest an unfinished run can end, given its latest stamp (None: a
+/// stamp that can't be read).
+fn latest_possible_end(stamp: &str) -> Option<String> {
+    time_after(stamp, LONGEST_AGENT_RUN_SECS)
+}
+
+/// The time `secs` after a stamp, written as stored times are (RFC 3339 UTC,
+/// whole seconds); past the year 9999, which no stored time can be in
+/// (SQLite's date functions read none later), the last second of it. None:
+/// a stamp that can't be read.
+fn time_after(stamp: &str, secs: i64) -> Option<String> {
+    use chrono::Datelike;
+    let at = chrono::DateTime::parse_from_rfc3339(stamp.trim())
+        .ok()?
+        .to_utc();
+    Some(
+        match at.checked_add_signed(chrono::Duration::seconds(secs)) {
+            Some(end) if end.year() <= 9999 => end.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            _ => "9999-12-31T23:59:59Z".into(),
+        },
+    )
 }
 
 /// What the owner's list says about one episode.
@@ -629,42 +778,115 @@ pub struct Judgement {
     pub why: Option<String>,
 }
 
-/// The owner's list and addresses, loaded once for a check.
-pub(crate) struct OwnedWords {
+/// The owner's list, loaded once for a check; the owner's addresses are
+/// read the first time an episode needs them (an owner's commit in a marked
+/// repository), and their agents' runs only for such a commit: the runs
+/// never closed once per check, and one look for a finished run during the
+/// commit's own time.
+pub(crate) struct OwnedWords<'c> {
+    conn: &'c Connection,
     entries: HashSet<(String, String)>,
-    identities: BTreeSet<String>,
-    /// The owner's agents' runs: a commit made during one may be the
-    /// agent's, under the owner's git identity.
-    agent_runs: Vec<AgentRun>,
+    identities: std::cell::OnceCell<BTreeSet<String>>,
+    /// The owner's agents' runs never closed: a commit made during one may
+    /// be the agent's, under the owner's git identity.
+    open_runs: std::cell::OnceCell<Vec<AgentRun>>,
+    /// How many runs this check has read.
+    #[cfg(test)]
+    runs_read: std::cell::Cell<usize>,
 }
 
-impl OwnedWords {
-    pub(crate) fn load(conn: &Connection) -> Result<Self> {
+impl<'c> OwnedWords<'c> {
+    pub(crate) fn load(conn: &'c Connection) -> Result<Self> {
         let mut stmt = conn.prepare("SELECT source, key FROM owned_sources")?;
         let entries = stmt
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
             .collect::<std::result::Result<HashSet<_>, _>>()?;
-        let (identities, agent_runs) = if entries.iter().any(|(s, _)| author_checked(s)) {
-            (owner_emails_on(conn)?, agent_runs_on(conn)?)
-        } else {
-            (BTreeSet::new(), Vec::new())
-        };
         Ok(OwnedWords {
+            conn,
             entries,
-            identities,
-            agent_runs,
+            identities: std::cell::OnceCell::new(),
+            open_runs: std::cell::OnceCell::new(),
+            #[cfg(test)]
+            runs_read: std::cell::Cell::new(0),
         })
     }
 
+    fn identities(&self) -> Result<&BTreeSet<String>> {
+        if let Some(known) = self.identities.get() {
+            return Ok(known);
+        }
+        let read = owner_emails_on(self.conn)?;
+        Ok(self.identities.get_or_init(|| read))
+    }
+
     /// An agent task that was running at any time between these two (in
-    /// either order), if any (a task never closed runs on). Times are RFC
-    /// 3339 UTC with a `Z`, so they compare as text.
-    fn agent_run_between(&self, a: &str, b: &str) -> Option<&str> {
+    /// either order), if any. Times are RFC 3339 UTC with a `Z`, so they
+    /// compare as text. A run never closed is looked for among those read
+    /// for this check; a finished one in two looks: a run of a day or less
+    /// among those that finished from the earlier time to a day past the
+    /// later one (`RUN_FINISHED_DURING`), and a longer one among those that
+    /// lasted more than a day, a length at a time (`long_run_between`). The
+    /// rest of the task history is never read.
+    fn agent_run_between(&self, a: &str, b: &str) -> Result<Option<String>> {
         let (from, to) = if a <= b { (a, b) } else { (b, a) };
-        self.agent_runs
+        let open = match self.open_runs.get() {
+            Some(open) => open,
+            None => {
+                let read = open_runs_on(self.conn)?;
+                #[cfg(test)]
+                self.runs_read.set(self.runs_read.get() + read.len());
+                self.open_runs.get_or_init(|| read)
+            }
+        };
+        if let Some(run) = open
             .iter()
             .find(|r| r.from.as_str() <= to && r.to.as_deref().is_none_or(|end| from <= end))
-            .map(|r| r.task.as_str())
+        {
+            return Ok(Some(run.task.clone()));
+        }
+        // `judge` passes only times that read as times
+        let until = latest_possible_end(to).ok_or_else(|| anyhow!("unreadable time {to:?}"))?;
+        let mut finished: Option<String> = self
+            .conn
+            .query_row(RUN_FINISHED_DURING, [from, to, &until], |r| r.get(0))
+            .optional()?;
+        if finished.is_none() {
+            finished = self.long_run_between(from, to)?;
+        }
+        #[cfg(test)]
+        self.runs_read
+            .set(self.runs_read.get() + usize::from(finished.is_some()));
+        Ok(finished)
+    }
+
+    /// A run that lasted more than a day and was going at some time from
+    /// `from` to `to`, if any. Its length in whole days has 1 to 6 digits
+    /// (`LONG_RUN_DURING`, one look per count: a run under 10^d days that
+    /// started by `to` finished by 10^d days past it, so a look reads only
+    /// the runs of that length that finished then), or it is one no clock
+    /// wrote (`ODD_RUN_DURING`).
+    fn long_run_between(&self, from: &str, to: &str) -> Result<Option<String>> {
+        let mut by_length = self.conn.prepare_cached(LONG_RUN_DURING)?;
+        for digits in 1..=6u32 {
+            let until = time_after(to, 10_i64.pow(digits) * 86_400)
+                .ok_or_else(|| anyhow!("unreadable time {to:?}"))?;
+            let found: Option<String> = by_length
+                .query_row(rusqlite::params![from, to, digits, until], |r| r.get(0))
+                .optional()?;
+            if found.is_some() {
+                return Ok(found);
+            }
+        }
+        Ok(self
+            .conn
+            .query_row(ODD_RUN_DURING, [from, to], |r| r.get(0))
+            .optional()?)
+    }
+
+    /// How many runs this check has read (for tests).
+    #[cfg(test)]
+    fn runs_read(&self) -> usize {
+        self.runs_read.get()
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -687,11 +909,11 @@ impl OwnedWords {
     }
 
     /// Does an entry make this episode the owner's own words?
-    pub(crate) fn covers(&self, c: &Candidate) -> bool {
-        self.judge(c).counts
+    pub(crate) fn covers(&self, c: &Candidate) -> Result<bool> {
+        Ok(self.judge(c)?.counts)
     }
 
-    pub(crate) fn judge(&self, c: &Candidate) -> Judgement {
+    pub(crate) fn judge(&self, c: &Candidate) -> Result<Judgement> {
         let mut j = Judgement {
             source: c.source.clone(),
             key: None,
@@ -701,7 +923,7 @@ impl OwnedWords {
         };
         if ownable(&c.source).is_none() {
             j.why = not_ownable_reason(&c.source);
-            return j;
+            return Ok(j);
         }
         j.key = key_of_ref(&c.source, &c.source_ref);
         let Some(key) = &j.key else {
@@ -709,16 +931,16 @@ impl OwnedWords {
                 "git" => "its repository has no remote address to name it by".into(),
                 _ => "its address can't be read".into(),
             });
-            return j;
+            return Ok(j);
         };
         if !self.entries.contains(&(c.source.clone(), key.clone())) {
             j.why = Some("not marked as yours".into());
-            return j;
+            return Ok(j);
         }
         j.entry = Some(owned_id(&c.source, key));
         if !matches!(c.trust.as_str(), "self" | "imported") {
             j.why = Some(format!("it was let in with trust {}", c.trust));
-            return j;
+            return Ok(j);
         }
         match &c.writer {
             Some(w) if *w == importer(&c.source) => {}
@@ -727,11 +949,11 @@ impl OwnedWords {
                     "it was written by {w}, not the {} import",
                     c.source
                 ));
-                return j;
+                return Ok(j);
             }
             None => {
                 j.why = Some("who first wrote it isn't known".into());
-                return j;
+                return Ok(j);
             }
         }
         if author_checked(&c.source) {
@@ -739,27 +961,26 @@ impl OwnedWords {
                 .head
                 .as_deref()
                 .and_then(|head| git_author(&c.source_ref, head));
-            match author {
-                None => {
-                    j.why = Some("its author can't be read".into());
-                    return j;
-                }
-                Some(a) if self.identities.is_empty() => {
-                    j.why = Some(format!(
-                        "by {a}, and none of your own addresses is known yet"
-                    ));
-                    return j;
-                }
-                Some(a) if !self.identities.contains(&a) => {
-                    j.why = Some(format!("by {a}, not one of your addresses"));
-                    return j;
-                }
-                Some(_) => {}
+            let Some(author) = author else {
+                j.why = Some("its author can't be read".into());
+                return Ok(j);
+            };
+            // read only now: most episodes never get this far
+            let identities = self.identities()?;
+            if identities.is_empty() {
+                j.why = Some(format!(
+                    "by {author}, and none of your own addresses is known yet"
+                ));
+                return Ok(j);
+            }
+            if !identities.contains(&author) {
+                j.why = Some(format!("by {author}, not one of your addresses"));
+                return Ok(j);
             }
             let head = c.head.as_deref().unwrap_or_default();
-            if let Some(concern) = git_commit_concern(head, &self.identities) {
+            if let Some(concern) = git_commit_concern(head, identities) {
                 j.why = Some(concern);
-                return j;
+                return Ok(j);
             }
             // an agent working in the owner's checkout commits under the
             // owner's git identity (an agent's run is never the owner's
@@ -767,15 +988,19 @@ impl OwnedWords {
             // and sets the commit time, and the next one sets it again: an
             // agent's rewrite in between leaves no time of its own, so a
             // run anywhere from the author date to the commit time counts
-            let (Some(authored), Some(record)) = (c.when.as_deref(), git_commit_head(head)) else {
+            let authored = c
+                .when
+                .as_deref()
+                .filter(|at| latest_possible_end(at).is_some());
+            let (Some(authored), Some(record)) = (authored, git_commit_head(head)) else {
                 j.why = Some("when it was made isn't known".into());
-                return j;
+                return Ok(j);
             };
-            if let Some(task) = self.agent_run_between(authored, &record.committed) {
+            if let Some(task) = self.agent_run_between(authored, &record.committed)? {
                 j.why = Some(format!(
                     "made or rewritten while one of your agents was at work (task {task})"
                 ));
-                return j;
+                return Ok(j);
             }
         }
         if c.source == "substack" {
@@ -788,17 +1013,17 @@ impl OwnedWords {
                          publication served it"
                             .into(),
                     );
-                    return j;
+                    return Ok(j);
                 }
                 Some(host) if host != *key => {
                     j.why = Some(format!("{host} served it, not {key}"));
-                    return j;
+                    return Ok(j);
                 }
                 Some(_) => {}
             }
         }
         j.counts = true;
-        j
+        Ok(j)
     }
 }
 
@@ -1059,41 +1284,146 @@ impl Store {
     /// naming none are absent): an entry that names nothing stored — a
     /// publication marked by its substack.com address whose posts are
     /// filed under its own domain — changes nothing, and the list says so.
+    /// Counted as the viewer sees the record: private memories only with
+    /// their vault open.
     pub fn owned_source_stored(&self) -> Result<std::collections::HashMap<String, usize>> {
         let entries = self.owned_sources()?;
-        let sources: BTreeSet<&str> = entries
-            .iter()
-            .filter_map(|e| ownable(&e.source).map(|s| s.source))
-            .collect();
-        let mut out = std::collections::HashMap::new();
-        if sources.is_empty() {
-            return Ok(out);
+        let mut keys: std::collections::BTreeMap<&str, BTreeSet<String>> = Default::default();
+        for e in &entries {
+            keys.entry(e.source.as_str())
+                .or_default()
+                .insert(e.key.clone());
         }
-        let ids: std::collections::HashMap<(&str, &str), &str> = entries
+        let mut stored = std::collections::HashMap::new();
+        for (source, keys) in keys {
+            for (key, n) in self.stored_by_key(source, &keys)?.0 {
+                stored.insert((source.to_string(), key), n);
+            }
+        }
+        Ok(entries
+            .into_iter()
+            .filter_map(|e| stored.get(&(e.source, e.key)).map(|n| (e.id, *n)))
+            .collect())
+    }
+
+    /// How many memories here one entry's key names (see
+    /// `owned_source_stored`).
+    pub fn owned_entry_stored(&self, entry: &OwnedSourceRow) -> Result<usize> {
+        let keys = BTreeSet::from([entry.key.clone()]);
+        Ok(self
+            .stored_by_key(&entry.source, &keys)?
+            .0
+            .get(&entry.key)
+            .copied()
+            .unwrap_or(0))
+    }
+
+    /// How many memories here of `source` each of `keys` names (keys naming
+    /// none are absent), and the database's work for it (virtual machine
+    /// steps). The source's refs are read a part at a time — a repository's
+    /// commits, a publication's posts: each part is a range of the
+    /// `(source, source_ref)` index (`ref_part`) — and a part is read only
+    /// when its key is asked for; of every other part only its first ref is
+    /// looked at, to step past it. So a count costs what the keys name plus
+    /// one look per part, never every memory of the source.
+    fn stored_by_key(
+        &self,
+        source: &str,
+        keys: &BTreeSet<String>,
+    ) -> Result<(std::collections::HashMap<String, usize>, i64)> {
+        use rusqlite::StatementStatus::VmStep;
+        let mut stored = std::collections::HashMap::new();
+        if ownable(source).is_none() || keys.is_empty() {
+            return Ok((stored, 0));
+        }
+        // a commit whose remote address holds a `#` sits in the part of the
+        // address before it, under a key that holds a `#` (`ref_part`). Such
+        // a key starts with that part's key — `git_repo_key` reads the
+        // address up to the `#` as it reads the whole, only shorter — or the
+        // part has none: then its start reads as an address once the `#`
+        // follows it (its path was `.`, `..`, `.git` or empty), or it holds
+        // no `/` or `:` (`x#y@host:path` — a user name with a `#` — whose
+        // key needn't hold one). A key is looked for only in a part that
+        // may hold it: never in other repositories, or local paths
+        let hashed: Vec<&str> = keys
             .iter()
-            .map(|e| ((e.source.as_str(), e.key.as_str()), e.id.as_str()))
+            .filter(|k| k.contains('#'))
+            .map(String::as_str)
             .collect();
-        let list = sources
-            .iter()
-            .map(|s| format!("'{s}'"))
-            .collect::<Vec<_>>()
-            .join(",");
+        let may_hold = |start: &str, key: Option<String>| match key {
+            Some(k) => keys.contains(&k) || hashed.iter().any(|h| h.starts_with(k.as_str())),
+            None => {
+                source == "git"
+                    && (!start.contains(['/', ':'])
+                        || (!hashed.is_empty() && git_repo_key(start).is_some()))
+            }
+        };
+        let guard = self.scope_guard("scope");
         let conn = self.lock();
-        let mut stmt = conn.prepare(&format!(
-            "SELECT source, source_ref FROM episodes
-             WHERE source IN ({list}) AND superseded_by IS NULL"
+        // the next ref at or past a point, whatever its memory (only to
+        // step from one part to the next: what is counted is read below)
+        let mut next_from = conn.prepare(
+            "SELECT source_ref FROM episodes /* all-episodes: finds where the next part of a source starts; nothing read here is counted */
+             WHERE source = ?1 AND source_ref >= ?2 ORDER BY source_ref LIMIT 1",
+        )?;
+        let mut next_after = conn.prepare(
+            "SELECT source_ref FROM episodes /* all-episodes: finds where the next part of a source starts; nothing read here is counted */
+             WHERE source = ?1 AND source_ref > ?2 ORDER BY source_ref LIMIT 1",
+        )?;
+        let mut part = conn.prepare(&format!(
+            "SELECT source_ref FROM episodes
+             WHERE source = ?1 AND source_ref >= ?2 AND source_ref < ?3
+               AND superseded_by IS NULL{guard}"
         ))?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let source: String = row.get(0)?;
-            let source_ref: String = row.get(1)?;
-            if let Some(key) = key_of_ref(&source, &source_ref) {
-                if let Some(id) = ids.get(&(source.as_str(), key.as_str())) {
-                    *out.entry(id.to_string()).or_insert(0) += 1;
+        let mut alone = conn.prepare(&format!(
+            "SELECT source_ref FROM episodes
+             WHERE source = ?1 AND source_ref = ?2 AND superseded_by IS NULL{guard}"
+        ))?;
+        let mut tally = |rows: &mut rusqlite::Rows| -> Result<()> {
+            while let Some(row) = rows.next()? {
+                let source_ref: String = row.get(0)?;
+                if let Some(key) = key_of_ref(source, &source_ref).filter(|k| keys.contains(k)) {
+                    *stored.entry(key).or_insert(0) += 1;
+                }
+            }
+            Ok(())
+        };
+        // where the next look starts: at a part's end, or just past a ref
+        let mut at: Option<(String, bool)> = Some((String::new(), true));
+        while let Some((point, inclusive)) = at.take() {
+            let next = if inclusive {
+                &mut next_from
+            } else {
+                &mut next_after
+            };
+            let Some(first): Option<String> = next
+                .query_row(rusqlite::params![source, point], |r| r.get(0))
+                .optional()?
+            else {
+                break;
+            };
+            match ref_part(source, &first) {
+                Some((start, key)) => {
+                    let end = part_end(start);
+                    if may_hold(start, key) {
+                        tally(&mut part.query(rusqlite::params![source, start, end])?)?;
+                    }
+                    at = Some((end, true));
+                }
+                None => {
+                    // a ref alone is read only when its own key is asked for
+                    if key_of_ref(source, &first).is_some_and(|k| keys.contains(&k)) {
+                        tally(&mut alone.query(rusqlite::params![source, first])?)?;
+                    }
+                    at = Some((first, false));
                 }
             }
         }
-        Ok(out)
+        let work = [&next_from, &next_after, &part, &alone]
+            .iter()
+            .map(|s| i64::from(s.get_status(VmStep)))
+            .sum();
+        Ok((stored, work))
     }
 
     /// Does the list name a source whose items are judged by their author
@@ -1137,7 +1467,7 @@ impl Store {
         let Some(candidate) = candidate.filter(|c| ownable(&c.source).is_some()) else {
             return Ok(None);
         };
-        Ok(Some(OwnedWords::load(&conn)?.judge(&candidate)))
+        Ok(Some(OwnedWords::load(&conn)?.judge(&candidate)?))
     }
 }
 
@@ -1701,6 +2031,591 @@ mod tests {
         let j = store.owned_judgement(&after.0).unwrap().unwrap();
         assert!(!j.counts);
         assert!(j.why.unwrap().contains("tk_agent"));
+    }
+
+    /// A commit by the owner's address in an owned repository, made at
+    /// `at` (author date and commit time).
+    fn commit_at(sha: &str, at: &str) -> EpisodeDraft {
+        let mut d = commit(sha, "Owner Name", "me@own.example");
+        d.body = format!(
+            "commit {sha}\nrepo: {REPO}\nauthor: Owner Name <me@own.example>\n\
+             committed: {at}\nparents: {PARENT}\n\na change"
+        );
+        d.event_time = EventTime::parse_rfc3339(at, TimeUncertainty::Exact).unwrap();
+        d
+    }
+
+    /// A task that started and was never closed — its agent deleted
+    /// mid-run, or its node gone — keeps commits out, when it started on a
+    /// harness Hearthloom stops itself (Claude Code), only as long as a run
+    /// can last after its latest stamp, and one still writing stamps as long
+    /// as it does. A run Hearthloom doesn't stop (OpenClaw, Hermes), or one
+    /// whose harness wasn't kept, keeps them out until it is closed. The
+    /// harness is the run's own: its agent, gone or not, isn't asked.
+    #[test]
+    fn test_a_run_never_closed_ends_only_where_hearthloom_stops_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (home, store) = node(tmp.path(), "laptop");
+        store
+            .owned_source_add(&Actor::new("human:owner"), "git", REPO, "session")
+            .unwrap();
+        set_card(&store, &["me@own.example"]);
+        let times = [
+            "2026-11-02T12:00:00Z", // within a day of the run's start
+            "2026-11-05T12:00:00Z", // three days on
+        ];
+        let drafts: Vec<EpisodeDraft> = times
+            .iter()
+            .enumerate()
+            .map(|(n, at)| commit_at(&format!("{:040x}", n + 1), at))
+            .collect();
+        let ids: Vec<String> = drafts
+            .iter()
+            .map(|d| crate::ids::episode_id("git", &d.source_ref))
+            .collect();
+        apply(&store, &home, "adapter:git", drafts);
+        let run = |sql: &str, params: &[&str]| {
+            store
+                .lock()
+                .execute(sql, rusqlite::params_from_iter(params))
+                .unwrap();
+        };
+        // its agent was deleted mid-run: known nowhere now
+        run(
+            "INSERT INTO agent_tasks (id, agent_id, request, brief, status, created_at,
+                                      updated_at, started_at, harness)
+             VALUES ('tk_stuck', 'ag_gone', 'r', 'b', 'running', ?1, ?1, ?1, 'claude_code')",
+            &["2026-11-02T10:00:00Z"],
+        );
+        let counts = |id: &String| store.owned_judgement(id).unwrap().unwrap();
+        let during = counts(&ids[0]);
+        assert!(!during.counts);
+        assert!(during.why.unwrap().contains("tk_stuck"));
+        assert!(counts(&ids[1]).counts, "{:?}", counts(&ids[1]).why);
+        assert_eq!(untrusted(&store, std::slice::from_ref(&ids[1])), None);
+
+        // a harness that runs on its own: the job may still be going
+        for harness in ["openclaw", "hermes"] {
+            run("UPDATE agent_tasks SET harness = ?1", &[harness]);
+            let later = counts(&ids[1]);
+            assert!(!later.counts, "{harness}");
+            assert!(later.why.unwrap().contains("tk_stuck"), "{harness}");
+            assert_eq!(
+                untrusted(&store, std::slice::from_ref(&ids[1])),
+                Some(ids[1].clone()),
+                "{harness}"
+            );
+        }
+        // a run whose harness wasn't kept (it started before they were):
+        // it can't be told
+        run("UPDATE agent_tasks SET harness = NULL", &[]);
+        assert!(!counts(&ids[1]).counts);
+        run("UPDATE agent_tasks SET harness = 'claude_code'", &[]);
+        assert!(counts(&ids[1]).counts, "{:?}", counts(&ids[1]).why);
+
+        // the task wrote a stamp that morning (it read something): it may
+        // still have been at work
+        run(
+            "UPDATE agent_tasks SET updated_at = '2026-11-05T09:00:00Z'",
+            &[],
+        );
+        assert!(!counts(&ids[1]).counts);
+    }
+
+    /// A run keeps the harness it started on: an agent the owner moves from
+    /// OpenClaw to Claude Code while its OpenClaw job is still out doesn't
+    /// give that job an end, so a commit made days later still stays out.
+    /// A task started again on another harness keeps none.
+    #[test]
+    fn test_a_run_keeps_the_harness_it_started_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (home, store) = node(tmp.path(), "laptop");
+        let owner = Actor::new("human:owner");
+        store
+            .owned_source_add(&owner, "git", REPO, "session")
+            .unwrap();
+        set_card(&store, &["me@own.example"]);
+        let agent_in = |harness: &str| crate::store::AgentIn {
+            name: "Helper".into(),
+            harness: harness.into(),
+            config: json!({}),
+            enabled: None,
+        };
+        let agent = store
+            .save_agent(&owner, None, &agent_in("openclaw"))
+            .unwrap();
+        let task = store
+            .create_agent_task(&owner, None, Some(&agent.id), "r", "b", &[], None, false)
+            .unwrap();
+        store
+            .start_agent_task_run(&owner, &task.id, "openclaw", None, None)
+            .unwrap();
+        // the run began on 2 November and has written nothing since
+        store
+            .lock()
+            .execute(
+                "UPDATE agent_tasks SET started_at = ?1, updated_at = ?1",
+                ["2026-11-02T10:00:00Z"],
+            )
+            .unwrap();
+        let later = commit_at(&format!("{:040x}", 7), "2026-11-05T12:00:00Z");
+        let id = crate::ids::episode_id("git", &later.source_ref);
+        apply(&store, &home, "adapter:git", vec![later]);
+        let judged = || store.owned_judgement(&id).unwrap().unwrap();
+        assert!(!judged().counts);
+
+        // the owner moves the agent to Claude Code; the OpenClaw job goes on
+        store
+            .save_agent(&owner, Some(&agent.id), &agent_in("claude_code"))
+            .unwrap();
+        let still = judged();
+        assert!(!still.counts, "the agent's setting now ended the run");
+        assert!(still.why.unwrap().contains(&task.id));
+
+        // started again, on Claude Code: which harness ran it can't be told
+        store
+            .start_agent_task_run(&owner, &task.id, "claude_code", None, None)
+            .unwrap();
+        let harness = || -> Option<String> {
+            store
+                .lock()
+                .query_row("SELECT harness FROM agent_tasks", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(harness(), None);
+        // a task first started on Claude Code keeps it
+        let first = store
+            .create_agent_task(&owner, None, Some(&agent.id), "r", "b", &[], None, false)
+            .unwrap();
+        store
+            .start_agent_task_run(&owner, &first.id, "claude_code", None, None)
+            .unwrap();
+        let kept: Option<String> = store
+            .lock()
+            .query_row(
+                "SELECT harness FROM agent_tasks WHERE id = ?1",
+                [&first.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept.as_deref(), Some("claude_code"));
+    }
+
+    /// Judging a commit reads only a run that was going while it was made
+    /// (by the index on when runs finished): never the task history that
+    /// ended before it was written, nor the runs that started after its
+    /// commit time — an old commit reads none of the history since, however
+    /// long it grows.
+    #[test]
+    fn test_judging_a_commit_reads_only_a_run_going_while_it_was_made() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (home, store) = node(tmp.path(), "laptop");
+        store
+            .owned_source_add(&Actor::new("human:owner"), "git", REPO, "session")
+            .unwrap();
+        set_card(&store, &["me@own.example"]);
+        let drafts = vec![
+            commit_at(&format!("{:040x}", 1), "2026-11-05T12:00:00Z"),
+            // before the owner had agents
+            commit_at(&format!("{:040x}", 2), "2020-01-01T12:00:00Z"),
+            commit_at(&format!("{:040x}", 3), "2025-06-10T12:30:00Z"),
+        ];
+        let ids: Vec<String> = drafts
+            .iter()
+            .map(|d| crate::ids::episode_id("git", &d.source_ref))
+            .collect();
+        apply(&store, &home, "adapter:git", drafts);
+        {
+            let conn = store.lock();
+            // a long history before the recent commit, and one run after it
+            for day in 0..500 {
+                let start = format!("2025-06-{:02}T12:00:00Z", 1 + day % 28);
+                let end = format!("2025-06-{:02}T13:00:00Z", 1 + day % 28);
+                conn.execute(
+                    "INSERT INTO agent_tasks (id, request, brief, status, created_at,
+                                              updated_at, started_at, finished_at)
+                     VALUES (?1, 'r', 'b', 'done', ?2, ?3, ?2, ?3)",
+                    rusqlite::params![format!("tk_old_{day}"), start, end],
+                )
+                .unwrap();
+            }
+            conn.execute(
+                "INSERT INTO agent_tasks (id, request, brief, status, created_at, updated_at,
+                                          started_at, finished_at)
+                 VALUES ('tk_new', 'r', 'b', 'done', ?1, ?2, ?1, ?2)",
+                ["2026-11-06T10:00:00Z", "2026-11-06T11:00:00Z"],
+            )
+            .unwrap();
+        }
+        let conn = store.lock();
+        let candidate = |id: &str| {
+            conn.query_row(
+                &format!(
+                    "SELECT {} FROM episodes e {} WHERE e.id = ?1",
+                    candidate_cols(),
+                    candidate_joins()
+                ),
+                [id],
+                |r| Candidate::from_row(r, 0),
+            )
+            .unwrap()
+        };
+        let owned = OwnedWords::load(&conn).unwrap();
+        let recent = owned.judge(&candidate(&ids[0])).unwrap();
+        assert!(recent.counts, "{:?}", recent.why);
+        assert_eq!(owned.runs_read(), 0, "the run after it isn't read");
+        let old = owned.judge(&candidate(&ids[1])).unwrap();
+        assert!(old.counts, "{:?}", old.why);
+        assert_eq!(owned.runs_read(), 0, "the history since isn't read");
+        let during = owned.judge(&candidate(&ids[2])).unwrap();
+        assert!(!during.counts);
+        assert!(during.why.unwrap().contains("tk_old_"));
+        assert!(owned.judge(&candidate(&ids[0])).unwrap().counts);
+        assert_eq!(owned.runs_read(), 1);
+
+        // years more history after the old commit: still none of it read
+        let later_runs = |conn: &Connection, from: usize, to: usize| {
+            conn.execute(
+                "WITH RECURSIVE n(i) AS (SELECT ?1 UNION ALL SELECT i + 1 FROM n WHERE i + 1 < ?2)
+                 INSERT INTO agent_tasks (id, request, brief, status, created_at,
+                                          updated_at, started_at, finished_at)
+                 SELECT 'tk_later_' || i, 'r', 'b', 'done', s, f, s, f FROM (
+                     SELECT i,
+                            printf('2026-%02d-%02dT08:00:00Z', 1 + i % 10, 1 + i % 28) AS s,
+                            printf('2026-%02d-%02dT09:00:00Z', 1 + i % 10, 1 + i % 28) AS f
+                     FROM n)",
+                rusqlite::params![from as i64, to as i64],
+            )
+            .unwrap();
+        };
+        later_runs(&conn, 0, 2_000);
+        let owned = OwnedWords::load(&conn).unwrap();
+        assert!(owned.judge(&candidate(&ids[1])).unwrap().counts);
+        assert_eq!(owned.runs_read(), 0);
+        drop(conn);
+
+        // nor looked at: the work of judging the old commit stays the same
+        // however many runs finished after it
+        let old_commit_work = || {
+            super::super::trace::work_of(&store, || {
+                assert!(store.owned_judgement(&ids[1]).unwrap().unwrap().counts);
+            })
+            .steps_on("agent_tasks")
+        };
+        let before = old_commit_work();
+        later_runs(&store.lock(), 2_000, 20_000);
+        let after = old_commit_work();
+        assert!(after <= before + 10, "{before} steps, then {after}");
+
+        // nor the runs after it that lasted more than a day: two-day and
+        // twenty-two-day runs years later aren't looked at either
+        let later_long_runs = |conn: &Connection, from: usize, to: usize| {
+            conn.execute(
+                "WITH RECURSIVE n(i) AS (SELECT ?1 UNION ALL SELECT i + 1 FROM n WHERE i + 1 < ?2)
+                 INSERT INTO agent_tasks (id, request, brief, status, created_at,
+                                          updated_at, started_at, finished_at)
+                 SELECT 'tk_long_' || i, 'r', 'b', 'done', s, f, s, f FROM (
+                     SELECT i,
+                            printf('2026-%02d-01T08:00:00Z', 1 + i % 10) AS s,
+                            printf('2026-%02d-%02dT08:00:00Z', 1 + i % 10, 3 + 20 * (i % 2)) AS f
+                     FROM n)",
+                rusqlite::params![from as i64, to as i64],
+            )
+            .unwrap();
+        };
+        later_long_runs(&store.lock(), 0, 2_000);
+        let before = old_commit_work();
+        later_long_runs(&store.lock(), 2_000, 20_000);
+        let after = old_commit_work();
+        assert!(after <= before + 10, "{before} steps, then {after}");
+
+        // each read is a search of an index, never a pass over the table
+        let conn = store.lock();
+        let at = || rusqlite::types::Value::Text("2020-01-01T12:00:00Z".into());
+        let until = || rusqlite::types::Value::Text("2020-01-02T12:05:00Z".into());
+        let digits = rusqlite::types::Value::Integer(1);
+        for (sql, params, index) in [
+            (
+                RUN_FINISHED_DURING,
+                vec![at(), at(), until()],
+                "idx_agent_tasks_finished",
+            ),
+            (
+                LONG_RUN_DURING,
+                vec![at(), at(), digits, until()],
+                "idx_agent_tasks_span",
+            ),
+            (ODD_RUN_DURING, vec![at(), at()], "idx_agent_tasks_span"),
+            (RUNS_NOT_CLOSED, vec![], "idx_agent_tasks_finished"),
+        ] {
+            let mut plan = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let steps: Vec<String> = plan
+                .query_map(rusqlite::params_from_iter(params), |r| r.get(3))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap();
+            assert!(
+                steps
+                    .iter()
+                    .any(|s| s.contains(&format!("USING INDEX {index}"))),
+                "{sql}: {steps:?}"
+            );
+            assert!(
+                !steps
+                    .iter()
+                    .any(|s| s.starts_with("SCAN agent_tasks") || s.starts_with("SCAN t")),
+                "{sql}: {steps:?}"
+            );
+            // a look at the runs of one length reads only those that
+            // finished in its window: bounded on both ends
+            if sql == LONG_RUN_DURING {
+                assert!(
+                    steps
+                        .iter()
+                        .any(|s| s.contains("finished_at>? AND finished_at<?")),
+                    "{sql}: {steps:?}"
+                );
+            }
+        }
+        drop(conn);
+
+        // a run that went on for more than a day is still found, however
+        // long it lasted: one of a day and four minutes that ended the day
+        // after the old commit, and one that went on for years
+        let judged = || store.owned_judgement(&ids[1]).unwrap().unwrap();
+        let run = |id: &str, start: &str, end: &str| {
+            store
+                .lock()
+                .execute(
+                    "INSERT INTO agent_tasks (id, request, brief, status, created_at,
+                                              updated_at, started_at, finished_at)
+                     VALUES (?1, 'r', 'b', 'done', ?2, ?3, ?2, ?3)",
+                    [id, start, end],
+                )
+                .unwrap();
+        };
+        run("tk_day", "2020-01-01T11:00:00Z", "2020-01-02T11:04:00Z");
+        assert!(judged().why.unwrap().contains("tk_day"));
+        store
+            .lock()
+            .execute("DELETE FROM agent_tasks WHERE id = 'tk_day'", [])
+            .unwrap();
+        assert!(judged().counts);
+        // and one of each other length: weeks, months, years, and one whose
+        // end can't be read
+        for (id, start, end) in [
+            ("tk_weeks", "2019-12-25T09:00:00Z", "2020-01-16T09:00:00Z"),
+            ("tk_months", "2019-06-01T09:00:00Z", "2020-10-01T09:00:00Z"),
+            ("tk_years", "2019-12-01T09:00:00Z", "2026-02-01T09:00:00Z"),
+            ("tk_unreadable", "2019-12-31T09:00:00Z", "unknown"),
+        ] {
+            run(id, start, end);
+            assert!(judged().why.unwrap().contains(id), "{id}");
+            store
+                .lock()
+                .execute("DELETE FROM agent_tasks WHERE id = ?1", [id])
+                .unwrap();
+            assert!(judged().counts, "{id}");
+        }
+    }
+
+    /// What the list doesn't name is checked in one look, and the owner's
+    /// agents' runs are read only for a commit that gets as far as needing
+    /// them — never when another episode already answers. A runs table
+    /// that can't be read leaves a commit outside text.
+    #[test]
+    fn test_agent_runs_are_read_only_for_a_commit_that_needs_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (home, store) = node(tmp.path(), "laptop");
+        store
+            .owned_source_add(&Actor::new("human:owner"), "git", REPO, "session")
+            .unwrap();
+        set_card(&store, &["me@own.example"]);
+        apply(
+            &store,
+            &home,
+            "adapter:git",
+            vec![
+                commit(SHA_A, "Owner Name", "me@own.example"),
+                commit(SHA_B, "Ann Contributor", "ann@else.example"),
+            ],
+        );
+        apply(
+            &store,
+            &home,
+            "adapter:substack",
+            vec![post("https://someone.substack.com/p/two")],
+        );
+        let mine = crate::ids::episode_id("git", &format!("{REPO}#{SHA_A}"));
+        let theirs = crate::ids::episode_id("git", &format!("{REPO}#{SHA_B}"));
+        let post = crate::ids::episode_id("substack", "https://someone.substack.com/p/two");
+        assert_eq!(untrusted(&store, std::slice::from_ref(&mine)), None);
+
+        store
+            .lock()
+            .execute("ALTER TABLE agent_tasks RENAME TO agent_tasks_away", [])
+            .unwrap();
+        assert_eq!(
+            untrusted(&store, &[mine.clone(), post.clone()]),
+            Some(post.clone())
+        );
+        assert_eq!(
+            untrusted(&store, std::slice::from_ref(&theirs)),
+            Some(theirs)
+        );
+        assert!(store
+            .first_untrusted_episode(std::slice::from_ref(&mine))
+            .is_err());
+    }
+
+    /// The count of stored memories an entry names is the viewer's: a
+    /// private commit counts only with their vault open.
+    #[test]
+    fn test_stored_counts_leave_out_private_memories_while_locked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (home, store) = node(tmp.path(), "laptop");
+        let mut private = commit(SHA_B, "Owner Name", "me@own.example");
+        private.scope = Some("private".into());
+        apply(
+            &store,
+            &home,
+            "adapter:git",
+            vec![commit(SHA_A, "Owner Name", "me@own.example"), private],
+        );
+        let (entry, _) = store
+            .owned_source_add(&Actor::new("human:owner"), "git", REPO, "session")
+            .unwrap();
+        assert_eq!(
+            store.owned_source_stored().unwrap().get(&entry.id),
+            Some(&1)
+        );
+        assert_eq!(store.owned_entry_stored(&entry).unwrap(), 1);
+        store.vault_unlock(5);
+        assert_eq!(
+            store.owned_source_stored().unwrap().get(&entry.id),
+            Some(&2)
+        );
+        assert_eq!(store.owned_entry_stored(&entry).unwrap(), 2);
+    }
+
+    /// Counting an entry reads the repositories that may name it and steps
+    /// past every other one with one look: the database's work doesn't grow
+    /// with other repositories' commits, or a local checkout's — also for
+    /// an address that holds a `#`. It still finds the entry under every
+    /// spelling of its address, an address that holds a `#`, and one whose
+    /// user name holds one.
+    #[test]
+    fn test_counting_an_entry_steps_past_what_cannot_name_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (home, store) = node(tmp.path(), "laptop");
+        let at = |identity: &str, n: usize| {
+            let mut d = commit(&format!("{n:040x}"), "Owner Name", "me@own.example");
+            d.source_ref = format!("{identity}#{n:040x}");
+            d
+        };
+        let others = |from: usize, many: usize| {
+            (0..many)
+                .flat_map(|n| {
+                    [
+                        at("https://git.example.com/owner/other", from + 3 * n),
+                        at("https://elsewhere.example/owner/project", from + 3 * n + 1),
+                        // a checkout with no remote address
+                        at("/home/user/project", from + 3 * n + 2),
+                    ]
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut drafts = vec![
+            at(REPO, 1),
+            at("git@Git.Example.com:Owner/Project.git", 2),
+            at("ssh://git@git.example.com:22/OWNER/project", 3),
+            // a path with a letter the database doesn't lowercase
+            at("https://git.example.com/Owner/CAFÉ.git", 4),
+            // an address that holds a `#`: in the part of the one before it
+            at("git.example.com:owner/project#x", 5),
+            // a user name that holds a `#`: in a part with no key
+            at("me#1@git.example.com:owner/project", 6),
+        ];
+        drafts.extend(others(100, 20));
+        apply(&store, &home, "adapter:git", drafts);
+        let actor = Actor::new("human:owner");
+        let (entry, _) = store
+            .owned_source_add(&actor, "git", REPO, "session")
+            .unwrap();
+        let count = |entry: &OwnedSourceRow| {
+            let (stored, work) = store
+                .stored_by_key(&entry.source, &BTreeSet::from([entry.key.clone()]))
+                .unwrap();
+            (stored.get(&entry.key).copied().unwrap_or(0), work)
+        };
+        let (stored, work) = count(&entry);
+        assert_eq!(stored, 4);
+
+        // many more commits of the other repositories: no more work
+        apply(&store, &home, "adapter:git", others(1_000, 200));
+        let (stored, more_work) = count(&entry);
+        assert_eq!(stored, 4);
+        assert!(more_work < work + 20, "{work} → {more_work}");
+
+        let (cafe, _) = store
+            .owned_source_add(
+                &actor,
+                "git",
+                "https://git.example.com/owner/café",
+                "session",
+            )
+            .unwrap();
+        assert_eq!(count(&cafe).0, 1);
+        let (hash, _) = store
+            .owned_source_add(&actor, "git", "git.example.com:owner/project#x", "session")
+            .unwrap();
+        let (stored, hash_work) = count(&hash);
+        assert_eq!(stored, 1);
+        // an address that holds a `#` reads only the parts that may hold it
+        apply(&store, &home, "adapter:git", others(5_000, 200));
+        let (stored, more_hash_work) = count(&hash);
+        assert_eq!(stored, 1);
+        assert!(
+            more_hash_work < hash_work + 20,
+            "{hash_work} → {more_hash_work}"
+        );
+        let stored = store.owned_source_stored().unwrap();
+        assert_eq!(stored.get(&entry.id), Some(&4));
+        assert_eq!(stored.get(&cafe.id), Some(&1));
+        assert_eq!(stored.get(&hash.id), Some(&1));
+        assert_eq!(store.owned_entry_stored(&entry).unwrap(), 4);
+    }
+
+    /// A publication's posts are counted by host, a host at a time, and
+    /// under every spelling of its address.
+    #[test]
+    fn test_counting_a_publication_steps_past_other_hosts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (home, store) = node(tmp.path(), "laptop");
+        let mut drafts = vec![
+            post("https://owner.example/p/one"),
+            post("https://www.Owner.example/p/two"),
+            post("https://owner.example:443?p=3"),
+            post("https://owner.example"),
+            post("https://owner.example.evil/p/four"),
+        ];
+        for n in 0..20 {
+            drafts.push(post(&format!("https://someone.substack.com/p/{n}")));
+        }
+        apply(&store, &home, "adapter:substack", drafts);
+        let (entry, _) = store
+            .owned_source_add(&Actor::new("human:owner"), "substack", "owner.example", "s")
+            .unwrap();
+        let keys = BTreeSet::from([entry.key.clone()]);
+        let (stored, work) = store.stored_by_key("substack", &keys).unwrap();
+        assert_eq!(stored.get("owner.example"), Some(&4));
+        let more: Vec<EpisodeDraft> = (20..220)
+            .map(|n| post(&format!("https://someone.substack.com/p/{n}")))
+            .collect();
+        apply(&store, &home, "adapter:substack", more);
+        let (stored, more_work) = store.stored_by_key("substack", &keys).unwrap();
+        assert_eq!(stored.get("owner.example"), Some(&4));
+        assert!(more_work < work + 20, "{work} → {more_work}");
     }
 
     #[test]

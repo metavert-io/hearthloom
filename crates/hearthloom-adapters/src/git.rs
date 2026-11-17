@@ -72,7 +72,9 @@ pub fn ingest_new(repo_path: &Path, scope: Option<&str>, mark: Option<&str>) -> 
     if !is_sha(&head) {
         return Err(anyhow!("unexpected HEAD in {}", repo_path.display()));
     }
-    let history = history_held(&repo_path);
+    let cut = shallow_cut(&repo_path);
+    let history = history_held(cut.as_deref());
+    let cut_off = cut_off_commits(cut.as_deref());
     let new_mark = format!("{head} {history} {repo_identity}");
     if mark == Some(new_mark.as_str()) {
         return Ok(GitRead {
@@ -112,7 +114,14 @@ pub fn ingest_new(repo_path: &Path, scope: Option<&str>, mark: Option<&str>) -> 
 
     let mut drafts = Vec::new();
     for record in log.split('\x1e').skip(1) {
-        match parse_commit(record, &repo_name, &repo_identity, attr_kind, scope) {
+        match parse_commit(
+            record,
+            &repo_name,
+            &repo_identity,
+            attr_kind,
+            scope,
+            &cut_off,
+        ) {
             Ok(draft) => drafts.push(draft),
             Err(err) => tracing::warn!("skipping unparseable commit: {err}"),
         }
@@ -123,22 +132,33 @@ pub fn ingest_new(repo_path: &Path, scope: Option<&str>, mark: Option<&str>) -> 
     })
 }
 
-/// How much history the clone holds: `full`, or for a shallow clone
-/// `shallow:<digest of its cut-off commits>` — which changes whenever more
-/// history is fetched.
-fn history_held(repo_path: &Path) -> String {
-    let shallow = git(repo_path, &["rev-parse", "--git-path", "shallow"])
+/// A shallow clone's list of cut-off commits (git's `shallow` file: one id
+/// per line); None for a clone that holds its whole history.
+fn shallow_cut(repo_path: &Path) -> Option<Vec<u8>> {
+    git(repo_path, &["rev-parse", "--git-path", "shallow"])
         .ok()
         .map(|p| repo_path.join(p.trim()))
         .and_then(|p| std::fs::read(p).ok())
-        .filter(|cut| !cut.iter().all(u8::is_ascii_whitespace));
-    match shallow {
-        Some(cut) => format!(
-            "shallow:{}",
-            &hearthloom_core::ids::content_hash(&cut)[..16]
-        ),
+        .filter(|cut| !cut.iter().all(u8::is_ascii_whitespace))
+}
+
+/// How much history the clone holds: `full`, or for a shallow clone
+/// `shallow:<digest of its cut-off commits>` — which changes whenever more
+/// history is fetched.
+fn history_held(cut: Option<&[u8]>) -> String {
+    match cut {
+        Some(cut) => format!("shallow:{}", &hearthloom_core::ids::content_hash(cut)[..16]),
         None => "full".into(),
     }
+}
+
+/// The commits at a shallow clone's cut-off: git shows them with no
+/// parents, whatever they had (a merge there reads as a first commit).
+fn cut_off_commits(cut: Option<&[u8]>) -> std::collections::HashSet<String> {
+    String::from_utf8_lossy(cut.unwrap_or_default())
+        .split_whitespace()
+        .map(str::to_ascii_lowercase)
+        .collect()
 }
 
 /// A full commit id (SHA-1 or SHA-256), lowercase hex.
@@ -149,10 +169,13 @@ fn is_sha(s: &str) -> bool {
 /// A remote URL without the credentials a URL can carry. A `scheme://` URL
 /// loses its user-info (a token can sit in the user name as well as the
 /// password) — except over ssh, where the user name (`git@`) is part of
-/// the address and only a password goes. An scp-style `user@host:path`
-/// keeps its user name and loses a `:password`. Anything else (a local
-/// path, a URL without user-info) is returned as it is.
-fn without_credentials(url: &str) -> String {
+/// the address and only a password goes. Anything else is returned as it
+/// is: an scp-style `[user@]host:path` carries no password (git reads all
+/// before its first `:` as the user and host, and an `@` after it belongs
+/// to the path), nor does a local path or a URL without user-info.
+/// Earlier versions kept the address as given: commits stored then carry
+/// it in their refs (the daemon's `local_import::prepare` knows them).
+pub fn without_credentials(url: &str) -> String {
     if let Some((scheme, rest)) = url.split_once("://") {
         let (authority, tail) = match rest.find(['/', '?', '#']) {
             Some(i) => rest.split_at(i),
@@ -170,14 +193,6 @@ fn without_credentials(url: &str) -> String {
         } else {
             format!("{scheme}://{host}{tail}")
         };
-    }
-    // scp-style: [user@]host:path
-    if let Some((userinfo, rest)) = url.split_once('@') {
-        if !userinfo.contains('/') {
-            if let Some((user, _)) = userinfo.split_once(':') {
-                return format!("{user}@{rest}");
-            }
-        }
     }
     url.to_string()
 }
@@ -205,6 +220,7 @@ fn parse_commit(
     repo_identity: &str,
     attr_kind: &str,
     scope: Option<&str>,
+    cut_off: &std::collections::HashSet<String>,
 ) -> Result<EpisodeDraft> {
     let mut fields = record.splitn(9, '\x1f');
     let sha = fields.next().unwrap_or("").trim();
@@ -245,13 +261,21 @@ fn parse_commit(
     // When the commit was made, and its parents (more than one: a merge,
     // whose message comes from the merged branch). Core store/owned.rs
     // counts a commit as the owner's words only when its record says both.
+    // At a shallow clone's cut-off git shows no parents whatever the commit
+    // had, so the record says they weren't fetched — and it never counts
+    // (the record stays as first stored, even once more history arrives).
     if let Some(committed) = &committed {
         body.push_str(&format!("committed: {committed}\n"));
     }
     body.push_str("parents:");
-    for parent in &parents {
+    if cut_off.contains(&sha.to_ascii_lowercase()) {
         body.push(' ');
-        body.push_str(parent);
+        body.push_str(hearthloom_core::store::GIT_PARENTS_NOT_FETCHED);
+    } else {
+        for parent in &parents {
+            body.push(' ');
+            body.push_str(parent);
+        }
     }
     body.push_str("\n\n");
     body.push_str(&subject);
@@ -789,6 +813,85 @@ mod tests {
             .is_empty());
     }
 
+    /// At a shallow clone's cut-off git shows a commit with no parents,
+    /// whatever it had: a merge there with a subject of its own would read
+    /// as a first commit. Its record says its parents weren't fetched, so
+    /// it never counts as the owner's words (core store/owned.rs) — and a
+    /// commit below the cut-off reads as usual.
+    #[test]
+    fn test_a_merge_at_a_shallow_clones_cut_off_is_never_read_as_a_first_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let clone = tmp.path().join("clone");
+        let git_in = |dir: &Path, args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "Test Author")
+                .env("GIT_AUTHOR_EMAIL", "author@example.com")
+                .env("GIT_COMMITTER_NAME", "Test Author")
+                .env("GIT_COMMITTER_EMAIL", "author@example.com")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {:?}: {:?}", args, output);
+        };
+        fs::create_dir_all(&source).unwrap();
+        git_in(&source, &["init", "-q"]);
+        fs::write(source.join("a.txt"), "a").unwrap();
+        git_in(&source, &["add", "."]);
+        git_in(&source, &["commit", "-q", "-m", "one"]);
+        git_in(&source, &["checkout", "-q", "-b", "topic"]);
+        fs::write(source.join("b.txt"), "b").unwrap();
+        git_in(&source, &["add", "."]);
+        git_in(&source, &["commit", "-q", "-m", "on the branch"]);
+        git_in(&source, &["checkout", "-q", "-"]);
+        fs::write(source.join("c.txt"), "c").unwrap();
+        git_in(&source, &["add", "."]);
+        git_in(&source, &["commit", "-q", "-m", "two"]);
+        git_in(
+            &source,
+            &["merge", "-q", "--no-ff", "-m", "Add the new page", "topic"],
+        );
+        let url = format!("file://{}", source.display());
+        git_in(
+            tmp.path(),
+            &["clone", "-q", "--depth", "1", &url, clone.to_str().unwrap()],
+        );
+
+        let mine: std::collections::BTreeSet<String> =
+            ["author@example.com".to_string()].into_iter().collect();
+        let read = ingest_new(&clone, None, None).unwrap();
+        assert_eq!(read.drafts.len(), 1);
+        let merge = &read.drafts[0];
+        assert_eq!(merge.title, "Add the new page");
+        let concern = hearthloom_core::store::git_commit_concern(&merge.body, &mine);
+        assert!(
+            concern.as_deref().unwrap_or("").contains("shallow clone"),
+            "{concern:?}\n{}",
+            merge.body
+        );
+        assert!(
+            merge.body.contains("\nparents: not fetched\n"),
+            "{}",
+            merge.body
+        );
+        assert_eq!(hearthloom_core::store::git_commit_head(&merge.body), None);
+
+        // fetched deeper: the merge reads with both parents, the commits
+        // now at the cut-off don't
+        git_in(&clone, &["fetch", "-q", "--deepen=1"]);
+        let deeper = ingest_new(&clone, None, Some(&read.mark)).unwrap();
+        for d in &deeper.drafts {
+            let head = hearthloom_core::store::git_commit_head(&d.body);
+            match d.title.as_str() {
+                "Add the new page" => assert_eq!(head.unwrap().parents, 2),
+                _ => assert_eq!(head, None, "{}", d.body),
+            }
+        }
+        assert!(deeper.drafts.iter().any(|d| d.title == "Add the new page"));
+    }
+
     #[test]
     fn test_remote_urls_lose_their_credentials_only() {
         for (given, kept) in [
@@ -817,10 +920,10 @@ mod tests {
                 "ssh://git@host.example/r.git",
             ),
             ("git@github.example:o/r.git", "git@github.example:o/r.git"),
-            (
-                "git:pw@github.example:o/r.git",
-                "git@github.example:o/r.git",
-            ),
+            // an `@` after an scp-style address's `:` is the path's
+            ("host.example:repo@v2", "host.example:repo@v2"),
+            ("git@host.example:o/r@v2", "git@host.example:o/r@v2"),
+            (r"C:\repos\proj@v2", r"C:\repos\proj@v2"),
             ("/Users/you/code/r", "/Users/you/code/r"),
             ("/srv/repos/r@v2", "/srv/repos/r@v2"),
             ("file:///srv/repos/r.git", "file:///srv/repos/r.git"),

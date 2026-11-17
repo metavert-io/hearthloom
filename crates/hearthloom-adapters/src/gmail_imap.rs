@@ -112,9 +112,11 @@ pub trait MailFeed {
     fn uids_after(&mut self, last_uid: u32) -> Result<Vec<u32>>;
     /// UIDs of mail received in the last `days` days (first-run anchor).
     fn uids_since_days(&mut self, days: u32) -> Result<Vec<u32>>;
-    /// Which of the UIDs in `lo..=hi` sit in a Gmail category
-    /// (X-GM-RAW `category:<name>` — categories are NOT in X-GM-LABELS).
-    fn uids_in_category(&mut self, lo: u32, hi: u32, category: &str) -> Result<HashSet<u32>>;
+    /// Which of these UIDs sit in a Gmail category (X-GM-RAW
+    /// `category:<name>` — categories are NOT in X-GM-LABELS). Asked for
+    /// exactly these UIDs: the first and last of an archive's stretch can be
+    /// a whole mailbox apart.
+    fn uids_in_category(&mut self, uids: &[u32], category: &str) -> Result<HashSet<u32>>;
     fn fetch_batch(&mut self, uids: &[u32]) -> Result<Vec<PulledMessage>>;
     /// Gmail's labels and the Message-ID of each of `uids`, without bodies.
     fn labels_of(&mut self, uids: &[u32]) -> Result<Vec<CurrentLabels>>;
@@ -194,8 +196,8 @@ pub fn pull_new(
         });
     }
 
-    let (lo, hi) = (uids[0], *uids.last().unwrap());
-    let personal = feed.uids_in_category(lo, hi, "personal")?;
+    let hi = *uids.last().unwrap();
+    let personal = feed.uids_in_category(&uids, "personal")?;
 
     let mut fetched = 0usize;
     for chunk in uids.chunks(opts.batch.max(1)) {
@@ -228,6 +230,33 @@ pub const RELABEL_CAP: usize = 500;
 const RELABEL_BATCH: usize = 100;
 /// Message-IDs per search when finding messages by Message-ID.
 const LOOKUP_BATCH: usize = 20;
+/// UIDs per category search.
+const CATEGORY_BATCH: usize = 500;
+
+/// An IMAP UID set naming exactly these UIDs, runs written `lo:hi`:
+/// `[3, 4, 5, 9]` → `3:5,9`.
+fn uid_set(uids: &[u32]) -> String {
+    let mut sorted = uids.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut parts: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < sorted.len() {
+        let lo = sorted[i];
+        let mut hi = lo;
+        while i + 1 < sorted.len() && sorted[i + 1] == hi + 1 {
+            i += 1;
+            hi = sorted[i];
+        }
+        parts.push(if lo == hi {
+            lo.to_string()
+        } else {
+            format!("{lo}:{hi}")
+        });
+        i += 1;
+    }
+    parts.join(",")
+}
 
 /// One archived message the caller wants re-read: the UID its archive
 /// record carries (None: the record has none) and the Message-ID it was
@@ -280,13 +309,15 @@ pub fn current_labels(
     let mut out = labels_now(feed, &recent)?;
     out.extend(labels_now(feed, &older)?);
 
-    // the archived messages none of those UIDs holds now: by Message-ID
+    // the archived messages none of those UIDs holds now: by Message-ID —
+    // searched for as Gmail knows it, matched by the key they were archived
+    // under
     let found: HashSet<&str> = out.iter().filter_map(|c| c.message_id.as_deref()).collect();
-    let mut missing: Vec<String> = also
+    let mut missing: Vec<(String, String)> = also
         .iter()
         .map(|a| a.message_id.as_str())
-        .filter(|id| !found.contains(id) && is_message_id(id))
-        .map(str::to_string)
+        .filter(|key| !found.contains(key))
+        .filter_map(|key| Some((key.to_string(), searchable_id(key)?)))
         .collect();
     missing.sort_unstable();
     missing.dedup();
@@ -294,15 +325,18 @@ pub fn current_labels(
         return Ok(out);
     }
     let read: HashSet<u32> = out.iter().map(|c| c.uid).collect();
+    let mut search: Vec<String> = missing.iter().map(|(_, id)| id.clone()).collect();
+    search.sort_unstable();
+    search.dedup();
     let mut found_by_id = Vec::new();
-    for chunk in missing.chunks(LOOKUP_BATCH) {
-        found_by_id.extend(feed.uids_of(chunk)?);
+    for chunk in search.chunks(LOOKUP_BATCH) {
+        found_by_id.extend(per_item(feed, chunk, |feed, ids| feed.uids_of(ids))?);
     }
     let uids: Vec<u32> = pulled(found_by_id)
         .into_iter()
         .filter(|u| !read.contains(u))
         .collect();
-    let wanted: HashSet<&str> = missing.iter().map(String::as_str).collect();
+    let wanted: HashSet<&str> = missing.iter().map(|(key, _)| key.as_str()).collect();
     out.extend(labels_now(feed, &uids)?.into_iter().filter(|c| {
         c.message_id
             .as_deref()
@@ -311,20 +345,114 @@ pub fn current_labels(
     Ok(out)
 }
 
-/// The labels of these UIDs (sorted), `Category Personal` merged in.
+/// The labels of these UIDs (sorted), `Category Personal` merged in. A
+/// message whose reply Gmail refuses, or that can't be read, is left out
+/// (`per_item`) rather than failing the rest.
 fn labels_now(feed: &mut dyn MailFeed, uids: &[u32]) -> Result<Vec<CurrentLabels>> {
-    let (Some(&lo), Some(&hi)) = (uids.first(), uids.last()) else {
-        return Ok(vec![]);
-    };
-    let personal = feed.uids_in_category(lo, hi, "personal")?;
     let mut out = Vec::with_capacity(uids.len());
     for chunk in uids.chunks(RELABEL_BATCH) {
-        for mut now in feed.labels_of(chunk)? {
-            merge_personal(&mut now.labels, now.uid, &personal);
-            out.push(now);
-        }
+        out.extend(per_item(feed, chunk, |feed, uids| {
+            let personal = feed.uids_in_category(uids, "personal")?;
+            let mut now = feed.labels_of(uids)?;
+            for c in &mut now {
+                merge_personal(&mut c.labels, c.uid, &personal);
+            }
+            Ok(now)
+        })?);
     }
     Ok(out)
+}
+
+/// `read` over a batch; when Gmail refuses the request or its reply can't
+/// be read (`refused_request`) — something one message or id in it can
+/// cause — over each item alone, leaving out the ones that fail the same
+/// way. Any other error (the connection) fails the whole read.
+fn per_item<T, R>(
+    feed: &mut dyn MailFeed,
+    batch: &[T],
+    mut read: impl FnMut(&mut dyn MailFeed, &[T]) -> Result<Vec<R>>,
+) -> Result<Vec<R>> {
+    match read(&mut *feed, batch) {
+        Ok(out) => Ok(out),
+        Err(err) if refused_request(&err) && batch.len() > 1 => {
+            let mut out = Vec::new();
+            for item in batch {
+                match read(&mut *feed, std::slice::from_ref(item)) {
+                    Ok(found) => out.extend(found),
+                    Err(err) if refused_request(&err) => {
+                        tracing::warn!("gmail: one message's labels left out: {err:#}");
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+            Ok(out)
+        }
+        Err(err) if refused_request(&err) => {
+            tracing::warn!("gmail: one message's labels left out: {err:#}");
+            Ok(Vec::new())
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// Whether an error is Gmail refusing one request (`NO`, `BAD`), a reply
+/// that can't be read, or a command that can't be written — not the
+/// connection failing.
+fn refused_request(err: &anyhow::Error) -> bool {
+    err.chain().any(|e| {
+        matches!(
+            e.downcast_ref::<imap::Error>(),
+            Some(
+                imap::Error::No(_)
+                    | imap::Error::Bad(_)
+                    | imap::Error::Parse(_)
+                    | imap::Error::Validate(_)
+            )
+        )
+    })
+}
+
+/// The Message-ID a Gmail search finds a message by, from the key its
+/// archive record carries (`mbox::message_id_ref`): the key itself, or —
+/// for a header with a comment beside the id (`(desk) <a@x>`,
+/// `<a@x> (note)`) — the part its angle brackets hold outside the
+/// comments (a comment can hold angle brackets of its own). None when
+/// neither is a single ASCII Message-ID (this session can't search other
+/// text).
+pub fn searchable_id(key: &str) -> Option<String> {
+    if is_message_id(key) {
+        return key.is_ascii().then(|| key.to_string());
+    }
+    let bare = without_comments(key);
+    let inner = bare.find('<').map_or(&bare[..], |open| &bare[open + 1..]);
+    let id = inner.split('>').next().unwrap_or("").trim();
+    (is_message_id(id) && id.is_ascii()).then(|| id.to_string())
+}
+
+/// Header text without its comments (RFC 5322: parenthesised, nested, a
+/// backslash quoting the next character), each read as a space. A comment
+/// left open runs to the end.
+fn without_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut depth = 0usize;
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if depth > 0 => {
+                chars.next();
+            }
+            '(' => depth += 1,
+            ')' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    out.push(' ');
+                }
+            }
+            _ if depth > 0 => {}
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// The UID the live pull wrote on a message's mbox separator line
@@ -457,23 +585,24 @@ impl std::fmt::Display for SignInRefused {
 
 impl std::error::Error for SignInRefused {}
 
-/// Whether the text of a `NO` reply to LOGIN says the credentials
-/// themselves were refused. Other `NO` replies (`[UNAVAILABLE] Temporary
-/// System Problem`, too many simultaneous connections) pass with time.
+/// Whether a `NO` reply to LOGIN (its text, `[ALERT]` already parsed out)
+/// refuses the sign-in. RFC 3501 gives LOGIN's `NO` one meaning — the
+/// sign-in was rejected — and Gmail words it many ways (a bad password, a
+/// web sign-in required, IMAP switched off), so every `NO` counts but one
+/// that says it passes with time: an RFC 5530 code for a passing failure
+/// (`[UNAVAILABLE]`, `[INUSE]`, `[LIMIT]`, `[SERVERBUG]`), or Gmail's own
+/// words for its connection and bandwidth limits.
 fn refuses_credentials(reply: &str) -> bool {
     let reply = reply.to_ascii_lowercase();
-    [
-        "authenticationfailed",
-        "invalid credentials",
-        "web login required",
-        "password required",
-    ]
-    .iter()
-    .any(|w| reply.contains(w))
+    let passing = ["[unavailable]", "[inuse]", "[limit]", "[serverbug]"]
+        .iter()
+        .chain(&["simultaneous connections", "bandwidth limits"])
+        .any(|w| reply.contains(w));
+    !passing
 }
 
-/// A failed LOGIN as an error: [`SignInRefused`] only for a `NO` reply
-/// that refuses the credentials; anything else (a dropped connection, a
+/// A failed LOGIN as an error: [`SignInRefused`] for a `NO` reply that
+/// doesn't say it passes with time; anything else (a dropped connection, a
 /// timeout, a temporary refusal) stays an ordinary error.
 fn login_error(err: imap::Error) -> anyhow::Error {
     match &err {
@@ -886,10 +1015,16 @@ impl MailFeed for ImapFeed {
         Ok(found.into_iter().collect())
     }
 
-    fn uids_in_category(&mut self, lo: u32, hi: u32, category: &str) -> Result<HashSet<u32>> {
-        Ok(self
-            .session
-            .uid_search(format!("UID {lo}:{hi} X-GM-RAW \"category:{category}\""))?)
+    fn uids_in_category(&mut self, uids: &[u32], category: &str) -> Result<HashSet<u32>> {
+        let mut found = HashSet::new();
+        // a bounded command per search, however sparse the UIDs
+        for chunk in uids.chunks(CATEGORY_BATCH) {
+            found.extend(self.session.uid_search(format!(
+                "UID {} X-GM-RAW \"category:{category}\"",
+                uid_set(chunk)
+            ))?);
+        }
+        Ok(found)
     }
 
     fn fetch_batch(&mut self, uids: &[u32]) -> Result<Vec<PulledMessage>> {
@@ -1042,13 +1177,13 @@ mod tests {
         fn uids_since_days(&mut self, _days: u32) -> Result<Vec<u32>> {
             Ok(self.since_window.clone())
         }
-        fn uids_in_category(&mut self, lo: u32, hi: u32, category: &str) -> Result<HashSet<u32>> {
+        fn uids_in_category(&mut self, uids: &[u32], category: &str) -> Result<HashSet<u32>> {
             assert_eq!(category, "personal");
             Ok(self
                 .personal
                 .iter()
                 .copied()
-                .filter(|u| *u >= lo && *u <= hi)
+                .filter(|u| uids.contains(u))
                 .collect())
         }
         fn fetch_batch(&mut self, uids: &[u32]) -> Result<Vec<PulledMessage>> {
@@ -1072,16 +1207,280 @@ mod tests {
                 .collect())
         }
         fn uids_of(&mut self, message_ids: &[String]) -> Result<Vec<u32>> {
+            // Gmail's `rfc822msgid:` finds a message by the id its angle
+            // brackets hold
             Ok(self
                 .messages
                 .iter()
                 .filter(|m| {
                     crate::mbox::message_id_ref(&String::from_utf8_lossy(&m.raw))
+                        .and_then(|key| searchable_id(&key))
                         .is_some_and(|id| message_ids.contains(&id))
                 })
                 .map(|m| m.uid)
                 .collect())
         }
+    }
+
+    /// A feed whose replies about some messages Gmail can't give (a reply
+    /// that won't parse), recording what each category search asked for.
+    struct Faulty {
+        inner: FakeFeed,
+        broken: HashSet<u32>,
+        broken_ids: HashSet<String>,
+        asked: Vec<Vec<u32>>,
+    }
+
+    fn unreadable() -> anyhow::Error {
+        anyhow::Error::new(imap::Error::Parse(imap::error::ParseError::Invalid(
+            b"* 1 FETCH (".to_vec(),
+        )))
+    }
+
+    impl MailFeed for Faulty {
+        fn select_all_mail(&mut self) -> Result<Selected> {
+            self.inner.select_all_mail()
+        }
+        fn uids_after(&mut self, last_uid: u32) -> Result<Vec<u32>> {
+            self.inner.uids_after(last_uid)
+        }
+        fn uids_since_days(&mut self, days: u32) -> Result<Vec<u32>> {
+            self.inner.uids_since_days(days)
+        }
+        fn uids_in_category(&mut self, uids: &[u32], category: &str) -> Result<HashSet<u32>> {
+            self.asked.push(uids.to_vec());
+            self.inner.uids_in_category(uids, category)
+        }
+        fn fetch_batch(&mut self, uids: &[u32]) -> Result<Vec<PulledMessage>> {
+            self.inner.fetch_batch(uids)
+        }
+        fn labels_of(&mut self, uids: &[u32]) -> Result<Vec<CurrentLabels>> {
+            if uids.iter().any(|u| self.broken.contains(u)) {
+                return Err(unreadable().context("reading labels"));
+            }
+            self.inner.labels_of(uids)
+        }
+        fn uids_of(&mut self, message_ids: &[String]) -> Result<Vec<u32>> {
+            if message_ids.iter().any(|id| self.broken_ids.contains(id)) {
+                return Err(unreadable());
+            }
+            self.inner.uids_of(message_ids)
+        }
+    }
+
+    /// A feed whose search finds each message by the Message-ID Gmail knows
+    /// it by, as given (`ids`: uid → id).
+    struct GmailIds {
+        inner: FakeFeed,
+        ids: Vec<(u32, String)>,
+    }
+
+    impl MailFeed for GmailIds {
+        fn select_all_mail(&mut self) -> Result<Selected> {
+            self.inner.select_all_mail()
+        }
+        fn uids_after(&mut self, last_uid: u32) -> Result<Vec<u32>> {
+            self.inner.uids_after(last_uid)
+        }
+        fn uids_since_days(&mut self, days: u32) -> Result<Vec<u32>> {
+            self.inner.uids_since_days(days)
+        }
+        fn uids_in_category(&mut self, uids: &[u32], category: &str) -> Result<HashSet<u32>> {
+            self.inner.uids_in_category(uids, category)
+        }
+        fn fetch_batch(&mut self, uids: &[u32]) -> Result<Vec<PulledMessage>> {
+            self.inner.fetch_batch(uids)
+        }
+        fn labels_of(&mut self, uids: &[u32]) -> Result<Vec<CurrentLabels>> {
+            self.inner.labels_of(uids)
+        }
+        fn uids_of(&mut self, message_ids: &[String]) -> Result<Vec<u32>> {
+            Ok(self
+                .ids
+                .iter()
+                .filter(|(_, id)| message_ids.contains(id))
+                .map(|(uid, _)| *uid)
+                .collect())
+        }
+    }
+
+    /// Messages archived under a Message-ID with a comment beside the id —
+    /// before it or after it, holding angle brackets of its own or not —
+    /// are found again by the id Gmail knows them by after Gmail renumbers
+    /// the mailbox, and reported under the key each was archived under.
+    #[test]
+    fn test_a_commented_message_id_is_found_again_after_renumbering() {
+        let headers = [
+            ("Message-ID: (desk) <note1@x>", "note1@x"),
+            (
+                "Message-ID: (relay <via@relay.example>) <actual1@example.org>",
+                "actual1@example.org",
+            ),
+            (
+                "Message-ID: <actual2@example.org> (via <x@y.example>)",
+                "actual2@example.org",
+            ),
+        ];
+        let messages: Vec<PulledMessage> = headers
+            .iter()
+            .zip(4000..)
+            .map(|((header, _), uid)| PulledMessage {
+                uid,
+                labels: vec!["Starred".into()],
+                raw: format!(
+                    "From: A <a@x.example>\r\nSubject: s\r\n\
+                     Date: Mon, 05 Jan 2026 10:00:00 -0400\r\n{header}\r\n\r\nbody\r\n"
+                )
+                .into_bytes(),
+            })
+            .collect();
+        let keys: Vec<String> = messages
+            .iter()
+            .map(|m| crate::mbox::message_id_ref(&String::from_utf8_lossy(&m.raw)).unwrap())
+            .collect();
+        assert_eq!(keys[0], "(desk) <note1@x");
+        for (key, (_, id)) in keys.iter().zip(&headers) {
+            assert_eq!(searchable_id(key).as_deref(), Some(*id), "{key}");
+        }
+        assert_eq!(
+            searchable_id("note2@x> (later)").as_deref(),
+            Some("note2@x")
+        );
+        assert_eq!(searchable_id("x@y OR from:z"), None);
+        assert_eq!(searchable_id("caf\u{e9}@x"), None);
+        let mut feed = GmailIds {
+            ids: messages
+                .iter()
+                .zip(&headers)
+                .map(|(m, (_, id))| (m.uid, id.to_string()))
+                .collect(),
+            inner: FakeFeed {
+                uidvalidity: 9,
+                messages,
+                personal: HashSet::new(),
+                since_window: vec![],
+            },
+        };
+        let cursor = GmailCursor {
+            uidvalidity: 9,
+            last_uid: 5000,
+        };
+        // archived at uids 10… under the old numbering
+        let also: Vec<Archived> = keys
+            .iter()
+            .zip(10..)
+            .map(|(key, uid)| Archived {
+                uid: Some(uid),
+                message_id: key.clone(),
+            })
+            .collect();
+        let now = current_labels(&mut feed, cursor, 30, 10, &also).unwrap();
+        let expected: Vec<CurrentLabels> = keys
+            .iter()
+            .zip(4000..)
+            .map(|(key, uid)| CurrentLabels {
+                uid,
+                labels: vec!["Starred".into()],
+                message_id: Some(key.clone()),
+            })
+            .collect();
+        assert_eq!(now, expected);
+    }
+
+    /// A message Gmail can't answer about is left out of a re-read, not the
+    /// rest of its batch or the re-read itself; and the category search asks
+    /// only for the UIDs read, however far apart.
+    #[test]
+    fn test_one_unreadable_message_leaves_the_rest_of_the_reread() {
+        let mut feed = Faulty {
+            inner: FakeFeed {
+                uidvalidity: 7,
+                messages: vec![msg(3, &[]), msg(4, &["Starred"]), msg(2_000_000, &[]), {
+                    let mut gone = msg(50, &[]);
+                    gone.uid = 60;
+                    gone
+                }],
+                personal: HashSet::from([3, 500, 2_000_000]),
+                since_window: vec![],
+            },
+            broken: HashSet::from([4]),
+            broken_ids: HashSet::from(["m7@x".to_string()]),
+            asked: Vec::new(),
+        };
+        let cursor = GmailCursor {
+            uidvalidity: 7,
+            last_uid: 3_000_000,
+        };
+        let archived = |uid: u32, id: u32| Archived {
+            uid: Some(uid),
+            message_id: format!("m{id}@x"),
+        };
+        let now = current_labels(
+            &mut feed,
+            cursor,
+            30,
+            10,
+            // m50 left uid 50 for 60 (found by its id, beside the
+            // unsearchable m7); m7 is gone and its search fails
+            &[
+                archived(3, 3),
+                archived(4, 4),
+                archived(2_000_000, 2_000_000),
+                archived(50, 50),
+                archived(70, 7),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            now.iter()
+                .map(|c| (c.uid, c.labels.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (3, vec!["Category Personal".to_string()]),
+                (2_000_000, vec!["Category Personal".to_string()]),
+                (60, vec![]),
+            ]
+        );
+        assert!(
+            feed.asked.iter().all(|uids| uids
+                .iter()
+                .all(|u| [3, 4, 50, 60, 70, 2_000_000].contains(u))),
+            "{:?}",
+            feed.asked
+        );
+        assert_eq!(uid_set(&[9, 3, 4, 5, 9, 12, 13]), "3:5,9,12:13");
+        // the connection failing still fails the re-read
+        struct Dropped(FakeFeed);
+        impl MailFeed for Dropped {
+            fn select_all_mail(&mut self) -> Result<Selected> {
+                self.0.select_all_mail()
+            }
+            fn uids_after(&mut self, last_uid: u32) -> Result<Vec<u32>> {
+                self.0.uids_after(last_uid)
+            }
+            fn uids_since_days(&mut self, days: u32) -> Result<Vec<u32>> {
+                self.0.uids_since_days(days)
+            }
+            fn uids_in_category(&mut self, uids: &[u32], c: &str) -> Result<HashSet<u32>> {
+                self.0.uids_in_category(uids, c)
+            }
+            fn fetch_batch(&mut self, uids: &[u32]) -> Result<Vec<PulledMessage>> {
+                self.0.fetch_batch(uids)
+            }
+            fn labels_of(&mut self, _uids: &[u32]) -> Result<Vec<CurrentLabels>> {
+                Err(imap::Error::ConnectionLost.into())
+            }
+            fn uids_of(&mut self, ids: &[String]) -> Result<Vec<u32>> {
+                self.0.uids_of(ids)
+            }
+        }
+        let mut dropped = Dropped(FakeFeed {
+            uidvalidity: 7,
+            messages: vec![msg(3, &[])],
+            personal: HashSet::new(),
+            since_window: vec![],
+        });
+        assert!(current_labels(&mut dropped, cursor, 30, 10, &[archived(3, 3)]).is_err());
     }
 
     fn msg(uid: u32, labels: &[&str]) -> PulledMessage {
@@ -1610,7 +2009,7 @@ mod tests {
         }
     }
 
-    /// Only a `NO` reply refusing the credentials stops a mailbox; a dropped
+    /// A `NO` reply to LOGIN stops a mailbox, however it is worded; a dropped
     /// connection, a temporary refusal or a connection limit don't.
     #[test]
     fn test_only_a_refused_password_is_an_auth_failure() {
@@ -1619,6 +2018,10 @@ mod tests {
             "NO [AUTHENTICATIONFAILED] Invalid credentials (Failure)",
             "NO [ALERT] Application-specific password required: https://support.google.com/accounts/answer/185833 (Failure)",
             "NO [WEBALERT https://accounts.google.com/x] Web login required.",
+            "NO [ALERT] Please log in via your web browser: https://support.google.com/mail/accounts/answer/78754 (Failure)",
+            "NO [ALERT] Your account is not enabled for IMAP use. (Failure)",
+            "NO [AUTHENTICATIONFAILED] Lookup failed (Failure)",
+            "NO LOGIN failed.",
         ] {
             let err = sign_in_to(test_server(true, Answer::Reply(refused)), io);
             assert!(is_auth_failure(&err), "{refused}: {err:#}");
@@ -1627,6 +2030,8 @@ mod tests {
         for passing in [
             "NO [UNAVAILABLE] Temporary System Problem. Try again later (Failure)",
             "NO [ALERT] Too many simultaneous connections. (Failure)",
+            "NO [ALERT] Account exceeded command or bandwidth limits. (Failure)",
+            "NO [INUSE] Mailbox in use",
             "BAD [CLIENTBUG] Invalid command",
         ] {
             let err = sign_in_to(test_server(true, Answer::Reply(passing)), io);

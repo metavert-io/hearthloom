@@ -65,6 +65,25 @@ pub(crate) fn text_matches(rules: &[PrivacyRule], text: &str) -> bool {
     })
 }
 
+/// `Store::privacy_rules_match` over rules already read (`list_privacy_rules`)
+/// — for a caller checking many items against the same rules.
+pub fn rules_match_text(rules: &[PrivacyRule], text: &str) -> bool {
+    if rules.is_empty() {
+        return false;
+    }
+    let as_terms: Vec<PrivacyRule> = rules
+        .iter()
+        .cloned()
+        .map(|mut r| {
+            if matches!(r.kind.as_str(), "entity" | "place") {
+                r.kind = "term".into();
+            }
+            r
+        })
+        .collect();
+    text_matches(&as_terms, text)
+}
+
 /// Load all rules on an open connection/transaction (ingest runs inside
 /// the batch transaction and cannot re-lock the store).
 pub(crate) fn load_rules(conn: &rusqlite::Connection) -> Result<Vec<PrivacyRule>> {
@@ -247,19 +266,7 @@ impl Store {
             let conn = self.lock();
             load_rules(&conn)?
         };
-        if rules.is_empty() {
-            return Ok(false);
-        }
-        let as_terms: Vec<PrivacyRule> = rules
-            .into_iter()
-            .map(|mut r| {
-                if matches!(r.kind.as_str(), "entity" | "place") {
-                    r.kind = "term".into();
-                }
-                r
-            })
-            .collect();
-        Ok(text_matches(&as_terms, text))
+        Ok(rules_match_text(&rules, text))
     }
 
     /// Which of these source refs became a memory that is labelled private
@@ -344,6 +351,30 @@ impl Store {
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    /// The bases of the corrected copies (`<base>#repair:<hash>`, owner
+    /// repairs) labelled private, under any source. A node can hold a
+    /// private corrected copy of a message whose original never reached it,
+    /// and a lookup of the message's own key would miss it. Read by the
+    /// ref's shape alone: matching more is the safe direction for a privacy
+    /// check. Reads only the private rows (the v41 private-id index).
+    pub fn private_replacement_bases(&self) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT source_ref FROM episodes /* all-episodes: a private label holds even on a replaced memory */
+             WHERE id IN (SELECT id FROM episodes /* all-episodes: the private-id set */ WHERE scope = 'private')
+               AND instr(source_ref, '{}') > 0",
+            super::REPAIR_MARK
+        ))?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            if let Some(base) = super::replacement_base(&r?) {
+                out.push(base.to_string());
+            }
+        }
+        Ok(out)
     }
 
     /// Whether any memory labelled private, under any source, has a source

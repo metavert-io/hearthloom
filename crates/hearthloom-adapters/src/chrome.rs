@@ -333,7 +333,7 @@ fn ingest_profile(
         let mut body = format!("browsing ({name}) on {date}: {} visits\n\n", visits.len());
         let mut domains: BTreeMap<String, usize> = BTreeMap::new();
         let mut last_title = String::new();
-        let mut lines = String::new();
+        let mut lines = Vec::new();
         for (unix, url, title) in &visits {
             *domains.entry(domain_of(url)).or_default() += 1;
             if *title == last_title {
@@ -343,12 +343,14 @@ fn ingest_profile(
             let Some(dt) = DateTime::from_timestamp(*unix, 0) else {
                 continue;
             };
-            let line = format!("[{}] {} — {}\n", dt.format("%H:%M"), title, domain_of(url));
-            if body.len() + lines.len() + line.len() > BODY_CAP {
-                lines.push_str("[truncated]\n");
-                break;
-            }
-            lines.push_str(&line);
+            // a title is the page's words: on one line, so none reads as
+            // a visit of its own
+            lines.push(format!(
+                "[{}] {} — {}\n",
+                dt.format("%H:%M"),
+                hearthloom_core::one_line(title),
+                domain_of(url)
+            ));
         }
         let mut top: Vec<(String, usize)> = domains.into_iter().collect();
         top.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
@@ -358,7 +360,11 @@ fn ingest_profile(
             .map(|(d, n)| format!("{d} ({n})"))
             .collect();
         body.push_str(&format!("top sites: {}\n\n", top_list.join(", ")));
-        body.push_str(&lines);
+        // a long day keeps its first and its latest visits: a fuller read
+        // shows what it gained
+        let body = crate::fit_entries(body, &lines, BODY_CAP, |n| {
+            format!("[{n} lines not shown]\n")
+        });
 
         let first_unix = visits[0].0;
         drafts.push(EpisodeDraft {
@@ -391,14 +397,15 @@ fn ingest_profile(
 }
 
 fn domain_of(url: &str) -> String {
-    url.split("://")
-        .nth(1)
-        .unwrap_or(url)
-        .split('/')
-        .next()
-        .unwrap_or(url)
-        .trim_start_matches("www.")
-        .to_string()
+    hearthloom_core::one_line(
+        url.split("://")
+            .nth(1)
+            .unwrap_or(url)
+            .split('/')
+            .next()
+            .unwrap_or(url)
+            .trim_start_matches("www."),
+    )
 }
 
 #[cfg(test)]
@@ -580,6 +587,58 @@ mod tests {
             hearthloom_core::store::chrome_named_ref(&d.source_ref, &d.body).as_deref(),
             Some("Work) on 2026-03-15: x#2026-03-15")
         );
+    }
+
+    /// A long day keeps its first and its latest visits, so a read with
+    /// more shows what it gained and holds the read before it; a page's
+    /// title stays on one line.
+    #[test]
+    fn test_a_long_day_keeps_its_latest_visits_and_titles_on_one_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let profile = tmp.path().join("Default");
+        let conn = profile_with(
+            &profile,
+            r#"{"profile": {"name": "Work", "creation_time": "13300000000000001"}}"#,
+            &[],
+        );
+        let start = unix("2026-03-15T06:00:00Z");
+        let add = |id: i64, title: &str| {
+            conn.execute(
+                "INSERT INTO urls VALUES (?1, ?2, ?3)",
+                rusqlite::params![id + 1, format!("https://example.com/{id}"), title],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO visits (url, visit_time) VALUES (?1, (?2 + 11644473600) * 1000000)",
+                rusqlite::params![id + 1, start + id * 60],
+            )
+            .unwrap();
+        };
+        let words = "x".repeat(200);
+        for id in 1..=400 {
+            add(id, &format!("page {id} {words}"));
+        }
+        add(401, "Split\n[23:59] Not a visit — example.org");
+        let read = || ingest_at(&profile, None, "2026-03-20T00:00:00Z".parse().unwrap()).unwrap();
+        let before = read();
+        let body = &before[0].body;
+        assert!(body.len() <= BODY_CAP);
+        assert!(body.contains("page 1 ") && body.contains("page 400 "));
+        assert!(body.contains(" lines not shown]\n"));
+        assert!(body.contains("] Split [23:59] Not a visit — example.org — example.com\n"));
+        assert!(!body.lines().any(|l| l.starts_with("[23:59]")));
+
+        add(402, "the latest page");
+        let after = read();
+        assert!(after[0].body.contains("the latest page"));
+        assert_eq!(
+            hearthloom_core::store::growing_items("chrome", &after[0].body),
+            Some(402)
+        );
+        assert!(hearthloom_core::store::chrome_day_holds(
+            &after[0].body,
+            body
+        ));
     }
 
     /// A day's ref names its profile, not its shown name: profiles shown

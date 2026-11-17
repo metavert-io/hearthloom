@@ -1068,7 +1068,13 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
             .store
             .consolidation_state("peer_repair_push_ts")?
             .unwrap_or_default();
-        if let Ok(batch) = state.store.repairs_sync_export(&since) {
+        // store work on the blocking pool (the handler contract)
+        let (store, from) = (state.store.clone(), since.clone());
+        let page = tokio::task::spawn_blocking(move || store.repairs_sync_export(&from))
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .and_then(|page| page);
+        if let Ok(batch) = page {
             let next = batch
                 .get("next")
                 .and_then(|n| n.as_str())
@@ -1106,9 +1112,12 @@ async fn sync_inner(state: &AppState) -> Result<Value> {
         {
             if res.status().is_success() {
                 if let Ok(batch) = res.json::<Value>().await {
-                    let (changed, cursor) = take_repairs_page(&batch, &since_pull, |b| {
-                        state.store.repairs_sync_apply(b)
-                    });
+                    let (store, since) = (state.store.clone(), since_pull.clone());
+                    let (changed, cursor) = tokio::task::spawn_blocking(move || {
+                        take_repairs_page(&batch, &since, |b| store.repairs_sync_apply(b))
+                    })
+                    .await
+                    .unwrap_or_default();
                     if !changed.is_empty() {
                         crate::repair::catch_up(state).await;
                     }

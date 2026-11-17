@@ -14,7 +14,7 @@
 //! `is_do_not_remember` → scope `private` (the vault hides it, and it never
 //! reaches a cloud LLM), overriding any passed scope.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
@@ -32,7 +32,9 @@ const BODY_CAP: usize = 64 * 1024;
 /// Ingest an extracted ChatGPT export directory.
 ///
 /// `media_out`, when set, is the base directory under which referenced image
-/// assets are copied (`<media_out>/<conversation_id>/<original-name>`); `None`
+/// assets are copied (`<media_out>/<conversation_id>/<original-name>`, or
+/// `<stem>-<file-id>.<ext>` when another image of the conversation would
+/// take the same name — [`names_among`]); `None`
 /// leaves an `[image: …]` placeholder without copying (used by the pure unit
 /// tests and any caller without a home to write into).
 pub fn ingest(
@@ -110,8 +112,16 @@ pub fn read_export(
             continue;
         };
         for conversation in list {
+            let names = image_names(conversation, &asset_names);
             let mut preserve = |pointer: &str, conversation_id: &str| {
-                preserve_asset(pointer, conversation_id, dir, media_out, &asset_names)
+                preserve_asset(
+                    pointer,
+                    conversation_id,
+                    dir,
+                    media_out,
+                    &asset_names,
+                    &names,
+                )
             };
             let read = match read_chatgpt(conversation, Some(&mut preserve)) {
                 Ok(read) => read,
@@ -203,10 +213,18 @@ pub fn read_routes(dir: &Path, media_out: Option<&Path>) -> Result<Vec<Conversat
         let convs: Value =
             serde_json::from_str(&raw).with_context(|| format!("parsing {}", chunk.display()))?;
         for conversation in convs.as_array().into_iter().flatten() {
+            let names = image_names(conversation, &asset_names);
             let mut images = Vec::new();
             let mut name = |pointer: &str, conversation_id: &str| {
                 images.push(pointer.to_string());
-                match plan_asset(pointer, conversation_id, dir, media_out, &asset_names)? {
+                match plan_asset(
+                    pointer,
+                    conversation_id,
+                    dir,
+                    media_out,
+                    &asset_names,
+                    &names,
+                )? {
                     AssetPlan::Named(name) | AssetPlan::Copy { name, .. } => Some(name),
                 }
             };
@@ -219,6 +237,7 @@ pub fn read_routes(dir: &Path, media_out: Option<&Path>) -> Result<Vec<Conversat
                 dir,
                 media_out,
                 &asset_names,
+                &names,
             )? {
                 AssetPlan::Named(name) | AssetPlan::Copy { name, .. } => Some(name),
             };
@@ -260,12 +279,121 @@ pub fn copy_images(
             .ok()
             .and_then(|raw| serde_json::from_str::<HashMap<String, String>>(&raw).ok())
             .unwrap_or_default();
+    let names = names_among(pointers, &asset_names);
     pointers
         .iter()
         .filter(|p| {
-            preserve_asset(p, conversation_id, dir, Some(media_out), &asset_names).is_some()
+            preserve_asset(
+                p,
+                conversation_id,
+                dir,
+                Some(media_out),
+                &asset_names,
+                &names,
+            )
+            .is_some()
         })
         .count()
+}
+
+/// The name each image of this conversation's transcript is kept under,
+/// by blob id ([`names_among`]) — so one image never takes another's
+/// place. Read from the images the transcript names — the branch the
+/// conversation ended on — as [`copy_images`] is given them.
+fn image_names(conversation: &Value, asset_names: &HashMap<String, String>) -> ImageNames {
+    let mut pointers = Vec::new();
+    let mut collect = |pointer: &str, _: &str| {
+        pointers.push(pointer.to_string());
+        None
+    };
+    let _ = read_chatgpt(conversation, Some(&mut collect));
+    names_among(&pointers, asset_names)
+}
+
+/// Blob id → the file name its image is kept under.
+type ImageNames = HashMap<String, String>;
+
+/// The names these image pointers' blobs are kept under, no two the same:
+/// each its original name ([`asset_name`]); where two would take one name
+/// (two pasted screenshots both called `image.png`, or `image-file-a.png`
+/// beside the first of them once named by its blob), each of them is named
+/// by its blob as well, and where that still meets another, by the blob's
+/// own `<id>.dat` — distinct for distinct blobs. Names that differ only in
+/// case or Unicode form are one name ([`disk_key`]): a Mac's disk keeps them
+/// as one file.
+fn names_among(pointers: &[String], asset_names: &HashMap<String, String>) -> ImageNames {
+    let ids: HashSet<&str> = pointers
+        .iter()
+        .filter_map(|p| asset_id(p))
+        .filter(|id| plain_file_name(&format!("{id}.dat")))
+        .collect();
+    let mut level: HashMap<&str, u8> = ids.iter().map(|id| (*id, 0)).collect();
+    loop {
+        let names: HashMap<&str, String> = ids
+            .iter()
+            .map(|id| (*id, asset_name(id, asset_names, level[id])))
+            .collect();
+        let mut claims: HashMap<String, Vec<&str>> = HashMap::new();
+        for (id, name) in &names {
+            claims.entry(disk_key(name)).or_default().push(id);
+        }
+        let raise: Vec<&str> = claims
+            .values()
+            .filter(|claimants| claimants.len() > 1)
+            .flatten()
+            .copied()
+            .filter(|id| level[id] < 2)
+            .collect();
+        if raise.is_empty() {
+            return names
+                .into_iter()
+                .map(|(id, name)| (id.to_string(), name))
+                .collect();
+        }
+        for id in raise {
+            *level.entry(id).or_default() += 1;
+        }
+    }
+}
+
+/// What a disk that ignores case and Unicode form (a Mac's, by default)
+/// makes of `name`: `CAFÉ.png` and `café.png` written as `e` plus a
+/// combining accent are one file there. Decomposed, each character folded
+/// through its upper and then its lower case (`ß` and `SS` meet), decomposed
+/// again — folding more than a disk does only names an image by its blob.
+fn disk_key(name: &str) -> String {
+    let nfd = icu_normalizer::DecomposingNormalizerBorrowed::new_nfd();
+    let folded: String = nfd
+        .normalize(name)
+        .chars()
+        .flat_map(char::to_uppercase)
+        .flat_map(char::to_lowercase)
+        .collect();
+    nfd.normalize(&folded).into_owned()
+}
+
+/// The file name blob `id`'s image takes at `level`: 0 its original name,
+/// 1 that name with the blob's id in it ([`named_by_blob`]), 2 the blob's
+/// own `<id>.dat` — also what a missing or unusable original name gives.
+fn asset_name(id: &str, asset_names: &HashMap<String, String>, level: u8) -> String {
+    let dat = format!("{id}.dat");
+    let original = asset_names.get(&dat).filter(|name| plain_file_name(name));
+    match (original, level) {
+        (Some(name), 0) => name.clone(),
+        (Some(name), 1) => Some(named_by_blob(name, id))
+            .filter(|name| plain_file_name(name))
+            .unwrap_or(dat),
+        _ => dat,
+    }
+}
+
+/// `name` with the blob's id before its extension: `image.png` of
+/// `file-B` is `image-file-B.png`.
+fn named_by_blob(name: &str, id: &str) -> String {
+    match name.rsplit_once('.').filter(|(stem, _)| !stem.is_empty()) {
+        Some((stem, ext)) => format!("{stem}-{id}.{ext}"),
+        None => format!("{name}-{id}"),
+    }
 }
 
 /// A chunk of the multi-chunk export (`conversations-000.json`, …).
@@ -333,17 +461,20 @@ fn plain_file_name(name: &str) -> bool {
 /// The export names both the folder (its conversation id) and the file
 /// (its asset map), so both are checked to be single plain names inside
 /// `media_out`; an original name that isn't one falls back to the blob's
-/// own `file-<id>.dat`. Only a regular file is copied, only into a real
-/// folder (not a link to one elsewhere), and nothing already at the target
-/// name (a file or a link) is written through.
+/// own `file-<id>.dat`, and an image of the conversation is kept under the
+/// name `names` gives it ([`names_among`]: no two the same; one not there
+/// under its original name). Only a regular file is copied, only into a
+/// real folder (not a link to one elsewhere), and nothing already at the
+/// target name (a file or a link) is written through.
 fn preserve_asset(
     pointer: &str,
     conversation_id: &str,
     dir: &Path,
     media_out: Option<&Path>,
     asset_names: &HashMap<String, String>,
+    names: &ImageNames,
 ) -> Option<String> {
-    match plan_asset(pointer, conversation_id, dir, media_out, asset_names)? {
+    match plan_asset(pointer, conversation_id, dir, media_out, asset_names, names)? {
         AssetPlan::Named(name) => Some(name), // no home to copy into — just name it
         AssetPlan::Copy {
             src,
@@ -373,17 +504,17 @@ fn plan_asset(
     dir: &Path,
     media_out: Option<&Path>,
     asset_names: &HashMap<String, String>,
+    names: &ImageNames,
 ) -> Option<AssetPlan> {
     let id = asset_id(pointer)?;
     let dat = format!("{id}.dat");
     if !plain_file_name(&dat) {
         return None;
     }
-    let original = asset_names
-        .get(&dat)
-        .filter(|name| plain_file_name(name))
+    let original = names
+        .get(id)
         .cloned()
-        .unwrap_or_else(|| dat.clone());
+        .unwrap_or_else(|| asset_name(id, asset_names, 0));
     let Some(base) = media_out else {
         return Some(AssetPlan::Named(original));
     };
@@ -941,6 +1072,202 @@ mod tests {
     fn test_empty_dir_errors() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(ingest(tmp.path(), None, None).is_err());
+    }
+
+    /// Two images of one conversation with the same original name are
+    /// both kept, each under its own name, and the transcript names each
+    /// one — on the import and when the images are copied again; an image
+    /// whose name no other of the conversation's has keeps it.
+    #[test]
+    fn test_images_sharing_a_name_in_one_conversation_are_each_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("export");
+        std::fs::create_dir_all(&dir).unwrap();
+        write(
+            &dir,
+            "conversation_asset_file_names.json",
+            r#"{"file-a.dat":"image.png","file-b.dat":"image.png","file-c.dat":"chart.png"}"#,
+        );
+        for (id, bytes) in [
+            ("file-a", "first"),
+            ("file-b", "second"),
+            ("file-c", "third"),
+        ] {
+            write(&dir, &format!("{id}.dat"), bytes);
+        }
+        let turn = |id: &str| {
+            serde_json::json!({"message": {"author": {"role": "user"},
+                "content": {"content_type": "multimodal_text", "parts": [
+                    {"content_type": "image_asset_pointer",
+                     "asset_pointer": format!("file-service://{id}")}]}}})
+        };
+        let export = serde_json::json!([{
+            "conversation_id": "c1", "title": "Screens", "create_time": 1720992777.0,
+            "mapping": {"n1": turn("file-a"), "n2": turn("file-b"), "n3": turn("file-c")}
+        }]);
+        write(&dir, "conversations-000.json", &export.to_string());
+
+        let media = tmp.path().join("media");
+        let drafts = ingest(&dir, Some(&media), None).unwrap();
+        let body = &drafts[0].body;
+        for (name, bytes) in [
+            ("image-file-a.png", "first"),
+            ("image-file-b.png", "second"),
+            ("chart.png", "third"),
+        ] {
+            assert!(body.contains(&format!("[image: {name}]")), "{body}");
+            assert_eq!(
+                std::fs::read_to_string(media.join("c1").join(name)).unwrap(),
+                bytes
+            );
+        }
+        // named the same way when only read, and copied again the same way
+        let routes = read_routes(&dir, Some(&media)).unwrap();
+        assert_eq!(routes[0].export.as_ref().unwrap().body, *body);
+        let again = tmp.path().join("again");
+        assert_eq!(copy_images(&dir, &again, "c1", &routes[0].images), 3);
+        for name in ["image-file-a.png", "image-file-b.png", "chart.png"] {
+            assert!(again.join("c1").join(name).is_file(), "{name}");
+        }
+    }
+
+    /// An image whose original name is the one another image of the
+    /// conversation is given by its blob (`image-file-a.png` beside two
+    /// `image.png`s), in any case (a Mac's disk keeps `IMAGE-FILE-A.PNG`
+    /// as the same file), doesn't take that image's place: every image is
+    /// kept under a name of its own, on the import and when copied again.
+    #[test]
+    fn test_an_image_named_like_anothers_blob_name_is_kept_apart() {
+        for third in ["image-file-a.png", "IMAGE-FILE-A.PNG"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().join("export");
+            std::fs::create_dir_all(&dir).unwrap();
+            let asset_names = serde_json::json!({
+                "file-a.dat": "image.png",
+                "file-b.dat": "image.png",
+                "file-c.dat": third,
+            });
+            write(
+                &dir,
+                "conversation_asset_file_names.json",
+                &asset_names.to_string(),
+            );
+            for (id, bytes) in [
+                ("file-a", "first"),
+                ("file-b", "second"),
+                ("file-c", "third"),
+            ] {
+                write(&dir, &format!("{id}.dat"), bytes);
+            }
+            let turn = |id: &str| {
+                serde_json::json!({"message": {"author": {"role": "user"},
+                    "content": {"content_type": "multimodal_text", "parts": [
+                        {"content_type": "image_asset_pointer",
+                         "asset_pointer": format!("file-service://{id}")}]}}})
+            };
+            let export = serde_json::json!([{
+                "conversation_id": "c1", "title": "Screens", "create_time": 1720992777.0,
+                "mapping": {"n1": turn("file-a"), "n2": turn("file-b"), "n3": turn("file-c")}
+            }]);
+            write(&dir, "conversations-000.json", &export.to_string());
+            let named = |body: &str| -> Vec<String> {
+                body.split("[image: ")
+                    .skip(1)
+                    .filter_map(|rest| rest.split_once(']'))
+                    .map(|(name, _)| name.to_string())
+                    .collect()
+            };
+
+            let media = tmp.path().join("media");
+            let drafts = ingest(&dir, Some(&media), None).unwrap();
+            let names = named(&drafts[0].body);
+            assert_eq!(names.len(), 3, "{third}: {}", drafts[0].body);
+            // no two of them one file on a disk that ignores case
+            let folded: HashSet<String> = names.iter().map(|name| disk_key(name)).collect();
+            assert_eq!(folded.len(), 3, "{third}: {names:?}");
+            let mut kept: Vec<String> = names
+                .iter()
+                .map(|name| std::fs::read_to_string(media.join("c1").join(name)).unwrap())
+                .collect();
+            kept.sort();
+            assert_eq!(kept, ["first", "second", "third"], "{third}");
+
+            let routes = read_routes(&dir, Some(&media)).unwrap();
+            assert_eq!(routes[0].export.as_ref().unwrap().body, drafts[0].body);
+            let again = tmp.path().join("again");
+            assert_eq!(copy_images(&dir, &again, "c1", &routes[0].images), 3);
+            let mut copied: Vec<String> = names
+                .iter()
+                .map(|name| std::fs::read_to_string(again.join("c1").join(name)).unwrap())
+                .collect();
+            copied.sort();
+            assert_eq!(copied, ["first", "second", "third"], "{third}");
+        }
+    }
+
+    /// Two images whose original names differ only in case and Unicode form
+    /// — `CAFÉ.png` with a precomposed `É`, `café.png` with an `e` and a
+    /// combining accent — are one file on a Mac's disk, so each is named by
+    /// its blob: neither takes the other's place, on the import and when
+    /// copied again.
+    #[test]
+    fn test_images_named_alike_in_another_unicode_form_are_kept_apart() {
+        let composed_upper = "CAF\u{C9}.png";
+        let decomposed_lower = "cafe\u{301}.png";
+        assert_eq!(disk_key(composed_upper), disk_key(decomposed_lower));
+        assert_eq!(disk_key("STRASSE.png"), disk_key("stra\u{DF}e.png"));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("export");
+        std::fs::create_dir_all(&dir).unwrap();
+        let asset_names = serde_json::json!({
+            "file-a.dat": composed_upper,
+            "file-b.dat": decomposed_lower,
+        });
+        write(
+            &dir,
+            "conversation_asset_file_names.json",
+            &asset_names.to_string(),
+        );
+        write(&dir, "file-a.dat", "first");
+        write(&dir, "file-b.dat", "second");
+        let turn = |id: &str| {
+            serde_json::json!({"message": {"author": {"role": "user"},
+                "content": {"content_type": "multimodal_text", "parts": [
+                    {"content_type": "image_asset_pointer",
+                     "asset_pointer": format!("file-service://{id}")}]}}})
+        };
+        let export = serde_json::json!([{
+            "conversation_id": "c1", "title": "Menus", "create_time": 1720992777.0,
+            "mapping": {"n1": turn("file-a"), "n2": turn("file-b")}
+        }]);
+        write(&dir, "conversations-000.json", &export.to_string());
+
+        let media = tmp.path().join("media");
+        let drafts = ingest(&dir, Some(&media), None).unwrap();
+        let body = &drafts[0].body;
+        let expected = [
+            ("CAF\u{C9}-file-a.png", "first"),
+            ("cafe\u{301}-file-b.png", "second"),
+        ];
+        for (name, bytes) in expected {
+            assert!(body.contains(&format!("[image: {name}]")), "{body}");
+            assert_eq!(
+                std::fs::read_to_string(media.join("c1").join(name)).unwrap(),
+                bytes
+            );
+        }
+
+        let routes = read_routes(&dir, Some(&media)).unwrap();
+        assert_eq!(routes[0].export.as_ref().unwrap().body, *body);
+        let again = tmp.path().join("again");
+        assert_eq!(copy_images(&dir, &again, "c1", &routes[0].images), 2);
+        for (name, bytes) in expected {
+            assert_eq!(
+                std::fs::read_to_string(again.join("c1").join(name)).unwrap(),
+                bytes
+            );
+        }
     }
 
     /// A conversation flagged "do not remember" is reported as flagged

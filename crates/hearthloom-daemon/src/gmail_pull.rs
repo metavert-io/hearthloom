@@ -58,7 +58,8 @@ const SWEEP_KEY: &str = "gmail_relabel_row";
 /// list of archive index ids): the ones whose new labels a re-read
 /// recorded, and any whose thread or match didn't record. Written with the
 /// labels, emptied as each is observed — so a pull that stops in between,
-/// or an observation that fails, is finished by the next re-read.
+/// or an observation that fails, is finished by the next pull (before it
+/// connects to Gmail).
 const PENDING_KEY: &str = "gmail_observe_pending";
 /// How often a mailbox's pulled mail has its labels re-read.
 const RELABEL_EVERY_SECS: i64 = 10 * 60;
@@ -95,15 +96,20 @@ fn pull_options() -> PullOptions {
     opts
 }
 
-fn read_cursor(mbox: &std::path::Path) -> Option<GmailCursor> {
-    let raw = crate::mbox_index::meta_get(mbox, CURSOR_KEY)
-        .ok()
-        .flatten()?;
-    let (v, u) = raw.split_once(':')?;
-    Some(GmailCursor {
-        uidvalidity: v.parse().ok()?,
-        last_uid: u.parse().ok()?,
-    })
+/// The pull's cursor. None: none is recorded (or the value isn't one, which
+/// no code writes); an index that can't be read is an error — read as no
+/// cursor, the pull would fetch and append its whole backfill window again.
+fn read_cursor(mbox: &std::path::Path) -> Result<Option<GmailCursor>> {
+    let Some(raw) = crate::mbox_index::meta_get(mbox, CURSOR_KEY)? else {
+        return Ok(None);
+    };
+    Ok((|| {
+        let (v, u) = raw.split_once(':')?;
+        Some(GmailCursor {
+            uidvalidity: v.parse().ok()?,
+            last_uid: u.parse().ok()?,
+        })
+    })())
 }
 
 /// One pull at a time per mailbox: the consolidation pass and the
@@ -201,11 +207,23 @@ fn pull_once_unserialized(state: &AppState, mb: &Mailbox) -> Result<(usize, usiz
     // small) full index before incremental appends can extend it; so does
     // one that keys messages by an older rule than the label re-read looks
     // them up by (`ids_current`) — once.
-    if crate::mbox_index::is_stale(&mbox_path) || !crate::mbox_index::ids_current(&mbox_path) {
+    if crate::mbox_index::is_stale(&mbox_path) || !crate::mbox_index::ids_current(&mbox_path)? {
         crate::mbox_index::build(&mbox_path)?;
     }
-    let cursor = read_cursor(&mbox_path);
+    let cursor = read_cursor(&mbox_path)?;
 
+    // The mail already waiting to be observed is read from the archive's
+    // index: it doesn't wait on Gmail answering, or on the new mail.
+    if let Err(err) = pending_observations(&mbox_path)
+        .and_then(|pending| observe_pending(state, user, &mine, &mbox_path, pending))
+    {
+        tracing::warn!("gmail pull: {}: mail still to observe: {err:#}", mb.address);
+    }
+
+    #[cfg(test)]
+    if CONNECT_FAILS.with(|fails| fails.get()) {
+        anyhow::bail!("connection refused");
+    }
     let mut feed = ImapFeed::connect(user, password)?;
     let mut file = std::fs::OpenOptions::new().append(true).open(&mbox_path)?;
     let appended_from = file.metadata()?.len();
@@ -220,19 +238,12 @@ fn pull_once_unserialized(state: &AppState, mb: &Mailbox) -> Result<(usize, usiz
     let outcome = gmail_imap::pull_new(&mut feed, cursor, &pull_options(), |msgs| {
         for m in &msgs {
             file.write_all(&gmail_imap::mbox_record(m))?;
-            if let Some(s) =
-                crate::mail_triage::seen_with(state, &privacy, user, &mine, &m.labels, &m.raw)
+            if let Some(s) = crate::mail_triage::seen_with(&privacy, user, &mine, &m.labels, &m.raw)
             {
                 seen.push(s);
             }
-            match hearthloom_adapters::mbox::draft_from_bytes_filtered(
-                &gmail_imap::message_bytes(m),
-                &filter,
-                None, // scope stays inferred (identity rules > personal)
-            ) {
-                Ok(Some(draft)) => drafts.push(draft),
-                Ok(None) => {}
-                Err(err) => tracing::warn!("gmail pull: skipping uid {}: {err}", m.uid),
+            if let Some(draft) = pulled_draft(&privacy, &filter, m)? {
+                drafts.push(draft);
             }
         }
         Ok(())
@@ -247,7 +258,7 @@ fn pull_once_unserialized(state: &AppState, mb: &Mailbox) -> Result<(usize, usiz
     let mut episodes_new = apply_drafts(state, &drafts)?;
 
     // threads after the memories (a replay observes nothing twice); one
-    // not wholly recorded is finished by the next label re-read
+    // not wholly recorded is finished by the next pull
     let failed = crate::mail_triage::observe(state, &seen);
     let unfinished: Vec<String> = failed
         .iter()
@@ -270,7 +281,13 @@ fn pull_once_unserialized(state: &AppState, mb: &Mailbox) -> Result<(usize, usiz
     // Labels of the mail pulled before this run, once the backlog is in.
     // A failure here doesn't fail the pull: the new mail and the cursor are
     // saved, and the next re-read tries again.
-    if cursor.is_some() && !outcome.more && relabel_due(&mbox_path) {
+    // (an index that can't say when the last re-read was: not now)
+    let due = || {
+        relabel_due(&mbox_path)
+            .inspect_err(|err| tracing::warn!("gmail pull: {}: {err:#}", mb.address))
+            .unwrap_or(false)
+    };
+    if cursor.is_some() && !outcome.more && due() {
         let pulled = GmailCursor {
             uidvalidity: outcome.uidvalidity,
             last_uid: outcome.last_uid,
@@ -333,31 +350,67 @@ fn finish(
     Ok((outcome.fetched, episodes_new, outcome.more))
 }
 
-/// Materialize drafts in small store-lock holds; the number new.
+/// A pulled message's memory, when its labels pass `filter`. Its scope
+/// stays inferred (identity rules > personal) unless a privacy rule
+/// matches the whole message (`mbox_text::rules_match_message`): the draft
+/// is cut, and a rule matching only what was cut makes it private. An
+/// unreadable message is skipped; rules that can't be read are an error.
+fn pulled_draft(
+    privacy: &crate::virtual_source::MailPrivacy,
+    filter: &LabelFilter,
+    m: &PulledMessage,
+) -> Result<Option<EpisodeDraft>> {
+    let bytes = gmail_imap::message_bytes(m);
+    let mut draft = match hearthloom_adapters::mbox::draft_from_bytes_filtered(&bytes, filter, None)
+    {
+        Ok(Some(draft)) => draft,
+        Ok(None) => return Ok(None),
+        Err(err) => {
+            tracing::warn!("gmail pull: skipping uid {}: {err}", m.uid);
+            return Ok(None);
+        }
+    };
+    if privacy.rules_match_message(&bytes)? {
+        draft.scope = Some("private".into());
+    }
+    Ok(Some(draft))
+}
+
+/// Materialize drafts in small store-lock holds; the number new. A draft
+/// read as private (a rule matches the whole message, or it links to more
+/// hosts than the stored text holds) lands private, but leaves a copy
+/// stored before under its Message-ID as it is: that label comes from the
+/// arriving message's own content, which can sit where the stored text
+/// doesn't reach (past the cut, in a part or header it leaves out), so the
+/// stored copy can't be shown to be the same message — other mail under
+/// that Message-ID reads the same there. The owner's other nodes still
+/// hear of copies the apply itself moved (`local_import::vault_stored_copies`).
 fn apply_drafts(state: &AppState, drafts: &[EpisodeDraft]) -> Result<usize> {
+    let actor = Actor::new("adapter:gmail-imap");
     let mut new = 0usize;
     for chunk in drafts.chunks(APPLY_CHUNK) {
         let report = state.store.apply_batch(
             &state.home,
             &IngestBatch {
-                actor: "adapter:gmail-imap".into(),
+                actor: actor.actor.clone(),
                 session_id: None,
                 episodes: chunk.to_vec(),
             },
         )?;
         new += report.episodes_new;
+        crate::local_import::vault_stored_copies(state, &actor, &[], &[], report.private_copies)?;
         // Let parked HTTP handlers through between holds.
         std::thread::sleep(std::time::Duration::from_millis(60));
     }
     Ok(new)
 }
 
-fn relabel_due(mbox: &Path) -> bool {
-    crate::mbox_index::meta_get(mbox, RELABEL_KEY)
-        .ok()
-        .flatten()
+/// Whether the labels are due a re-read: none recorded yet, or the last
+/// one long enough ago. An index that can't be read is an error.
+fn relabel_due(mbox: &Path) -> Result<bool> {
+    Ok(crate::mbox_index::meta_get(mbox, RELABEL_KEY)?
         .and_then(|at| at.parse::<i64>().ok())
-        .is_none_or(|at| chrono::Utc::now().timestamp() - at >= RELABEL_EVERY_SECS)
+        .is_none_or(|at| chrono::Utc::now().timestamp() - at >= RELABEL_EVERY_SECS))
 }
 
 /// What a re-read of labels found.
@@ -390,7 +443,8 @@ fn relabel(
 ) -> Result<(usize, usize)> {
     let mut gained = Vec::new();
     let mut gained_keys = Vec::new();
-    let plan = relabel_plan(feed, mbox, pulled, limits, |id, _, raw| {
+    let rules = state.store.list_privacy_rules()?;
+    let plan = relabel_plan(feed, mbox, pulled, limits, &rules, |id, _, raw| {
         gained.push(id.to_string());
         gained_keys.extend(crate::mail_triage::message_keys(raw));
     })?;
@@ -427,6 +481,23 @@ thread_local! {
     /// A test's busy index: the list of messages still to observe can't be
     /// read.
     static PENDING_UNREADABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// A test's busy index: where the re-read's stretch starts can't be read.
+    static SWEEP_UNREADABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// A test's Gmail out of reach: a pull's connection fails.
+    static CONNECT_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The archive row the next re-read's stretch starts after (0: from the
+/// beginning). An index that can't be read is an error: read as no
+/// position, the stretch would start over from the archive's beginning.
+fn sweep_position(mbox: &Path) -> Result<i64> {
+    #[cfg(test)]
+    if SWEEP_UNREADABLE.with(|busy| busy.get()) {
+        anyhow::bail!("database is locked");
+    }
+    Ok(crate::mbox_index::meta_get(mbox, SWEEP_KEY)?
+        .and_then(|row| row.parse::<i64>().ok())
+        .unwrap_or(0))
 }
 
 /// The messages still to be observed (`PENDING_KEY`). An index that can't
@@ -447,6 +518,20 @@ fn pending_observations(mbox: &Path) -> Result<Vec<String>> {
         );
         Vec::new()
     }))
+}
+
+/// Add messages (archive index ids) to a mailbox's list still to be
+/// observed, taking turns with its pull — which reads and rewrites the
+/// list — so neither loses the other's. The next pull observes them.
+pub(crate) fn keep_pending(mb: &Mailbox, mbox: &Path, ids: Vec<String>) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let lock = pull_lock(&mb.id);
+    let _turn = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut pending = pending_observations(mbox)?;
+    merge_pending(&mut pending, ids);
+    crate::mbox_index::meta_set(mbox, PENDING_KEY, &serde_json::to_string(&pending)?)
 }
 
 fn merge_pending(pending: &mut Vec<String>, more: Vec<String>) {
@@ -508,9 +593,7 @@ fn observe_pending(
             labels: labels.clone(),
             raw: archived,
         });
-        if let Some(s) =
-            crate::mail_triage::seen_with(state, &privacy, account, mine, &labels, &raw)
-        {
+        if let Some(s) = crate::mail_triage::seen_with(&privacy, account, mine, &labels, &raw) {
             seen.push((id, s));
         }
     }
@@ -532,21 +615,20 @@ fn observe_pending(
 /// its Message-ID, so one that exists already is left as it is). Each
 /// message that gained a label is handed to `gained` with its index id,
 /// its labels now and its archived bytes under them. A message without a
-/// Message-ID is left out: nothing finds its archived copy.
+/// Message-ID is left out: nothing finds its archived copy. A draft is
+/// private when one of `rules` matches its whole message
+/// (`mbox_text::rules_match_message`).
 fn relabel_plan(
     feed: &mut dyn MailFeed,
     mbox: &Path,
     pulled: GmailCursor,
     limits: RelabelLimits,
+    rules: &[hearthloom_core::store::PrivacyRule],
     mut gained: impl FnMut(&str, &[String], &[u8]),
 ) -> Result<Relabel> {
     let core = LabelFilter::core_strata();
     let mut plan = Relabel::default();
-    let after = crate::mbox_index::meta_get(mbox, SWEEP_KEY)
-        .ok()
-        .flatten()
-        .and_then(|row| row.parse::<i64>().ok())
-        .unwrap_or(0);
+    let after = sweep_position(mbox)?;
     let stretch = crate::mbox_index::separators_after(mbox, after, limits.sweep)?;
     plan.sweep_next = match stretch.last() {
         Some(last) if stretch.len() >= limits.sweep => last.row,
@@ -606,7 +688,12 @@ fn relabel_plan(
             });
             if newly_core {
                 match hearthloom_adapters::mbox::draft_from_bytes_filtered(&raw, &core, None) {
-                    Ok(Some(draft)) => plan.drafts.push(draft),
+                    Ok(Some(mut draft)) => {
+                        if crate::mbox_text::rules_match_message(rules, &raw) {
+                            draft.scope = Some("private".into());
+                        }
+                        plan.drafts.push(draft)
+                    }
                     Ok(None) => {}
                     Err(err) => tracing::warn!("gmail pull: skipping {id}: {err}"),
                 }
@@ -676,7 +763,7 @@ mod tests {
                 None => self.messages.iter().map(|m| m.uid).collect(),
             })
         }
-        fn uids_in_category(&mut self, _lo: u32, _hi: u32, _c: &str) -> Result<HashSet<u32>> {
+        fn uids_in_category(&mut self, _uids: &[u32], _c: &str) -> Result<HashSet<u32>> {
             Ok(HashSet::new())
         }
         fn fetch_batch(&mut self, uids: &[u32]) -> Result<Vec<PulledMessage>> {
@@ -791,7 +878,7 @@ mod tests {
         assert_eq!(drafts[0].source, "mbox", "archive-convergent identity");
         assert_eq!(drafts[0].source_ref, "live1@x");
         assert_eq!(
-            read_cursor(&mbox),
+            read_cursor(&mbox).unwrap(),
             Some(GmailCursor {
                 uidvalidity: 1,
                 last_uid: 2
@@ -811,11 +898,11 @@ mod tests {
         // Round 2: resume from the cursor — only uid 3 arrives, and the
         // incremental index keeps rounds 1's messages.
         feed.messages.push(message(3, "live3@x", &["Starred"]));
-        let cursor = read_cursor(&mbox);
+        let cursor = read_cursor(&mbox).unwrap();
         let (drafts, outcome) = run(&mut feed, cursor);
         assert_eq!(outcome.fetched, 1);
         assert_eq!(drafts.len(), 1);
-        assert_eq!(read_cursor(&mbox).unwrap().last_uid, 3);
+        assert_eq!(read_cursor(&mbox).unwrap().unwrap().last_uid, 3);
         assert_eq!(
             crate::mbox_index::search(&mbox, "live", 10).unwrap().len(),
             3
@@ -826,7 +913,7 @@ mod tests {
         let n = crate::mbox_index::build(&mbox).unwrap();
         assert_eq!(n, 3);
         assert_eq!(
-            read_cursor(&mbox).unwrap().last_uid,
+            read_cursor(&mbox).unwrap().unwrap().last_uid,
             3,
             "cursor survives rebuild"
         );
@@ -859,7 +946,7 @@ mod tests {
             "a forged Starred/Sent must not make Core mail"
         );
         assert_eq!(
-            read_cursor(&mbox).unwrap().last_uid,
+            read_cursor(&mbox).unwrap().unwrap().last_uid,
             1,
             "the cursor still advances"
         );
@@ -907,7 +994,7 @@ mod tests {
         limits: RelabelLimits,
     ) -> (Relabel, Vec<Vec<String>>) {
         let mut gained = Vec::new();
-        let plan = relabel_plan(feed, mbox, pulled, limits, |_, labels, raw| {
+        let plan = relabel_plan(feed, mbox, pulled, limits, &[], |_, labels, raw| {
             assert!(
                 String::from_utf8_lossy(raw)
                     .starts_with(&format!("X-Gmail-Labels: {}\n", labels.join(", "))),
@@ -938,7 +1025,7 @@ mod tests {
         };
         let (drafts, _) = pull_into(&mbox, &mut feed, None);
         assert_eq!(drafts.len(), 1, "only the Sent message at first");
-        let pulled = read_cursor(&mbox).unwrap();
+        let pulled = read_cursor(&mbox).unwrap().unwrap();
         let relabel_plan = |feed: &mut FakeFeed, mbox: &Path, pulled| {
             let (plan, gained) = plan_for(feed, mbox, pulled, RELABEL);
             (plan, gained.len())
@@ -1009,7 +1096,7 @@ mod tests {
             ..Default::default()
         };
         pull_into(&mbox, &mut feed, None);
-        let pulled = read_cursor(&mbox).unwrap();
+        let pulled = read_cursor(&mbox).unwrap().unwrap();
         // the recent window holds uids 4–7, and only its newest two are
         // read every time
         feed.window = Some(vec![4, 5, 6, 7]);
@@ -1131,6 +1218,329 @@ mod tests {
             .unwrap();
     }
 
+    /// An HTML-only message from Ann to the owner.
+    fn html_mail(uid: u32, msgid: &str, labels: &[&str], html: &str) -> PulledMessage {
+        PulledMessage {
+            uid,
+            labels: labels.iter().map(|s| s.to_string()).collect(),
+            raw: format!(
+                "From: Ann <ann@x.example>\r\nTo: Jon <jon@y.example>\r\nSubject: your visit\r\n\
+                 Date: Mon, 05 Jan 2026 10:{:02}:00 -0400\r\nMessage-ID: <{msgid}>\r\n\
+                 Content-Type: text/html; charset=utf-8\r\n\r\n{html}\r\n",
+                uid % 60
+            )
+            .into_bytes(),
+        }
+    }
+
+    /// HTML whose link names clinic-one.example only past its host, in the
+    /// part the stored text leaves out: an image address of 65,535 bytes
+    /// before it takes the targets' whole room, or the link alone is longer
+    /// than the room.
+    fn links_past_the_room() -> [String; 2] {
+        let prefix = "https://track.example/p?d=";
+        let filler = format!("{prefix}{}", "a".repeat(65_535 - prefix.len()));
+        [
+            format!(
+                "<p><img src=\"{filler}\">Your results are ready: \
+                 <a href=\"https://go.example/r?to=portal.clinic-one.example\">view them</a></p>"
+            ),
+            format!(
+                "<p>Your results are ready: \
+                 <a href=\"https://go.example/r?to=portal.clinic-one.example&d={}\">view them</a></p>",
+                "a".repeat(70_000)
+            ),
+        ]
+    }
+
+    /// A pulled message a privacy rule matches leaves the copy stored before
+    /// under its Message-ID as it is, on arrival and when a label re-read
+    /// makes its memory — also the same message, stored by an earlier
+    /// version without the link the rule names: the stored copy doesn't
+    /// reach what the rule matched, and other mail under that Message-ID
+    /// compares the same there.
+    #[tokio::test]
+    async fn test_a_pulled_message_leaves_the_copy_stored_before_as_it_is() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_at(tmp.path());
+        let html = "<p>Your results are ready: \
+                    <a href=\"https://portal.clinic-one.example/r\">view them</a></p>";
+        let arriving = html_mail(1, "arrive@x", &["Category Personal"], html);
+        let starred = html_mail(2, "starred@x", &["Category Promotions"], html);
+        // the copies an earlier version stored: the text, without the links
+        let earlier: Vec<EpisodeDraft> = [&arriving, &starred]
+            .iter()
+            .map(|m| {
+                let mut draft =
+                    hearthloom_adapters::mbox::draft_with_labels(&m.raw, &["Starred".into()], None)
+                        .unwrap();
+                let links = draft.body.find("\n\nlinks:").unwrap();
+                draft.body.truncate(links);
+                draft
+            })
+            .collect();
+        state
+            .store
+            .apply_batch(
+                &state.home,
+                &IngestBatch {
+                    actor: "adapter:mbox".into(),
+                    session_id: None,
+                    episodes: earlier,
+                },
+            )
+            .unwrap();
+        state
+            .store
+            .add_privacy_rule(&Actor::new("human:test"), "domain", "clinic-one.example")
+            .unwrap();
+        let private = |id: &str| {
+            !state
+                .store
+                .private_source_refs("mbox", &[id.to_string()])
+                .unwrap()
+                .is_empty()
+        };
+        assert!(!private("arrive@x") && !private("starred@x"));
+
+        // on arrival
+        let privacy = crate::virtual_source::MailPrivacy::new(&state);
+        let draft = pulled_draft(&privacy, &LabelFilter::core_strata(), &arriving)
+            .unwrap()
+            .unwrap();
+        assert_eq!(draft.scope.as_deref(), Some("private"));
+        assert_eq!(apply_drafts(&state, &[draft]).unwrap(), 0);
+        assert!(!private("arrive@x"));
+        assert!(!state.bus.touched("privacy.changed"));
+
+        // pulled as Promotions, starred afterwards: the re-read drafts it
+        let mbox = tmp.path().join("gmail-live.mbox");
+        std::fs::File::create(&mbox).unwrap();
+        crate::mbox_index::build(&mbox).unwrap();
+        let mut feed = FakeFeed {
+            messages: vec![starred],
+            ..Default::default()
+        };
+        let (drafts, _) = pull_into(&mbox, &mut feed, None);
+        assert!(drafts.is_empty());
+        feed.messages[0].labels.push("Starred".into());
+        let pulled = read_cursor(&mbox).unwrap().unwrap();
+        let (_, new) = relabel(
+            &state,
+            "jon@y.example",
+            &BTreeSet::new(),
+            &mut feed,
+            &mbox,
+            pulled,
+            RELABEL,
+        )
+        .unwrap();
+        assert_eq!(new, 0);
+        assert!(!private("starred@x"));
+        assert!(!state.bus.touched("privacy.changed"));
+    }
+
+    /// Other mail written under a stored message's Message-ID, read as
+    /// private, leaves that message's memory as it is: the label belongs to
+    /// the message it was read from. The stored one has other text, another
+    /// sender or another date — or reads the same as far as the stored text
+    /// goes: a plain-text message ending in a `links:` block of its own, one
+    /// whose text differs only past the cut, one linking to more hosts than
+    /// the stored text holds (private with no rule at all).
+    #[tokio::test]
+    async fn test_other_mail_under_a_known_message_id_leaves_its_memory_as_it_is() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_at(tmp.path());
+        let personal = &["Category Personal"];
+        let long = "see you at noon\r\n".repeat(5_000);
+        let originals = [
+            mail(1, "known@x", None, personal, "see you at noon"),
+            mail(2, "long@x", None, personal, &long),
+        ];
+        state
+            .store
+            .apply_batch(
+                &state.home,
+                &IngestBatch {
+                    actor: "adapter:gmail-imap".into(),
+                    session_id: None,
+                    episodes: originals
+                        .iter()
+                        .map(|m| {
+                            hearthloom_adapters::mbox::draft_with_labels(
+                                &m.raw,
+                                &["Category Personal".into()],
+                                None,
+                            )
+                            .unwrap()
+                        })
+                        .collect(),
+                },
+            )
+            .unwrap();
+        state
+            .store
+            .add_privacy_rule(&Actor::new("human:test"), "domain", "clinic-one.example")
+            .unwrap();
+        let html = "<p><a href=\"https://portal.clinic-one.example/r\">results</a></p>";
+        let privacy = crate::virtual_source::MailPrivacy::new(&state);
+        let private = |id: &str| {
+            !state
+                .store
+                .private_source_refs("mbox", &[id.to_string()])
+                .unwrap()
+                .is_empty()
+        };
+        let other_sender = PulledMessage {
+            uid: 1,
+            labels: vec!["Category Personal".into()],
+            raw: String::from_utf8(html_mail(1, "known@x", &["Category Personal"], html).raw)
+                .unwrap()
+                .replace("ann@x.example", "mallory@z.example")
+                .into_bytes(),
+        };
+        // Ann's headers, an HTML part showing only the stored text, and
+        // images on more hosts than the stored text has room for
+        let images: String = (0..800)
+            .map(|i| format!("<img src=\"https://h{i:04}{}.example/p\">", "x".repeat(200)))
+            .collect();
+        let many_hosts = PulledMessage {
+            uid: 1,
+            labels: vec!["Category Personal".into()],
+            raw: format!(
+                "From: Ann <ann@x.example>\r\nTo: Jon <jon@y.example>\r\nSubject: plans\r\n\
+                 Date: Mon, 05 Jan 2026 10:01:00 -0400\r\nMessage-ID: <known@x>\r\n\
+                 Content-Type: text/html; charset=utf-8\r\n\r\n<p>see you at noon</p>{images}\r\n"
+            )
+            .into_bytes(),
+        };
+        // Ann's address and date with other text, another sender, Ann's
+        // address on another date; then the stored text followed by a
+        // `links:` block the sender wrote, the stored text's first 64 KB
+        // followed by other text, and the stored text with more hosts than
+        // its room
+        for (case, other, id) in [
+            (
+                "other text",
+                mail(
+                    1,
+                    "known@x",
+                    None,
+                    personal,
+                    "results at https://portal.clinic-one.example/r",
+                ),
+                "known@x",
+            ),
+            ("another sender", other_sender, "known@x"),
+            (
+                "another date",
+                html_mail(2, "known@x", personal, html),
+                "known@x",
+            ),
+            (
+                "a links block in the text",
+                mail(
+                    1,
+                    "known@x",
+                    None,
+                    personal,
+                    "see you at noon\r\n\r\nlinks:\r\nhttps://portal.clinic-one.example/r",
+                ),
+                "known@x",
+            ),
+            (
+                "other text past the cut",
+                mail(
+                    2,
+                    "long@x",
+                    None,
+                    personal,
+                    &format!("{long}results at https://portal.clinic-one.example/r"),
+                ),
+                "long@x",
+            ),
+            ("more hosts than the room", many_hosts, "known@x"),
+        ] {
+            let draft = pulled_draft(&privacy, &LabelFilter::core_strata(), &other)
+                .unwrap()
+                .unwrap();
+            assert_eq!(draft.scope.as_deref(), Some("private"), "{case}");
+            assert_eq!(apply_drafts(&state, &[draft]).unwrap(), 0, "{case}");
+            assert!(!private(id), "{case}");
+        }
+        assert!(!state.bus.touched("privacy.changed"));
+    }
+
+    /// A privacy rule naming a domain only the part of a link the stored
+    /// text leaves out names (it keeps the host) makes the memory private,
+    /// on arrival and when a label re-read makes the memory later.
+    #[tokio::test]
+    async fn test_a_rule_matching_a_link_left_out_of_the_stored_text_makes_the_memory_private() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_at(tmp.path());
+        state
+            .store
+            .add_privacy_rule(&Actor::new("human:test"), "domain", "clinic-one.example")
+            .unwrap();
+        let privacy = crate::virtual_source::MailPrivacy::new(&state);
+        let core = LabelFilter::core_strata();
+        let [filled, too_long] = links_past_the_room();
+        for (uid, html) in [(1, &filled), (2, &too_long)] {
+            let m = html_mail(uid, &format!("cut{uid}@x"), &["Category Personal"], html);
+            let draft = pulled_draft(&privacy, &core, &m).unwrap().unwrap();
+            assert!(!draft.body.contains("clinic-one"), "uid {uid}: left out");
+            assert_eq!(draft.scope.as_deref(), Some("private"), "uid {uid}");
+        }
+        // a message no rule matches keeps its scope inferred
+        let other = html_mail(
+            3,
+            "other3@x",
+            &["Category Personal"],
+            "<p><a href=\"https://other.example/r\">view</a></p>",
+        );
+        assert_eq!(
+            pulled_draft(&privacy, &core, &other)
+                .unwrap()
+                .unwrap()
+                .scope,
+            None
+        );
+
+        // pulled as Promotions, starred afterwards: the re-read makes them
+        let mbox = tmp.path().join("gmail-live.mbox");
+        std::fs::File::create(&mbox).unwrap();
+        crate::mbox_index::build(&mbox).unwrap();
+        let mut feed = FakeFeed {
+            messages: vec![
+                html_mail(4, "cut4@x", &["Category Promotions"], &filled),
+                html_mail(5, "cut5@x", &["Category Promotions"], &too_long),
+            ],
+            ..Default::default()
+        };
+        let (drafts, _) = pull_into(&mbox, &mut feed, None);
+        assert!(drafts.is_empty());
+        for m in &mut feed.messages {
+            m.labels.push("Starred".into());
+        }
+        let pulled = read_cursor(&mbox).unwrap().unwrap();
+        let (_, new) = relabel(
+            &state,
+            "jon@y.example",
+            &BTreeSet::new(),
+            &mut feed,
+            &mbox,
+            pulled,
+            RELABEL,
+        )
+        .unwrap();
+        assert_eq!(new, 2);
+        let refs = ["cut4@x".to_string(), "cut5@x".to_string()];
+        assert_eq!(
+            state.store.private_source_refs("mbox", &refs).unwrap(),
+            HashSet::from(refs.clone())
+        );
+    }
+
     /// A reply in a thread a privacy rule made private never reaches an
     /// ember — on arrival, nor when it gains a label later.
     #[tokio::test]
@@ -1169,7 +1579,7 @@ mod tests {
         assert!(state.store.mail_thread_of_message("b@x").unwrap().is_some());
 
         feed.messages[1].labels.push("Starred".into());
-        let pulled = read_cursor(&mbox).unwrap();
+        let pulled = read_cursor(&mbox).unwrap().unwrap();
         let (changed, _) = relabel(
             &state,
             "jon@y.example",
@@ -1250,7 +1660,7 @@ mod tests {
         for m in &mut feed.messages {
             m.labels.push("Starred".into());
         }
-        let pulled = read_cursor(&mbox).unwrap();
+        let pulled = read_cursor(&mbox).unwrap().unwrap();
         let (changed, new) = relabel(
             &state,
             &mb.address,
@@ -1368,7 +1778,7 @@ mod tests {
             ..Default::default()
         };
         pull_into(&mbox, &mut feed, None);
-        let pulled = read_cursor(&mbox).unwrap();
+        let pulled = read_cursor(&mbox).unwrap().unwrap();
         let mine = BTreeSet::new();
         let run = |feed: &mut FakeFeed| {
             relabel(&state, "jon@y.example", &mine, feed, &mbox, pulled, RELABEL).unwrap()
@@ -1494,7 +1904,7 @@ mod tests {
         for m in &mut feed.messages {
             m.labels.push("Starred".into());
         }
-        let pulled = read_cursor(&mbox).unwrap();
+        let pulled = read_cursor(&mbox).unwrap().unwrap();
         relabel(
             &state,
             "jon@y.example",
@@ -1615,7 +2025,7 @@ mod tests {
 
         // starred later: its memory is made, private, by the re-read
         feed.messages[0].labels.push("Starred".into());
-        let pulled = read_cursor(&mbox).unwrap();
+        let pulled = read_cursor(&mbox).unwrap().unwrap();
         let (changed, new) = relabel(
             &state,
             "jon@y.example",
@@ -1686,7 +2096,7 @@ mod tests {
         assert_eq!(to_sort().len(), 1);
 
         feed.messages[0].labels.push("Starred".into());
-        let pulled = read_cursor(&mbox).unwrap();
+        let pulled = read_cursor(&mbox).unwrap().unwrap();
         let (changed, new) = relabel(
             &state,
             "jon@y.example",
@@ -1851,7 +2261,7 @@ mod tests {
             .unwrap());
 
         feed.messages[0].labels.push("Starred".into());
-        let pulled = read_cursor(&mbox).unwrap();
+        let pulled = read_cursor(&mbox).unwrap().unwrap();
         // the index busy once the memory is made: the list of messages still
         // to observe can't be read
         PENDING_UNREADABLE.with(|busy| busy.set(true));
@@ -2281,6 +2691,192 @@ mod tests {
         }
     }
 
+    /// Threads that wait (their mail can't be checked here) are looked up
+    /// once, not again by every later round: new mail is sorted without
+    /// walking the backlog's messages through the archives again — until a
+    /// waiting thread changes.
+    #[tokio::test]
+    async fn test_threads_found_waiting_are_not_looked_up_again_each_round() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_at(tmp.path());
+        let duty = crate::mail_triage::every_mailbox();
+        // another node's threads: none of their mail is here
+        let elsewhere = tmp.path().join("elsewhere.mbox");
+        std::fs::File::create(&elsewhere).unwrap();
+        crate::mbox_index::build(&elsewhere).unwrap();
+        let count = crate::mail_triage::BATCH as u32 * 2;
+        let mut backlog = FakeFeed {
+            messages: (1..=count)
+                .map(|n| {
+                    mail(
+                        n,
+                        &format!("old{n}@x"),
+                        None,
+                        &["Category Personal"],
+                        "the quarterly figures",
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        };
+        pull_into(&elsewhere, &mut backlog, None);
+        observe_as_pulled(&state, "jon@y.example", &backlog.messages);
+        let first = state
+            .store
+            .mail_thread_of_message("old1@x")
+            .unwrap()
+            .unwrap();
+        rusqlite::Connection::open(state.home.db_path())
+            .unwrap()
+            .execute("DELETE FROM mail_thread_messages", [])
+            .unwrap();
+
+        let archives = tmp.path().join("archives");
+        std::fs::create_dir_all(&archives).unwrap();
+        let mbox = archives.join("gmail-live.mbox");
+        std::fs::File::create(&mbox).unwrap();
+        crate::mbox_index::build(&mbox).unwrap();
+        let mut own = FakeFeed::default();
+        let mut sort_new = |n: u32| {
+            let id = format!("new{n}@x");
+            own.messages.push(mail(
+                100 + n,
+                &id,
+                None,
+                &["Category Personal"],
+                "lunch monday?",
+            ));
+            pull_into(&mbox, &mut own, None);
+            observe_as_pulled(
+                &state,
+                "jon@y.example",
+                &own.messages[own.messages.len() - 1..],
+            );
+            let thread = state.store.mail_thread_of_message(&id).unwrap().unwrap();
+            crate::mail_triage::stand_in_claude(
+                &state,
+                tmp.path(),
+                serde_json::json!([{
+                    "id": thread, "class": "fyi", "confidence": 0.9,
+                    "span": "lunch monday", "why": "A lunch."
+                }]),
+            );
+        };
+        let round = || crate::mail_triage::triage_for(&state, &duty);
+
+        sort_new(1);
+        assert_eq!(round().await.unwrap(), 1);
+        let looked = crate::mail_triage::archive_lookups(&state);
+        assert_eq!(looked, count as usize, "each waiting thread looked up once");
+        assert_eq!(round().await.unwrap(), 0);
+        sort_new(2);
+        assert_eq!(round().await.unwrap(), 1);
+        assert_eq!(crate::mail_triage::archive_lookups(&state), looked);
+
+        // a waiting thread that changes is looked at again
+        rusqlite::Connection::open(state.home.db_path())
+            .unwrap()
+            .execute(
+                "UPDATE mail_threads SET updated_at = '2099-01-01T00:00:00Z' WHERE id = ?1",
+                [&first],
+            )
+            .unwrap();
+        assert_eq!(round().await.unwrap(), 0);
+        assert_eq!(crate::mail_triage::archive_lookups(&state), looked + 1);
+    }
+
+    /// New mail behind a backlog of threads known to wait, pages of them
+    /// long, is sorted, and the round leaves the runtime free between those
+    /// pages: each is read on the blocking pool, with a pause after it.
+    #[tokio::test]
+    async fn test_paging_past_a_long_waiting_backlog_yields_between_pages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_at(tmp.path());
+        let duty = crate::mail_triage::every_mailbox();
+        // another node's threads: none of their mail is here
+        let elsewhere = tmp.path().join("elsewhere.mbox");
+        std::fs::File::create(&elsewhere).unwrap();
+        crate::mbox_index::build(&elsewhere).unwrap();
+        let count = crate::mail_triage::PAGE as u32 * 2 + 1;
+        let mut backlog = FakeFeed {
+            // all dated 10:00, ahead of the new mail
+            messages: (1..=count)
+                .map(|n| {
+                    mail(
+                        60 * n,
+                        &format!("old{n}@x"),
+                        None,
+                        &["Category Personal"],
+                        "the quarterly figures",
+                    )
+                })
+                .collect(),
+            ..Default::default()
+        };
+        pull_into(&elsewhere, &mut backlog, None);
+        observe_as_pulled(&state, "jon@y.example", &backlog.messages);
+        rusqlite::Connection::open(state.home.db_path())
+            .unwrap()
+            .execute("DELETE FROM mail_thread_messages", [])
+            .unwrap();
+
+        let archives = tmp.path().join("archives");
+        std::fs::create_dir_all(&archives).unwrap();
+        let mbox = archives.join("gmail-live.mbox");
+        std::fs::File::create(&mbox).unwrap();
+        crate::mbox_index::build(&mbox).unwrap();
+        let mut own = FakeFeed::default();
+        let mut sort_new = |n: u32| {
+            let id = format!("new{n}@x");
+            own.messages.push(mail(
+                1000 + n,
+                &id,
+                None,
+                &["Category Personal"],
+                "lunch monday?",
+            ));
+            pull_into(&mbox, &mut own, None);
+            observe_as_pulled(
+                &state,
+                "jon@y.example",
+                &own.messages[own.messages.len() - 1..],
+            );
+            let thread = state.store.mail_thread_of_message(&id).unwrap().unwrap();
+            crate::mail_triage::stand_in_claude(
+                &state,
+                tmp.path(),
+                serde_json::json!([{
+                    "id": thread, "class": "fyi", "confidence": 0.9,
+                    "span": "lunch monday", "why": "A lunch."
+                }]),
+            );
+        };
+        let round = || crate::mail_triage::triage_for(&state, &duty);
+        // the first round finds every old thread waiting
+        sort_new(1);
+        assert_eq!(round().await.unwrap(), 1);
+
+        // the next: two full pages known to wait, then the new mail
+        sort_new(2);
+        let start = crate::mail_triage::pages_read(&state);
+        let seen = std::sync::Arc::new(Mutex::new(std::collections::BTreeSet::new()));
+        let ticker = tokio::spawn({
+            let (state, seen) = (state.clone(), seen.clone());
+            async move {
+                loop {
+                    let read = crate::mail_triage::pages_read(&state) - start;
+                    seen.lock().unwrap().insert(read);
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+        assert_eq!(round().await.unwrap(), 1);
+        ticker.abort();
+        assert_eq!(crate::mail_triage::pages_read(&state) - start, 3);
+        let seen = seen.lock().unwrap().clone();
+        assert!(seen.contains(&1) && seen.contains(&2), "{seen:?}");
+    }
+
     /// The thread index read failing before a model is asked fails the
     /// round: nothing goes to the model. Once it reads again, the round runs.
     #[tokio::test]
@@ -2538,14 +3134,19 @@ mod tests {
                 )
             })
             .collect();
+        state
+            .store
+            .add_privacy_rule(&Actor::new("human:test"), "term", "test results")
+            .unwrap();
         let reads = || crate::virtual_source::NOT_BARE_READS.with(|n| n.get());
+        let rule_reads = || crate::virtual_source::RULE_READS.with(|n| n.get());
         let before = reads();
+        let rules_before = rule_reads();
         let privacy = crate::virtual_source::MailPrivacy::new(&state);
         let seen: Vec<_> = messages
             .iter()
             .filter_map(|m| {
                 crate::mail_triage::seen_with(
-                    &state,
                     &privacy,
                     "jon@y.example",
                     &BTreeSet::new(),
@@ -2556,6 +3157,9 @@ mod tests {
             .collect();
         assert_eq!(seen.len(), 6);
         assert_eq!(reads() - before, 1);
+        // the rules too, once for the batch
+        assert_eq!(rule_reads() - rules_before, 1);
+        assert!(seen.iter().all(|s| !s.private));
         assert!(crate::mail_triage::observe(&state, &seen).is_empty());
         assert_eq!(reads() - before, 2);
     }
@@ -2590,7 +3194,7 @@ mod tests {
         // starred later; the newest-mail window doesn't hold it
         feed.window = Some(vec![]);
         feed.messages[0].labels.push("Starred".into());
-        let pulled = read_cursor(&mbox).unwrap();
+        let pulled = read_cursor(&mbox).unwrap().unwrap();
         let (plan, gained) = plan_for(&mut feed, &mbox, pulled, RELABEL);
         assert_eq!(
             plan.drafts
@@ -2629,7 +3233,7 @@ mod tests {
             ..Default::default()
         };
         pull_into(&mbox, &mut feed, None);
-        let pulled = read_cursor(&mbox).unwrap();
+        let pulled = read_cursor(&mbox).unwrap().unwrap();
         let mine = BTreeSet::new();
         let run = |feed: &mut FakeFeed| {
             relabel(&state, "jon@y.example", &mine, feed, &mbox, pulled, RELABEL)
@@ -2736,6 +3340,159 @@ mod tests {
         assert!(pending_observations(&mbox).unwrap().is_empty());
     }
 
+    /// The first sort of a mailbox reads its recent archived mail as bytes,
+    /// so a rule's word in a legacy charset still matches; and a message it
+    /// couldn't record is left for the next pull, not dropped.
+    #[test]
+    fn test_the_first_sort_reads_mail_as_archived_and_keeps_what_it_missed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_at(tmp.path());
+        state
+            .store
+            .add_privacy_rule(&Actor::new("human:test"), "term", "für")
+            .unwrap();
+        let mb = mailboxes::from_vars([
+            ("GMAIL_IMAP_USER".to_string(), "jon@y.example".to_string()),
+            ("GMAIL_IMAP_PASSWORD".to_string(), "pw".to_string()),
+        ])
+        .remove(0);
+        let mbox = mb.live_mbox_path(&state);
+        std::fs::create_dir_all(mbox.parent().unwrap()).unwrap();
+        std::fs::File::create(&mbox).unwrap();
+        crate::mbox_index::build(&mbox).unwrap();
+        let date = (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc2822();
+        let recent = |uid: u32, id: &str, charset: &str, body: &[u8]| {
+            let mut raw = format!(
+                "From: Ann <ann@x.example>\r\nTo: Jon <jon@y.example>\r\nSubject: news {uid}\r\n\
+                 Date: {date}\r\nMessage-ID: <{id}>\r\n\
+                 Content-Type: text/plain; charset={charset}\r\n\r\n"
+            )
+            .into_bytes();
+            raw.extend_from_slice(body);
+            raw.extend_from_slice(b"\r\n");
+            PulledMessage {
+                uid,
+                labels: vec!["Category Personal".into()],
+                raw,
+            }
+        };
+        let mut feed = FakeFeed {
+            messages: vec![
+                recent(1, "latin@x", "iso-8859-1", b"Die Ergebnisse f\xfcr Sie."),
+                recent(2, "missed@x", "utf-8", b"see you then"),
+            ],
+            ..Default::default()
+        };
+        pull_into(&mbox, &mut feed, None);
+        crate::mail_triage::OBSERVE_FAILS.with(|ids| ids.borrow_mut().insert("missed@x".into()));
+        let read = crate::mail_triage::backfill(&state, &mb);
+        crate::mail_triage::OBSERVE_FAILS.with(|ids| ids.borrow_mut().clear());
+        assert_eq!(read.unwrap(), 2);
+        // the rule matched: the thread is there, and private
+        let thread = state
+            .store
+            .mail_thread_of_message("latin@x")
+            .unwrap()
+            .unwrap();
+        assert!(state.store.mail_thread(&thread).unwrap().is_none());
+        // the one not recorded waits for the next pull, which records it
+        assert_eq!(pending_observations(&mbox).unwrap(), vec!["missed@x"]);
+        let pending = pending_observations(&mbox).unwrap();
+        observe_pending(&state, "jon@y.example", &BTreeSet::new(), &mbox, pending).unwrap();
+        assert!(state
+            .store
+            .mail_thread_of_message("missed@x")
+            .unwrap()
+            .is_some());
+        assert!(pending_observations(&mbox).unwrap().is_empty());
+    }
+
+    /// An index that can't be read is an error for the pull's cursor, the
+    /// re-read's schedule and its position in the archive — never "none
+    /// recorded", which would fetch the backfill window again or start the
+    /// stretch over.
+    #[test]
+    fn test_an_unreadable_index_is_never_read_as_nothing_recorded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mbox = tmp.path().join("gmail-live.mbox");
+        std::fs::File::create(&mbox).unwrap();
+        crate::mbox_index::build(&mbox).unwrap();
+        let mut feed = FakeFeed {
+            messages: (1..=3)
+                .map(|u| message(u, &format!("m{u}@x"), &["Category Promotions"]))
+                .collect(),
+            ..Default::default()
+        };
+        pull_into(&mbox, &mut feed, None);
+        let pulled = read_cursor(&mbox).unwrap().unwrap();
+        crate::mbox_index::meta_set(&mbox, SWEEP_KEY, "2").unwrap();
+        crate::mbox_index::meta_set(&mbox, RELABEL_KEY, "0").unwrap();
+        let index = rusqlite::Connection::open(crate::mbox_index::index_path(&mbox)).unwrap();
+        index
+            .execute_batch("ALTER TABLE meta RENAME TO meta_aside")
+            .unwrap();
+        assert!(read_cursor(&mbox).is_err());
+        assert!(relabel_due(&mbox).is_err());
+        index
+            .execute_batch("ALTER TABLE meta_aside RENAME TO meta")
+            .unwrap();
+        assert_eq!(read_cursor(&mbox).unwrap(), Some(pulled));
+        assert!(relabel_due(&mbox).unwrap());
+        // the stretch's position unreadable a moment: no re-read, rather
+        // than one from the archive's beginning
+        let limits = RelabelLimits {
+            sweep: 1,
+            ..RELABEL
+        };
+        SWEEP_UNREADABLE.with(|busy| busy.set(true));
+        let busy = relabel_plan(&mut feed, &mbox, pulled, limits, &[], |_, _, _| {});
+        SWEEP_UNREADABLE.with(|busy| busy.set(false));
+        assert!(busy.is_err());
+        // the stretch goes on from where it was
+        let plan = relabel_plan(&mut feed, &mbox, pulled, limits, &[], |_, _, _| {}).unwrap();
+        assert_eq!(plan.sweep_next, 3);
+    }
+
+    /// Mail already waiting to be observed is observed from the archive's
+    /// index by the next pull, even when that pull can't reach Gmail.
+    #[tokio::test]
+    async fn test_mail_still_to_observe_does_not_wait_on_gmail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = state_at(tmp.path());
+        let mb = mailboxes::from_vars([
+            ("GMAIL_IMAP_USER".to_string(), "jon@y.example".to_string()),
+            ("GMAIL_IMAP_PASSWORD".to_string(), "pw".to_string()),
+        ])
+        .remove(0);
+        let mbox = mb.live_mbox_path(&state);
+        std::fs::create_dir_all(mbox.parent().unwrap()).unwrap();
+        std::fs::File::create(&mbox).unwrap();
+        crate::mbox_index::build(&mbox).unwrap();
+        let mut feed = FakeFeed {
+            messages: vec![mail(
+                1,
+                "waiting@x",
+                None,
+                &["Category Personal"],
+                "can you call me?",
+            )],
+            ..Default::default()
+        };
+        pull_into(&mbox, &mut feed, None);
+        crate::mbox_index::meta_set(&mbox, PENDING_KEY, r#"["waiting@x"]"#).unwrap();
+
+        CONNECT_FAILS.with(|fails| fails.set(true));
+        let pulled = pull_once(&state, &mb);
+        CONNECT_FAILS.with(|fails| fails.set(false));
+        assert!(pulled.is_err());
+        assert!(state
+            .store
+            .mail_thread_of_message("waiting@x")
+            .unwrap()
+            .is_some());
+        assert!(pending_observations(&mbox).unwrap().is_empty());
+    }
+
     /// Two mailboxes pull into two archives with two cursors: one's
     /// progress never moves the other's, and a message both received is
     /// in both archives.
@@ -2763,14 +3520,14 @@ mod tests {
         };
         pull_into(&home, &mut home_feed, None);
         pull_into(&work, &mut work_feed, None);
-        assert_eq!(read_cursor(&home).unwrap().last_uid, 2);
-        assert_eq!(read_cursor(&work).unwrap().last_uid, 9);
+        assert_eq!(read_cursor(&home).unwrap().unwrap().last_uid, 2);
+        assert_eq!(read_cursor(&work).unwrap().unwrap().last_uid, 9);
         // more mail in one mailbox moves only its cursor
         home_feed.messages.push(message(3, "c@x", &[]));
-        let (_, outcome) = pull_into(&home, &mut home_feed, read_cursor(&home));
+        let (_, outcome) = pull_into(&home, &mut home_feed, read_cursor(&home).unwrap());
         assert_eq!(outcome.fetched, 1);
-        assert_eq!(read_cursor(&home).unwrap().last_uid, 3);
-        assert_eq!(read_cursor(&work).unwrap().last_uid, 9);
+        assert_eq!(read_cursor(&home).unwrap().unwrap().last_uid, 3);
+        assert_eq!(read_cursor(&work).unwrap().unwrap().last_uid, 9);
         for p in [&home, &work] {
             assert!(crate::mbox_index::fetch(p, "both@x", 100_000).is_ok());
         }

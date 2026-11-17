@@ -525,8 +525,10 @@ over; the old copy stays in the record behind it.
   memory is left (`ambiguous`). A message no local archive holds, or one
   with no Message-ID, is listed and left, and so is every message while an
   archive can't be read — its index out of date or unreadable, or its
-  drive not connected (`archive_error`; the notes name the archive). Run
-  it on the node that holds the archives.
+  drive not connected (`archive_error`; the notes name the archive). A
+  message a privacy rule matches, or one linking to more hosts than its
+  stored text has room for, ends private: it goes into the vault before
+  its corrected copy lands. Run it on the node that holds the archives.
 - `calendar --file <ics>…` — the files read by the current importer
   (they're sent to the node, so `--url` works): an event the .ics
   importer stored whose text differs (an alarm's attendee or description

@@ -60,21 +60,11 @@ async fn scan_once(state: &AppState) -> Result<()> {
         }
 
         tracing::info!("inbox: processing {name}");
-        let state_clone = state.clone();
-        let path_clone = path.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            process_file(
-                &state_clone.store,
-                &state_clone.home,
-                &state_clone.running,
-                &path_clone,
-            )
-        })
-        .await?;
+        let result = ingest_settled(state, &path).await?;
 
         match result {
-            Ok(summary) => {
-                tracing::info!("inbox: {name}: {summary}");
+            Ok(done) => {
+                tracing::info!("inbox: {name}: {}", done.summary);
                 move_to(&path, &inbox.join("processed"))?;
             }
             Err(err) => {
@@ -107,7 +97,32 @@ fn move_to(path: &Path, dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Ingest one dropped file (blocking context). Returns a human summary.
+/// Ingest one settled drop on the blocking pool. Records stored before
+/// that it moved into the vault are announced to the owner's other nodes
+/// at once (`privacy.changed`), as after a relabel by hand. The outer
+/// error: the ingest didn't finish (it panicked).
+async fn ingest_settled(state: &AppState, path: &Path) -> Result<Result<Processed>> {
+    let st = state.clone();
+    let path = path.to_path_buf();
+    let result =
+        tokio::task::spawn_blocking(move || process_file(&st.store, &st.home, &st.running, &path))
+            .await?;
+    if result.as_ref().is_ok_and(|done| done.vaulted > 0) {
+        crate::bus::touch(state, "privacy.changed");
+    }
+    Ok(result)
+}
+
+/// What ingesting one dropped file did.
+#[derive(Debug)]
+pub(crate) struct Processed {
+    /// A human summary.
+    pub summary: String,
+    /// Records stored before that it moved into the vault.
+    pub vaulted: usize,
+}
+
+/// Ingest one dropped file (blocking context).
 /// `running`: the single-flight registry — an export is staged only while
 /// no import reads its folder (`downloads::install_archive_dir`).
 pub(crate) fn process_file(
@@ -115,7 +130,7 @@ pub(crate) fn process_file(
     home: &hearthloom_core::Home,
     running: &crate::Running,
     path: &Path,
-) -> Result<String> {
+) -> Result<Processed> {
     let ext = path
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase())
@@ -251,7 +266,9 @@ fn extract_tgz(path: &Path, dest: &Path, budget: u64) -> Result<()> {
         if !kind.is_file() {
             continue;
         }
-        let size = entry.header().size().context("reading the archive")?;
+        // The size the member states: its PAX record's when it has one (a
+        // file past 8 GiB), which the header's own field doesn't show.
+        let size = entry.size();
         if written.saturating_add(size) > budget {
             return Err(anyhow!(
                 "the archive unpacks to more than the {} MB the disk can spare ({} at {} MB)",
@@ -345,11 +362,12 @@ fn ingest_tree(
     home: &hearthloom_core::Home,
     running: &crate::Running,
     root: &Path,
-) -> Result<String> {
+) -> Result<Processed> {
     let mut summaries = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     let mut found = 0usize;
     let mut done = 0usize;
+    let mut vaulted = 0usize;
     while let Some(dir) = stack.pop() {
         if let Some(key) = crate::downloads::detect_dir(&dir) {
             found += 1;
@@ -385,11 +403,13 @@ fn ingest_tree(
             }
             found += 1;
             match process_file(store, home, running, &path) {
-                Ok(summary) => {
+                Ok(file) => {
                     done += 1;
+                    vaulted += file.vaulted;
                     summaries.push(format!(
-                        "{}: {summary}",
-                        path.file_name().unwrap_or_default().to_string_lossy()
+                        "{}: {}",
+                        path.file_name().unwrap_or_default().to_string_lossy(),
+                        file.summary
                     ));
                 }
                 Err(err) => summaries.push(format!(
@@ -408,10 +428,18 @@ fn ingest_tree(
     if done == 0 {
         return Err(anyhow!(summaries.join("; ")));
     }
-    Ok(summaries.join("; "))
+    Ok(Processed {
+        summary: summaries.join("; "),
+        vaulted,
+    })
 }
 
-fn ingest_mbox(store: &Store, home: &hearthloom_core::Home, path: &Path) -> Result<String> {
+/// A message the import reads as private (a rule matches the whole of it,
+/// or it links to more hosts than the stored text holds) lands private, and
+/// leaves a copy stored before under its Message-ID as it is: what made it
+/// private can sit where the stored text doesn't reach, so the stored copy
+/// can't be shown to be the same message (gmail_pull.rs `apply_drafts`).
+fn ingest_mbox(store: &Store, home: &hearthloom_core::Home, path: &Path) -> Result<Processed> {
     let size = std::fs::metadata(path)?.len();
     if size > MBOX_AUTO_MAX_BYTES {
         return Err(anyhow!(
@@ -424,22 +452,43 @@ fn ingest_mbox(store: &Store, home: &hearthloom_core::Home, path: &Path) -> Resu
     }
     let mut new = 0usize;
     let mut existing = 0usize;
-    let total = hearthloom_adapters::mbox::ingest_batched(path, None, MBOX_BATCH, |batch| {
-        let report = store.apply_batch(
-            home,
-            &IngestBatch {
+    // copies stored before that a copy landing private took into the vault
+    // with it (the rest of its record)
+    let mut relabeled = 0usize;
+    // the privacy rules over each whole message (what is stored is cut),
+    // read again after each batch as the apply reads them
+    let rules = std::cell::RefCell::new(store.list_privacy_rules()?);
+    let total = hearthloom_adapters::mbox::ingest_batched_checked(
+        path,
+        None,
+        &hearthloom_adapters::mbox::LabelFilter::default(),
+        &|raw| crate::mbox_text::rules_match_message(&rules.borrow(), raw),
+        MBOX_BATCH,
+        |batch| {
+            let batch = IngestBatch {
                 actor: "adapter:mbox".into(),
                 session_id: None,
                 episodes: batch,
-            },
-        )?;
-        new += report.episodes_new;
-        existing += report.episodes_existing;
-        Ok(())
-    })?;
-    Ok(format!(
-        "{total} messages parsed, {new} new episodes ({existing} already present)"
-    ))
+            };
+            let report = store.apply_batch(home, &batch)?;
+            new += report.episodes_new;
+            existing += report.episodes_existing;
+            relabeled += report.private_copies;
+            *rules.borrow_mut() = store.list_privacy_rules()?;
+            Ok(())
+        },
+    )?;
+    Ok(Processed {
+        summary: format!(
+            "{total} messages parsed, {new} new episodes ({existing} already present){}",
+            if relabeled > 0 {
+                format!(", {relabeled} stored before now private")
+            } else {
+                String::new()
+            }
+        ),
+        vaulted: relabeled,
+    })
 }
 
 /// `flagged`: records the file reads as private without a draft of them
@@ -450,18 +499,17 @@ fn ingest_drafts(
     actor: &str,
     drafts: Vec<hearthloom_core::EpisodeDraft>,
     flagged: &[(String, String)],
-) -> Result<String> {
+) -> Result<Processed> {
     let count = drafts.len();
     // what the export reads as private, a copy stored before becomes too
-    let private: Vec<hearthloom_core::EpisodeDraft> = drafts
-        .iter()
-        .filter(|d| d.scope.as_deref() == Some("private"))
-        .cloned()
-        .collect();
+    let mut private = crate::local_import::private_refs(store, home, &drafts)?;
+    private.extend_from_slice(flagged);
     // a day stored before lands again only when fuller
     let drafts = crate::local_import::prepare(store, home, drafts)?;
     let mut new = 0usize;
     let mut existing = count - drafts.len();
+    // copies stored before that a copy landing private took into the vault
+    let mut relabeled = 0usize;
     for chunk in drafts.chunks(500) {
         let report = store.apply_batch(
             home,
@@ -473,17 +521,21 @@ fn ingest_drafts(
         )?;
         new += report.episodes_new;
         existing += report.episodes_existing;
+        relabeled += report.private_copies;
     }
-    let relabeled =
-        store.label_private_on_reimport(&hearthloom_core::Actor::new(actor), &private, flagged)?;
-    Ok(format!(
-        "{count} items parsed, {new} new episodes ({existing} already present){}",
-        if relabeled > 0 {
-            format!(", {relabeled} stored before now private")
-        } else {
-            String::new()
-        }
-    ))
+    relabeled +=
+        store.label_private_on_reimport(&hearthloom_core::Actor::new(actor), &[], &private)?;
+    Ok(Processed {
+        summary: format!(
+            "{count} items parsed, {new} new episodes ({existing} already present){}",
+            if relabeled > 0 {
+                format!(", {relabeled} stored before now private")
+            } else {
+                String::new()
+            }
+        ),
+        vaulted: relabeled,
+    })
 }
 
 #[cfg(test)]
@@ -645,7 +697,9 @@ mod tests {
                 Member::RawName("../hearthloom-untar-outside.txt", b"not written"),
             ],
         );
-        let summary = process_file(&store, &home, &Default::default(), &drop).unwrap();
+        let summary = process_file(&store, &home, &Default::default(), &drop)
+            .unwrap()
+            .summary;
         assert!(summary.contains("staged the openai export"), "{summary}");
         let staged = home.root().join("archives/openai");
         crate::downloads::only_plain_files(&staged).unwrap();
@@ -694,6 +748,52 @@ mod tests {
         );
     }
 
+    /// A member whose size is in a PAX record — how a tar writes a file
+    /// past 8 GiB, its header's own size field left 0 — unpacks whole, and
+    /// counts against the budget at that size.
+    #[test]
+    fn test_a_tgz_member_sized_by_a_pax_record_unpacks_whole() {
+        let tmp = tempfile::tempdir().unwrap();
+        let drop = tmp.path().join("pax.tgz");
+        let data = vec![b'x'; 3000];
+        {
+            let gz = flate2::write::GzEncoder::new(
+                std::fs::File::create(&drop).unwrap(),
+                flate2::Compression::fast(),
+            );
+            let mut tar = tar::Builder::new(gz);
+            // "<length of the whole record> size=<bytes>\n"
+            let record = format!("13 size={}\n", data.len());
+            assert_eq!(record.len(), 13);
+            let mut pax = tar::Header::new_ustar();
+            pax.set_entry_type(tar::EntryType::XHeader);
+            pax.set_path("PaxHeaders/export.xml").unwrap();
+            pax.set_mode(0o644);
+            pax.set_size(record.len() as u64);
+            pax.set_cksum();
+            tar.append(&pax, record.as_bytes()).unwrap();
+            let mut header = tar::Header::new_ustar();
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_path("apple_health_export/export.xml").unwrap();
+            header.set_mode(0o644);
+            header.set_size(0);
+            header.set_cksum();
+            tar.append(&header, &data[..]).unwrap();
+            tar.into_inner().unwrap().finish().unwrap();
+        }
+        let dest = tempfile::tempdir().unwrap();
+        extract_tgz(&drop, dest.path(), u64::MAX).unwrap();
+        let out = dest.path().join("apple_health_export/export.xml");
+        assert_eq!(std::fs::metadata(&out).unwrap().len(), 3000);
+
+        let dest = tempfile::tempdir().unwrap();
+        let err = extract_tgz(&drop, dest.path(), 1000)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("can spare"), "{err}");
+        assert!(!dest.path().join("apple_health_export/export.xml").exists());
+    }
+
     /// A zipped ChatGPT export in chunks (no single conversations.json) is
     /// staged for its adapter, which then reads every chunk.
     #[test]
@@ -721,7 +821,9 @@ mod tests {
                 ("chatgpt/conversations-001.json", &second),
             ],
         );
-        let summary = process_file(&store, &home, &Default::default(), &drop).unwrap();
+        let summary = process_file(&store, &home, &Default::default(), &drop)
+            .unwrap()
+            .summary;
         assert!(summary.contains("staged the openai export"), "{summary}");
         let staged = home.root().join("archives/openai");
         let drafts = hearthloom_adapters::openai::ingest(&staged, None, None).unwrap();
@@ -763,7 +865,9 @@ mod tests {
                 ("backup/chatgpt/conversations-000.json", &chunk),
             ],
         );
-        let summary = process_file(&store, &home, &Default::default(), &drop).unwrap();
+        let summary = process_file(&store, &home, &Default::default(), &drop)
+            .unwrap()
+            .summary;
         assert!(summary.contains("staged the openai export"), "{summary}");
         let (_, rows) = store
             .read_query(
@@ -797,6 +901,72 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("already exists"), "{err}");
+    }
+
+    /// A folder deep in a dropped archive named like a Notion export
+    /// (`Export-…`) but holding no Notion page is walked like any other:
+    /// its calendar and mail are imported, and nothing is staged as Notion.
+    /// A real Notion export at the same depth is still staged.
+    #[test]
+    fn test_a_folder_named_like_a_notion_export_is_still_walked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::Home::at(tmp.path().join("home"));
+        home.init().unwrap();
+        let store = Store::open(&home.db_path()).unwrap();
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:backup-1\r\nSUMMARY:Dentist\r\n\
+                   DTSTART:20240301T090000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let mbox = "From ada@example.com Fri Mar  1 09:00:00 2024\n\
+                    From: Ada <ada@example.com>\n\
+                    To: me@example.com\n\
+                    Subject: Lunch\n\
+                    Message-ID: <backup-mail-1@example.com>\n\
+                    Date: Fri, 1 Mar 2024 09:00:00 +0000\n\
+                    \n\
+                    Lunch on Friday?\n";
+        let drop = tmp.path().join("backup.zip");
+        write_zip(
+            &drop,
+            &[
+                ("Backups/Export-2024-03/calendar.ics", ics),
+                ("Backups/Export-2024-03/mail.mbox", mbox),
+            ],
+        );
+        let summary = process_file(&store, &home, &Default::default(), &drop)
+            .unwrap()
+            .summary;
+        assert!(!summary.contains("notion"), "{summary}");
+        assert!(summary.contains("calendar.ics: "), "{summary}");
+        assert!(summary.contains("mail.mbox: "), "{summary}");
+        assert!(!home.root().join("archives/notion").exists());
+        let (_, rows) = store
+            .read_query(
+                "SELECT source FROM episodes /* all-episodes: what the drop stored */ \
+                 ORDER BY source",
+                10,
+            )
+            .unwrap();
+        let sources: Vec<String> = rows
+            .iter()
+            .map(|row| row[0].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(sources, ["ics", "mbox"]);
+
+        let notion = tmp.path().join("notion.zip");
+        write_zip(
+            &notion,
+            &[(
+                "Backups/Export-2024-04/Roadmap 11112222333344445555666677778888.md",
+                "# Roadmap",
+            )],
+        );
+        let summary = process_file(&store, &home, &Default::default(), &notion)
+            .unwrap()
+            .summary;
+        assert!(summary.contains("staged the notion export"), "{summary}");
+        assert!(home
+            .root()
+            .join("archives/notion/Roadmap 11112222333344445555666677778888.md")
+            .is_file());
     }
 
     /// A conversation stored outside the vault and read again as "do not
@@ -857,7 +1027,9 @@ mod tests {
         store.vault_unlock(15); // the read below sees private rows too
 
         std::fs::write(&file, export(true)).unwrap();
-        let summary = process_file(&store, &home, &Default::default(), &file).unwrap();
+        let summary = process_file(&store, &home, &Default::default(), &file)
+            .unwrap()
+            .summary;
         assert!(summary.contains("2 stored before now private"), "{summary}");
         assert_eq!(scope_and_hash("chatlog-chatgpt"), ("private".into(), hash));
         assert_eq!(scope_and_hash("openai").0, "private");
@@ -956,7 +1128,9 @@ mod tests {
         std::fs::create_dir_all(&drop_dir).unwrap();
         let file = drop_dir.join("conversations.json");
         std::fs::write(&file, export.to_string()).unwrap();
-        let summary = process_file(&store, &home, &Default::default(), &file).unwrap();
+        let summary = process_file(&store, &home, &Default::default(), &file)
+            .unwrap()
+            .summary;
         assert!(summary.contains("1 new episodes"), "{summary}");
         assert!(summary.contains("2 stored before now private"), "{summary}");
         assert_eq!(
@@ -965,6 +1139,48 @@ mod tests {
         );
         assert_eq!(scope_of("openai", "c9").as_deref(), Some("private"));
         assert!(scope_of("chatlog-chatgpt", "c10").is_some_and(|s| s != "private"));
+    }
+
+    /// A drop that moves a stored copy into the vault tells the owner's
+    /// other nodes at once (`privacy.changed`); one that moves nothing
+    /// doesn't.
+    #[tokio::test]
+    async fn test_a_drop_that_vaults_a_stored_copy_announces_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::Home::at(tmp.path().join("home"));
+        home.init().unwrap();
+        let state = AppState {
+            store: std::sync::Arc::new(Store::open(&home.db_path()).unwrap()),
+            home,
+            embedder: None,
+            llm: None,
+            auth_locked: Default::default(),
+            bus: Default::default(),
+            killswitch: Default::default(),
+            running: Default::default(),
+        };
+        let export = |flagged: bool| {
+            serde_json::json!([{
+                "conversation_id": "c9", "title": "Clinic visit",
+                "create_time": 1720992777.0, "is_do_not_remember": flagged,
+                "mapping": {"n1": {"message": {"author": {"role": "user"},
+                    "create_time": 1720992778.0, "content": {"parts": ["about the results"]}}}}
+            }])
+            .to_string()
+        };
+        let drop_dir = tmp.path().join("drop");
+        std::fs::create_dir_all(&drop_dir).unwrap();
+        let file = drop_dir.join("conversations.json");
+
+        std::fs::write(&file, export(false)).unwrap();
+        let done = ingest_settled(&state, &file).await.unwrap().unwrap();
+        assert_eq!(done.vaulted, 0);
+        assert!(!state.bus.touched("privacy.changed"));
+
+        std::fs::write(&file, export(true)).unwrap();
+        let done = ingest_settled(&state, &file).await.unwrap().unwrap();
+        assert!(done.vaulted > 0, "{}", done.summary);
+        assert!(state.bus.touched("privacy.changed"));
     }
 
     #[test]
@@ -979,6 +1195,150 @@ mod tests {
         file.set_len(MBOX_AUTO_MAX_BYTES + 1).unwrap();
         let err = ingest_mbox(&store, &home, &path).unwrap_err().to_string();
         assert!(err.contains("filtered pipeline"), "got: {err}");
+    }
+
+    /// A dropped mbox: a privacy rule naming a domain only the part of a
+    /// link the stored text leaves out names (the stored text keeps its
+    /// host; an image address of 65,535 bytes before it takes the targets'
+    /// whole room, or the link alone is longer than the room) makes the
+    /// memory private; a message no rule matches stays as it was inferred.
+    #[test]
+    fn test_a_rule_matching_a_link_left_out_of_the_stored_text_makes_the_memory_private() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::Home::at(tmp.path());
+        home.init().unwrap();
+        let store = Store::open(&home.db_path()).unwrap();
+        store
+            .add_privacy_rule(
+                &hearthloom_core::Actor::new("human:test"),
+                "domain",
+                "clinic-one.example",
+            )
+            .unwrap();
+        let prefix = "https://track.example/p?d=";
+        let filler = format!("{prefix}{}", "a".repeat(65_535 - prefix.len()));
+        let message = |id: &str, html: &str| {
+            format!(
+                "From ann@x.example Mon Jan 05 10:00:00 2026\n\
+                 From: Ann <ann@x.example>\nTo: Jon <jon@y.example>\nSubject: your visit\n\
+                 Date: Mon, 05 Jan 2026 10:00:00 -0400\nMessage-ID: <{id}>\n\
+                 Content-Type: text/html; charset=utf-8\n\n{html}\n\n"
+            )
+        };
+        let mbox = [
+            message(
+                "filled@x",
+                &format!(
+                    "<p><img src=\"{filler}\">Your results are ready: \
+                     <a href=\"https://go.example/r?to=portal.clinic-one.example\">view them</a></p>"
+                ),
+            ),
+            message(
+                "long@x",
+                &format!(
+                    "<p>Your results are ready: \
+                     <a href=\"https://go.example/r?to=portal.clinic-one.example&d={}\">view them</a></p>",
+                    "a".repeat(70_000)
+                ),
+            ),
+            message(
+                "other@x",
+                "<p><a href=\"https://other.example/r\">view them</a></p>",
+            ),
+        ]
+        .concat();
+        let path = tmp.path().join("mail.mbox");
+        std::fs::write(&path, mbox).unwrap();
+        ingest_mbox(&store, &home, &path).unwrap();
+        let refs = ["filled@x", "long@x", "other@x"].map(String::from);
+        assert_eq!(
+            store.private_source_refs("mbox", &refs).unwrap(),
+            std::collections::HashSet::from(["filled@x".to_string(), "long@x".to_string()])
+        );
+        // stored, and the stored text doesn't name the domain
+        store.vault_unlock(15);
+        for id in &refs[..2] {
+            let stored = store
+                .episode_body(&hearthloom_core::ids::episode_id("mbox", id))
+                .unwrap()
+                .unwrap();
+            assert!(!stored.contains("clinic-one"), "{id}");
+        }
+    }
+
+    /// A dropped mbox whose message a privacy rule matches leaves the copy
+    /// stored before under its Message-ID as it is — also the same message,
+    /// stored by an earlier version without the link the rule names: the
+    /// stored copy doesn't reach what the rule matched, and other mail
+    /// under that Message-ID compares the same there.
+    #[tokio::test]
+    async fn test_a_dropped_mbox_leaves_the_copy_stored_before_as_it_is() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = hearthloom_core::Home::at(tmp.path().join("home"));
+        home.init().unwrap();
+        let state = AppState {
+            store: std::sync::Arc::new(Store::open(&home.db_path()).unwrap()),
+            home,
+            embedder: None,
+            llm: None,
+            auth_locked: Default::default(),
+            bus: Default::default(),
+            killswitch: Default::default(),
+            running: Default::default(),
+        };
+        let drop_dir = tmp.path().join("drop");
+        std::fs::create_dir_all(&drop_dir).unwrap();
+        let file = drop_dir.join("mail.mbox");
+        std::fs::write(
+            &file,
+            "From ann@x.example Mon Jan 05 10:00:00 2026\n\
+             From: Ann <ann@x.example>\nTo: Jon <jon@y.example>\nSubject: your visit\n\
+             Date: Mon, 05 Jan 2026 10:00:00 -0400\nMessage-ID: <visit@x>\n\
+             Content-Type: text/html; charset=utf-8\n\n\
+             <p>Your results are ready: \
+             <a href=\"https://portal.clinic-one.example/r\">view them</a></p>\n\n",
+        )
+        .unwrap();
+        // the copy an earlier version stored: the text, without the links
+        let mut drafts = hearthloom_adapters::mbox::ingest(&file, None).unwrap();
+        let links = drafts[0].body.find("\n\nlinks:").unwrap();
+        drafts[0].body.truncate(links);
+        state
+            .store
+            .apply_batch(
+                &state.home,
+                &IngestBatch {
+                    actor: "adapter:mbox".into(),
+                    session_id: None,
+                    episodes: drafts,
+                },
+            )
+            .unwrap();
+        state
+            .store
+            .add_privacy_rule(
+                &hearthloom_core::Actor::new("human:test"),
+                "domain",
+                "clinic-one.example",
+            )
+            .unwrap();
+        let private = || {
+            state
+                .store
+                .private_source_refs("mbox", &["visit@x".to_string()])
+                .unwrap()
+        };
+        assert!(private().is_empty());
+
+        let done = ingest_settled(&state, &file).await.unwrap().unwrap();
+        assert!(private().is_empty(), "{}", done.summary);
+        assert_eq!(done.vaulted, 0, "{}", done.summary);
+        assert!(
+            !done.summary.contains("stored before now private"),
+            "{}",
+            done.summary
+        );
+        assert!(!state.bus.touched("privacy.changed"));
     }
 
     /// A Messages database dropped into the inbox is a copy that won't

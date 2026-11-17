@@ -229,6 +229,21 @@ fn take_over(conn: &rusqlite::Connection, earlier: &str, p: &PhotoPointIn) -> Re
     Ok(had)
 }
 
+/// The photo once stored under `earlier` was taken over before, and
+/// nothing is stored under that key here: a scan naming it again has
+/// nothing to move (a key recorded as replaced is never stored again, as a
+/// point or an observation). One lookup, so a scan read again over a whole
+/// library costs next to nothing for its earlier keys.
+fn taken_over(conn: &rusqlite::Connection, earlier: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM photo_replaced WHERE key = ?1)
+            AND NOT EXISTS(SELECT 1 FROM photo_point WHERE key = ?1)
+            AND NOT EXISTS(SELECT 1 FROM location_observation WHERE id = 'photos|' || ?1)",
+        [earlier],
+        |r| r.get(0),
+    )?)
+}
+
 /// The minted ledger row: (count, keys_hash, episode_id, revision).
 pub type PhotoDayState = (i64, String, Option<String>, i64);
 
@@ -337,7 +352,7 @@ impl Store {
                         .as_deref()
                         .filter(|e| *e != p.key && same_second(e, &p.key))
                     {
-                        if take_over(&tx, earlier, p)? {
+                        if !taken_over(&tx, earlier)? && take_over(&tx, earlier, p)? {
                             days.extend(point_entry(&tx, &p.key)?.map(|(day, _)| day));
                             duplicates += 1;
                             continue;
@@ -350,25 +365,31 @@ impl Store {
                     let day = chrono::DateTime::from_timestamp(local, 0)
                         .map(|dt| dt.format("%Y-%m-%d").to_string())
                         .ok_or_else(|| anyhow!("unrepresentable taken_at"))?;
-                    let changed = tx.execute(
-                        "INSERT OR IGNORE INTO photo_point
-                             (key, filename, at_unix, tz_offset_minutes, lat, lon, place,
-                              device, day, ingest_time, rowid)
-                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-                        rusqlite::params![
-                            p.key,
-                            p.filename,
-                            at_unix,
-                            p.tz_offset_minutes,
-                            p.lat,
-                            p.lon,
-                            p.place,
-                            device,
-                            day,
-                            now_utc(),
-                            next_position(&tx)?
-                        ],
-                    )?;
+                    // a scan read again names every photo it stored before:
+                    // looked up first, so those take no export position
+                    let stored = point_entry(&tx, &p.key)?;
+                    let changed = match stored {
+                        Some(_) => 0,
+                        None => tx.execute(
+                            "INSERT OR IGNORE INTO photo_point
+                                 (key, filename, at_unix, tz_offset_minutes, lat, lon, place,
+                                  device, day, ingest_time, rowid)
+                             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                            rusqlite::params![
+                                p.key,
+                                p.filename,
+                                at_unix,
+                                p.tz_offset_minutes,
+                                p.lat,
+                                p.lon,
+                                p.place,
+                                device,
+                                day,
+                                now_utc(),
+                                next_position(&tx)?
+                            ],
+                        )?,
+                    };
                     // the day of the point kept under this key, stored now
                     // or before: a feed read again after a stop between this
                     // commit and the settling below changes nothing here,
@@ -378,7 +399,7 @@ impl Store {
                         days.insert(day.clone());
                     } else {
                         duplicates += 1;
-                        days.extend(point_entry(&tx, &p.key)?.map(|(day, _)| day));
+                        days.extend(stored.map(|(day, _)| day));
                     }
                     // v51 dual-write: geotagged points also land in the
                     // unified observation layer the visit pass clusters
@@ -1389,6 +1410,53 @@ mod tests {
             .unwrap();
         let rows = stmt.query_map([], |r| r.get(0)).unwrap();
         rows.collect::<std::result::Result<_, _>>().unwrap()
+    }
+
+    /// How many statements `f` runs on the store's connection.
+    fn statements_run(store: &Store, f: impl FnOnce()) -> usize {
+        super::super::trace::work_of(store, f).statements()
+    }
+
+    /// A scan read again over photos whose earlier keys it took over
+    /// before costs one lookup more per photo than a feed naming none —
+    /// nothing is moved, recorded or positioned again.
+    #[test]
+    fn test_a_scan_read_again_passes_over_earlier_keys_taken_over() {
+        let store = Store::open_in_memory().unwrap();
+        let names: Vec<(String, String)> = (0..50)
+            .map(|i| (format!("IMG_{i}.HEIC"), format!("LIB-{i}.heic")))
+            .collect();
+        let library: Vec<PhotoPointIn> = names.iter().map(|(_, lib)| at(lib)).collect();
+        store.photos_add_points("mac", &library).unwrap();
+        let scan: Vec<PhotoPointIn> = names
+            .iter()
+            .map(|(original, lib)| scanned(original, lib))
+            .collect();
+        assert_eq!(store.photos_add_points("mac", &scan).unwrap(), (0, 50));
+        let plain: Vec<PhotoPointIn> = scan
+            .iter()
+            .map(|p| PhotoPointIn {
+                earlier_key: None,
+                ..p.clone()
+            })
+            .collect();
+        let without = statements_run(&store, || {
+            assert_eq!(store.photos_add_points("mac", &plain).unwrap(), (0, 50));
+        });
+        let again = statements_run(&store, || {
+            assert_eq!(store.photos_add_points("mac", &scan).unwrap(), (0, 50));
+        });
+        assert!(
+            again <= without + scan.len(),
+            "{again} statements, {without} naming no earlier key"
+        );
+        let expected: Vec<String> = names
+            .iter()
+            .map(|(original, _)| format!("1750000000|{original}"))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        assert_eq!(keys(&store), expected);
     }
 
     /// A Mac point keyed by its original name joins the phone's point for
